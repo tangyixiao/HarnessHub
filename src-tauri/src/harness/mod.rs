@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod adapters;
+pub mod probe;
 pub mod registry;
 
 pub use adapter::{
