@@ -1,0 +1,63 @@
+import { render, screen } from '@testing-library/react';
+import { RouterProvider, createMemoryRouter } from 'react-router-dom';
+import { describe, expect, it } from 'vitest';
+
+import { routes } from '@/app/routes';
+
+function renderAt(path: string) {
+  const router = createMemoryRouter(routes, { initialEntries: [path] });
+  return render(<RouterProvider router={router} />);
+}
+
+const NAV_LABELS = [
+  'Dashboard',
+  'Harnesses',
+  'Projects',
+  'Sessions',
+  'Terminal',
+  'Activity',
+  'Settings',
+];
+
+describe('AppShell', () => {
+  it('渲染全部主导航项', async () => {
+    renderAt('/');
+
+    for (const label of NAV_LABELS) {
+      expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
+    }
+
+    // Dashboard 的 IPC 探测是异步的；等它落地，避免 React act() 警告。
+    expect(await screen.findByText(/请用 pnpm tauri dev 启动桌面应用/)).toBeInTheDocument();
+  });
+
+  it('浏览器模式下明确提示 IPC 不可用，而不是静默失败', async () => {
+    renderAt('/');
+
+    expect(screen.getByText('浏览器模式 · IPC 不可用')).toBeInTheDocument();
+    expect(await screen.findByText(/请用 pnpm tauri dev 启动桌面应用/)).toBeInTheDocument();
+  });
+
+  it('每个导航目标都能渲染对应页面标题', () => {
+    const paths: Array<[string, string]> = [
+      ['/harnesses', 'Harnesses'],
+      ['/projects', 'Projects'],
+      ['/sessions', 'Sessions'],
+      ['/terminal', 'Terminal'],
+      ['/activity', 'Activity'],
+      ['/settings', 'Settings'],
+      ['/', 'Dashboard'],
+    ];
+
+    for (const [path, heading] of paths) {
+      const { unmount } = renderAt(path);
+      expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('未接入的功能页面如实说明尚未接入，不展示假数据', () => {
+    renderAt('/harnesses');
+    expect(screen.getByText('尚未接入')).toBeInTheDocument();
+  });
+});

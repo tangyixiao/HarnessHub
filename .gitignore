@@ -1,0 +1,49 @@
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.pnpm-store/
+.eslintcache
+
+# Rust
+target/
+src-tauri/target/
+# tauri-build 生成的 capability schema（由构建重新生成）
+src-tauri/gen/schemas/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+.ruff_cache/
+.pytest_cache/
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local databases and runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Logs / coverage
+*.log
+coverage/
+test-results/
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db

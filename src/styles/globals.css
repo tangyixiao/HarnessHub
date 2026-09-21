@@ -1,0 +1,41 @@
+@import 'tailwindcss';
+
+/*
+ * Harness Hub 设计令牌。
+ * 刻意保持小集合：骨架阶段只需要"可读、稳定、深色优先"。
+ */
+@theme {
+  --color-surface-base: oklch(0.19 0.012 265);
+  --color-surface-raised: oklch(0.24 0.014 265);
+  --color-surface-overlay: oklch(0.28 0.016 265);
+  --color-border-subtle: oklch(0.34 0.014 265);
+  --color-content-primary: oklch(0.97 0.004 265);
+  --color-content-muted: oklch(0.72 0.012 265);
+  --color-accent: oklch(0.72 0.14 250);
+  --color-accent-strong: oklch(0.64 0.17 250);
+  --color-signal-ok: oklch(0.75 0.15 155);
+  --color-signal-warn: oklch(0.8 0.15 85);
+  --color-signal-error: oklch(0.68 0.18 25);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-surface-base);
+    color: var(--color-content-primary);
+    font-family:
+      'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, 'Noto Sans SC', sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-accent) 35%, transparent);
+  }
+}

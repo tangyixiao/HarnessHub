@@ -1,0 +1,18 @@
+[project]
+name = "harness-hub-runtime"
+version = "0.0.0"
+description = "Harness Hub AI Runtime sidecar（通过 stdio JSON-RPC 与 Rust Control Plane 通信）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# 刻意保持零第三方依赖：v0.1 只要求架构上预留 sidecar，
+# LiteLLM / 官方 SDK / MCP / HF 等依赖在 Phase 8 按需引入，避免桌面发行包过早膨胀（风险 R9）。
+dependencies = []
+
+[tool.uv]
+# 不把本目录当成需要构建安装的包：以源码目录方式运行，减少构建复杂度。
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

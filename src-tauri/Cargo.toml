@@ -1,0 +1,28 @@
+[package]
+name = "harness-hub"
+version = "0.0.0"
+description = "Harness Hub — local-first control plane for AI coding harnesses"
+authors = ["Harness Hub contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+
+[lib]
+name = "harness_hub_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "harness-hub"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = "2"
+thiserror = "2.0.20"
+uuid = { version = "1.20.0", features = ["v4"] }
