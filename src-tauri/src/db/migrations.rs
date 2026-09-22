@@ -37,6 +37,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0002_session_created_and_harness_installations.sql"),
         foreign_keys_off: true,
     },
+    Migration {
+        version: 3,
+        name: "0003_session_installation_runtime_consistency",
+        sql: include_str!("migrations/0003_session_installation_runtime_consistency.sql"),
+        foreign_keys_off: true,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -84,7 +90,7 @@ pub fn latest_version() -> u32 {
 
 /// 应用所有尚未执行的迁移，返回本次新应用的名字。
 pub fn apply_pending(conn: &mut Connection) -> Result<Vec<String>> {
-    apply_until(conn, latest_version())
+    apply_migrations(conn, MIGRATIONS, latest_version())
 }
 
 /// 应用到指定版本为止。
@@ -92,10 +98,22 @@ pub fn apply_pending(conn: &mut Connection) -> Result<Vec<String>> {
 /// 生产代码只用 [`apply_pending`]；这个入口存在的意义是让迁移测试可以
 /// 「先建到 v1、塞入旧数据、再升到 v2」，从而验证迁移本身而不是只验证最终 schema。
 pub fn apply_until(conn: &mut Connection, target_version: u32) -> Result<Vec<String>> {
+    apply_migrations(conn, MIGRATIONS, target_version)
+}
+
+/// 迁移序列由参数传入。
+///
+/// 抽成参数是为了让测试能注入一条**故意失败**的迁移，从而验证
+/// `foreign_keys_off` 的失败路径：无论迁移成败，`PRAGMA foreign_keys` 都必须恢复为 ON。
+fn apply_migrations(
+    conn: &mut Connection,
+    migrations: &[Migration],
+    target_version: u32,
+) -> Result<Vec<String>> {
     let current = current_version(conn)?;
     let mut applied = Vec::new();
 
-    for migration in MIGRATIONS
+    for migration in migrations
         .iter()
         .filter(|item| item.version > current && item.version <= target_version)
     {
@@ -126,8 +144,20 @@ pub fn apply_until(conn: &mut Connection, target_version: u32) -> Result<Vec<Str
         })();
 
         if foreign_keys_was_on {
-            conn.pragma_update(None, "foreign_keys", "ON")?;
+            // 必须**无条件**恢复外键：迁移失败不能让它永久停在 OFF。
+            // 这一步失败是严重状态，必须显式报出来，不能静默早退。
+            if let Err(restore_error) = conn.pragma_update(None, "foreign_keys", "ON") {
+                return Err(Error::Migration(format!(
+                    "{} 之后无法恢复外键约束（连接可能停在外键关闭状态）：{restore_error}",
+                    migration.name
+                )));
+            }
+        }
 
+        // 先报迁移自身的失败原因，避免被下面的外键检查掩盖。
+        outcome?;
+
+        if foreign_keys_was_on {
             // 重建表之后必须确认没有留下悬空引用。
             let violations: i64 =
                 conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
@@ -141,7 +171,6 @@ pub fn apply_until(conn: &mut Connection, target_version: u32) -> Result<Vec<Str
             }
         }
 
-        outcome?;
         applied.push(migration.name.to_string());
     }
 
@@ -403,5 +432,173 @@ mod tests {
             .expect("外键检查");
         assert_eq!(enabled, 1);
         assert_eq!(violations, 0);
+    }
+
+    /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
+    const BROKEN_MIGRATION: Migration = Migration {
+        version: 99,
+        name: "0099_broken",
+        sql: "CREATE TABLE broken_marker (id TEXT NOT NULL);
+              INSERT INTO broken_marker (id) VALUES ('x');
+              INSERT INTO definitely_missing_table (id) VALUES (1);",
+        foreign_keys_off: true,
+    };
+
+    /// **失败路径回归测试**（最容易出事的地方）。
+    ///
+    /// 表重建必须在事务外关外键；如果失败时忘了恢复，连接就会永久停在
+    /// `foreign_keys = OFF` —— 之后所有外键约束静默失效。
+    #[test]
+    fn a_failed_table_rebuilding_migration_still_restores_foreign_keys() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        let migrations = [
+            Migration {
+                version: 1,
+                name: "0001_init",
+                sql: include_str!("migrations/0001_init.sql"),
+                foreign_keys_off: false,
+            },
+            BROKEN_MIGRATION,
+        ];
+
+        let error = apply_migrations(&mut conn, &migrations, 99).expect_err("必须失败");
+
+        assert!(
+            error.to_string().contains("0099_broken"),
+            "错误信息必须指出是哪条迁移失败，实际：{error}"
+        );
+
+        let enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys");
+        assert_eq!(enabled, 1, "迁移失败后外键必须恢复 ON");
+
+        // 迁移整体回滚：不得留下半截 schema，也不得写入版本号
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("版本");
+        assert_eq!(version, 1, "失败的迁移不得写进 schema_migrations");
+
+        let marker: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'broken_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("标记表");
+        assert_eq!(marker, 0, "失败迁移建的表必须随事务回滚");
+
+        // 不只是「声明为 ON」，还要真的在生效
+        let violating = conn.execute(
+            "INSERT INTO sessions
+                (hub_session_id, harness_id, runtime_target_id, status, launch_mode, started_at, created_at, updated_at)
+             VALUES ('x', 'does-not-exist', 'local', 'created', 'terminal', 't', 't', 't')",
+            [],
+        );
+        assert!(violating.is_err(), "外键必须真的重新生效");
+    }
+
+    /// 组合一致性：installation 与 runtime target 必须属于同一个 runtime。
+    #[test]
+    fn sessions_reject_an_installation_from_a_different_runtime_target() {
+        let db = crate::test_support::empty_db();
+        let conn = db.connection();
+
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness 定义");
+        for target in ["local", "wsl"] {
+            conn.execute(
+                "INSERT INTO runtime_targets (id, kind, display_name, created_at)
+                 VALUES (?1, 'local', ?1, '2026-01-01T00:00:00Z')",
+                params![target],
+            )
+            .expect("runtime target");
+            conn.execute(
+                "INSERT INTO harness_installations
+                    (id, harness_id, runtime_target_id, availability, first_detected_at, last_seen_at)
+                 VALUES (?1, 'codex', ?2, 'available', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![format!("codex@{target}"), target],
+            )
+            .expect("installation");
+        }
+
+        // 两个外键各自都合法（codex@local 存在、wsl 存在），但组合矛盾
+        let contradictory = conn.execute(
+            "INSERT INTO sessions
+                (hub_session_id, harness_id, installation_id, runtime_target_id, status, launch_mode, started_at, created_at, updated_at)
+             VALUES ('bad', 'codex', 'codex@local', 'wsl', 'created', 'terminal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(
+            contradictory.is_err(),
+            "installation 属于 local，却把 session 挂到 wsl —— 必须被复合外键拒绝"
+        );
+
+        // 一致的组合仍然可以写入
+        conn.execute(
+            "INSERT INTO sessions
+                (hub_session_id, harness_id, installation_id, runtime_target_id, status, launch_mode, started_at, created_at, updated_at)
+             VALUES ('good', 'codex', 'codex@local', 'local', 'created', 'terminal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("一致的组合必须允许");
+    }
+
+    /// 导入的历史会话可以没有 installation（复合外键在含 NULL 时视为满足）。
+    #[test]
+    fn sessions_accept_a_null_installation_id() {
+        let db = crate::test_support::seeded_db();
+
+        db.connection()
+            .execute(
+                "INSERT INTO sessions
+                    (hub_session_id, harness_id, installation_id, runtime_target_id, status, launch_mode, started_at, created_at, updated_at)
+                 VALUES ('imported', 'codex', NULL, 'local', 'created', 'imported', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("没有 installation 的会话必须允许");
+    }
+
+    /// 表重建迁移不得在最终 schema 里留下临时表名。
+    #[test]
+    fn migrated_schema_has_no_leftover_temporary_names() {
+        let db = crate::test_support::empty_db();
+
+        for table in ["sessions", "harnesses"] {
+            let sql: String = db
+                .connection()
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .expect("读取表定义");
+            assert!(
+                !sql.contains("_new"),
+                "{table} 的表定义里还残留临时表名：{sql}"
+            );
+        }
+
+        let sessions_sql: String = db
+            .connection()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("读取 sessions");
+        assert!(
+            sessions_sql.contains("harness_installations"),
+            "sessions 必须保留指向 harness_installations 的复合外键：{sessions_sql}"
+        );
     }
 }
