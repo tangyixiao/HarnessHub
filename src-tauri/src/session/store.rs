@@ -22,7 +22,7 @@ use crate::error::Result;
 
 const SELECT_COLUMNS: &str = "hub_session_id, source_session_id, harness_id, installation_id, \
      project_id, runtime_target_id, parent_session_id, status, launch_mode, cwd, worktree_path, \
-     started_at, ended_at, exit_code, termination_reason";
+     started_at, ended_at, exit_code, termination_reason, pid";
 
 /// **为什么**会话结束了。与 `exit_code` 正交（见 migration 0004）。
 ///
@@ -237,6 +237,8 @@ pub struct SessionRecord {
     pub exit_code: Option<i32>,
     /// 终止原因；`created` / `running` 阶段以及迁移前的存量终态行为 `None`（原因未记录）。
     pub termination_reason: Option<TerminationReason>,
+    /// 进程 PID（诊断用：定位 kill 目标、核对 ghost running、host crash 后一致性检查）。
+    pub pid: Option<i32>,
 }
 
 /// Session 表的读写入口。
@@ -310,14 +312,19 @@ impl<'conn> SessionStore<'conn> {
         Ok(count)
     }
 
-    /// `created` → `running`。**只有进程真的启动成功后才能调用。**
+    /// `created` → `running`。**只有进程真的启动成功后才能调用**，并记下 PID。
     ///
     /// 返回是否真的发生了状态迁移（非法迁移返回 `false`，不报错）。
-    pub fn mark_running(&self, hub_session_id: &str, updated_at: &str) -> Result<bool> {
+    pub fn mark_running(
+        &self,
+        hub_session_id: &str,
+        pid: Option<u32>,
+        updated_at: &str,
+    ) -> Result<bool> {
         let updated = self.conn.execute(
-            "UPDATE sessions SET status = 'running', updated_at = ?2
+            "UPDATE sessions SET status = 'running', pid = ?3, updated_at = ?2
               WHERE hub_session_id = ?1 AND status = 'created'",
-            params![hub_session_id, updated_at],
+            params![hub_session_id, updated_at, pid.map(i64::from)],
         )?;
         Ok(updated > 0)
     }
@@ -392,6 +399,7 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionRecord> {
         termination_reason: termination_reason
             .as_deref()
             .and_then(TerminationReason::from_db),
+        pid: row.get(15)?,
     })
 }
 
@@ -535,7 +543,7 @@ mod tests {
             .expect("插入");
 
         assert!(store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("迁移"));
 
         let stored = store.get("hub-1").expect("查询").expect("应存在");
@@ -551,12 +559,12 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("首次");
 
         assert!(
             !store
-                .mark_running("hub-1", "2026-01-01T10:00:02Z")
+                .mark_running("hub-1", Some(4242), "2026-01-01T10:00:02Z")
                 .expect("重复"),
             "running → running 不是合法迁移"
         );
@@ -588,7 +596,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
         store
             .finish(
@@ -617,7 +625,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         assert!(!store
@@ -644,7 +652,7 @@ mod tests {
                 .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
                 .expect("插入");
             store
-                .mark_running("hub-1", "2026-01-01T10:00:01Z")
+                .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
                 .expect("启动");
             store
                 .finish(
@@ -659,7 +667,7 @@ mod tests {
             // 晚到的所有其他迁移都必须失败
             assert!(
                 !store
-                    .mark_running("hub-1", "2026-01-01T10:00:03Z")
+                    .mark_running("hub-1", Some(4242), "2026-01-01T10:00:03Z")
                     .expect("晚到 mark_running"),
                 "{label} 之后 mark_running 必须失败"
             );
@@ -695,7 +703,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         assert!(store
@@ -721,7 +729,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         store
@@ -747,7 +755,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         store
@@ -796,7 +804,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         assert!(store
@@ -858,7 +866,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         store
@@ -909,7 +917,7 @@ mod tests {
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
         store
-            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .mark_running("hub-1", Some(4242), "2026-01-01T10:00:01Z")
             .expect("启动");
 
         let stored = store.get("hub-1").expect("查询").expect("应存在");

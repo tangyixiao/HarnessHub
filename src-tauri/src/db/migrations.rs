@@ -49,6 +49,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0004_session_termination_reason.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 5,
+        name: "0005_session_pid",
+        sql: include_str!("migrations/0005_session_pid.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (

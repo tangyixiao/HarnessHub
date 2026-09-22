@@ -1,6 +1,22 @@
-//! PTY 抽象层。
+//! PTY 传输层。
 //!
-//! 职责：为内置 Terminal 提供伪终端读写、尺寸变更、多 Session 与重连能力。
+//! 分层（见 docs/adr/0009-pty-is-raw-transport.md）：
 //!
-//! 当前为占位模块（Phase 1 Task「PTY launch」）。实现前必须先回答规格 1.1 的问题：
-//! 成熟项目是否已解决？优先级是直接调用 / 复用兼容 License 模块，而不是自己重写 PTY。
+//! ```text
+//! pty::backend               trait：spawn / read / write / resize / kill / wait / pid
+//! pty::portable_pty_backend  真实实现（唯一依赖 portable-pty 的文件）
+//! pty::manager               读线程 + 顺序转发 + EOF 后取退出码
+//! ```
+//!
+//! 本模块**不解析任何终端转义序列**，也不理解 Harness 语义。
+//! DSR / CSI / OSC 的应答属于终端模拟器（GUI 用 xterm.js；无头测试用 test-only responder）。
+//!
+//! 复用而非自研（规格 1.1）：PTY 直接用成熟 crate `portable-pty`。
+
+pub mod backend;
+pub mod manager;
+pub mod portable_pty_backend;
+
+pub use backend::{PtyBackend, PtyProcessHandle, PtySpawnRequest};
+pub use manager::{ExitSink, OutputSink, PtyManager};
+pub use portable_pty_backend::PortablePtyBackend;

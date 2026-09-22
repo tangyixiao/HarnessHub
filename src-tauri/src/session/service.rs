@@ -75,10 +75,11 @@ impl<'conn> SessionService<'conn> {
         self.store.get(hub_session_id)
     }
 
-    /// `created` → `running`。只有进程真的启动成功后才能调用（Task 4）。
-    pub fn mark_running(&self, hub_session_id: &str) -> Result<bool> {
+    /// `created` → `running`。**只有进程真的启动成功后才能调用**（Task 4），
+    /// 同时记下 PID —— 它不当作永久身份，但用于诊断（kill 目标、ghost running 核对）。
+    pub fn mark_running(&self, hub_session_id: &str, pid: Option<u32>) -> Result<bool> {
         self.store
-            .mark_running(hub_session_id, &clock::now_rfc3339())
+            .mark_running(hub_session_id, pid, &clock::now_rfc3339())
     }
 
     /// 启动失败：**仅 `created` → `failed`**，并记录 `launch_failed`。
@@ -228,7 +229,9 @@ mod tests {
             .start_from_installation(&installation(), None, None)
             .expect("登记");
 
-        assert!(service.mark_running(&started.hub_session_id).expect("启动"));
+        assert!(service
+            .mark_running(&started.hub_session_id, Some(4242))
+            .expect("启动"));
         assert_eq!(
             service
                 .get(&started.hub_session_id)
@@ -374,7 +377,9 @@ mod tests {
         let started = service
             .start_from_installation(&installation(), None, None)
             .expect("登记");
-        service.mark_running(&started.hub_session_id).expect("启动");
+        service
+            .mark_running(&started.hub_session_id, Some(4242))
+            .expect("启动");
 
         assert!(service
             .finish(
@@ -399,7 +404,9 @@ mod tests {
         let started = service
             .start_from_installation(&installation(), None, None)
             .expect("登记");
-        service.mark_running(&started.hub_session_id).expect("启动");
+        service
+            .mark_running(&started.hub_session_id, Some(4242))
+            .expect("启动");
 
         service
             .finish(

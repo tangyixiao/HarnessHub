@@ -20,6 +20,7 @@ pub mod pty;
 pub mod runtime;
 pub mod session;
 pub mod sidecar;
+pub mod terminal;
 pub mod trace;
 pub mod usage;
 pub mod watcher;
