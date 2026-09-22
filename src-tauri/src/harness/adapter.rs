@@ -97,12 +97,25 @@ pub struct ProcessHandle {
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> HarnessId;
 
+    /// 展示名。
+    ///
+    /// **这是名字的唯一来源**：Registry 直接透传它，前端不得自行维护 id → 名字 的映射，
+    /// 否则两边各有一份映射就会漂移（见 docs/adr/0005-capability-vs-readiness.md）。
+    fn display_name(&self) -> &str;
+
     /// 扫描本机：是否安装、binary 路径、数据路径。不得有副作用。
     fn detect(&self) -> DetectResult;
 
     /// 读取版本号；未安装或读取失败时返回 `Ok(None)` / `Err`。
     fn version(&self) -> Result<Option<String>>;
 
+    /// 本 Adapter **是否实现了**这些能力。
+    ///
+    /// 语义边界（重要）：这里回答的是「代码实现了没有」，**不是**「此刻这台机器能不能用」。
+    /// 例如 Task 4 之后 `launch` 实现完成即为 `true`，即使某台机器上 binary 被删、
+    /// auth 缺失、profile 配坏导致这一次 `launch()` 失败，也**不得**因此把
+    /// `capabilities.launch` 改回 `false` —— 那是 readiness 维度的事
+    /// （ready / blocked / unknown，尚未实现）。
     fn capabilities(&self) -> HarnessCapabilities;
 
     fn launch(&self, request: LaunchRequest) -> Result<ProcessHandle>;
@@ -152,7 +165,7 @@ mod tests {
                 live_state: false,
                 worktree: false,
             },
-            "默认必须是「全不支持」，避免未验证就宣称能力"
+            "默认必须是「全不支持」，避免未实现就宣称能力"
         );
     }
 }

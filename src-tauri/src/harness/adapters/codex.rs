@@ -16,6 +16,9 @@ use crate::harness::probe::HostProbe;
 /// 规范 Harness id，与 `harnesses.id` 一致。
 pub const CODEX_ID: &str = "codex";
 
+/// 展示名。由适配器自己声明（Registry 只透传），不在别处再维护一份映射。
+pub const DISPLAY_NAME: &str = "Codex";
+
 const EXECUTABLE_NAME: &str = "codex";
 
 /// Codex 的数据目录候选。
@@ -55,6 +58,10 @@ impl HarnessAdapter for CodexAdapter {
         HarnessId::from(CODEX_ID)
     }
 
+    fn display_name(&self) -> &str {
+        DISPLAY_NAME
+    }
+
     fn detect(&self) -> DetectResult {
         let binary = self.probe.find_executable(EXECUTABLE_NAME);
         let version = binary
@@ -76,17 +83,12 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
-    /// **全部为 `false`**，这是当前唯一诚实的取值。
+    /// **全部为 `false`**：因为 PTY / launch / resume / usage **都还没有实现**。
     ///
-    /// Global Constraint #8 / ADR-0022：能力为 `true` 必须有测试或验收记录支撑。
-    /// 目前：
-    ///   - `launch` / `terminal`：PTY 尚未实现，`launch()` 只会返回错误 → 不得宣称支持；
-    ///   - `resume`：同上；
-    ///   - `usage`：ccusage 夹具回归尚未建立 → 不得宣称支持；
-    ///   - 其余能力（replay / tool_calls / subagents / live_state / worktree）：未开始。
-    ///
-    /// 每实现一项，就在对应 Task 落地并通过验收后于此处单独置 `true`，
-    /// 而不是提前把整组打开。
+    /// 语义提醒（docs/adr/0005）：本方法回答「Adapter 实现了没有」，不是
+    /// 「此刻能否运行」。所以 Task 4 实现 launch 之后就要在这里置 `true`，
+    /// 而那之后**不会**因为某台机器上 binary 缺失、auth 过期导致某次 `launch()` 失败
+    /// 就把它改回 `false` —— 那是 readiness 维度（ready / blocked / unknown，待实现）。
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities::default()
     }
@@ -252,25 +254,31 @@ mod tests {
         );
     }
 
-    /// 能力矩阵必须与实现状态一致：`launch` 报 false，就必须真的不能启动。
+    /// 当前 launch 仍是 stub，因此 `capabilities.launch` 必须是 `false`。
+    ///
+    /// 刻意**不**建立「capabilities.launch == 某次 launch() 是否成功」这种长期契约：
+    /// capability 表示 Adapter 是否实现该能力，运行时成败属于 readiness
+    /// （见 docs/adr/0005-capability-vs-readiness.md）。Task 4 实现 launch 后，
+    /// 这里会改成断言 `launch == true`，而 launch() 依然可能因为 binary 缺失、
+    /// auth 过期等原因失败 —— 那不影响 capability。
     #[test]
-    fn reported_capabilities_match_actual_behaviour() {
-        use crate::harness::adapter::LaunchRequest;
-
+    fn launch_capability_is_false_while_launch_is_still_a_stub() {
         let codex = adapter(FakeHostProbe::new());
-        let can_launch = codex
-            .launch(LaunchRequest {
-                project_id: None,
-                cwd: "D:/work".to_string(),
-                args: Vec::new(),
-                runtime_target_id: "local".to_string(),
-            })
-            .is_ok();
 
-        assert_eq!(
-            codex.capabilities().launch,
-            can_launch,
-            "capabilities.launch 必须等于 launch() 的真实可用性"
+        assert!(
+            !codex.capabilities().launch,
+            "launch 还没实现，capability 就不能为 true"
+        );
+        assert!(
+            codex
+                .launch(crate::harness::adapter::LaunchRequest {
+                    project_id: None,
+                    cwd: "D:/work".to_string(),
+                    args: Vec::new(),
+                    runtime_target_id: "local".to_string(),
+                })
+                .is_err(),
+            "配套前提：此时 launch() 确实还是 stub"
         );
     }
 

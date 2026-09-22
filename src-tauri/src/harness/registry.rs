@@ -22,17 +22,8 @@ pub struct HarnessSummary {
     pub data_paths: Vec<String>,
 }
 
-/// 展示名映射。未登记的 Harness 直接回显 id，避免编造名字。
-fn display_name_for(id: &str) -> String {
-    match id {
-        "codex" => "Codex".to_string(),
-        "claude-code" => "Claude Code".to_string(),
-        "gemini-cli" => "Gemini CLI".to_string(),
-        "opencode" => "OpenCode".to_string(),
-        other => other.to_string(),
-    }
-}
-
+/// 展示名没有映射表：它由适配器自己声明（[`HarnessAdapter::display_name`]），
+/// 注册表只透传。这样名字只有**一个**来源，不会出现前后端各维护一份而漂移。
 /// 已注册适配器的集合。
 #[derive(Default)]
 pub struct HarnessRegistry {
@@ -99,7 +90,7 @@ impl HarnessRegistry {
                 let detect = adapter.detect();
 
                 HarnessSummary {
-                    display_name: display_name_for(id.as_str()),
+                    display_name: adapter.display_name().to_string(),
                     id: id.as_str().to_string(),
                     installed: detect.installed,
                     binary_path: detect.binary_path,
@@ -122,6 +113,7 @@ mod tests {
 
     struct FakeAdapter {
         id: HarnessId,
+        display_name: String,
         installed: bool,
         capabilities: HarnessCapabilities,
     }
@@ -130,6 +122,7 @@ mod tests {
         fn new(id: &str, installed: bool) -> Self {
             Self {
                 id: HarnessId::from(id),
+                display_name: id.to_string(),
                 installed,
                 capabilities: HarnessCapabilities {
                     launch: true,
@@ -138,11 +131,20 @@ mod tests {
                 },
             }
         }
+
+        fn with_display_name(mut self, display_name: &str) -> Self {
+            self.display_name = display_name.to_string();
+            self
+        }
     }
 
     impl HarnessAdapter for FakeAdapter {
         fn id(&self) -> HarnessId {
             self.id.clone()
+        }
+
+        fn display_name(&self) -> &str {
+            &self.display_name
         }
 
         fn detect(&self) -> DetectResult {
@@ -247,7 +249,9 @@ mod tests {
     #[test]
     fn summaries_describe_every_registered_adapter() {
         let mut registry = HarnessRegistry::new();
-        registry.register(Box::new(FakeAdapter::new("codex", true)));
+        registry.register(Box::new(
+            FakeAdapter::new("codex", true).with_display_name("Codex"),
+        ));
 
         let summaries = registry.summaries();
 
@@ -257,6 +261,17 @@ mod tests {
         assert!(summaries[0].installed);
         assert_eq!(summaries[0].binary_path.as_deref(), Some("/usr/bin/codex"));
         assert_eq!(summaries[0].version.as_deref(), Some("1.0.0"));
+    }
+
+    /// 展示名唯一来源是适配器本身：注册表不得自己维护映射表。
+    #[test]
+    fn display_name_comes_from_the_adapter_verbatim() {
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(
+            FakeAdapter::new("codex", true).with_display_name("完全自定义的名字"),
+        ));
+
+        assert_eq!(registry.summaries()[0].display_name, "完全自定义的名字");
     }
 
     #[test]
@@ -288,7 +303,9 @@ mod tests {
         // 前后端契约测试：src/features/harnesses 依赖这些键名。
         // Rust 字段是 snake_case，JSON 必须是 camelCase，否则前端读到 undefined。
         let mut registry = HarnessRegistry::new();
-        registry.register(Box::new(FakeAdapter::new("codex", true)));
+        registry.register(Box::new(
+            FakeAdapter::new("codex", true).with_display_name("Codex"),
+        ));
 
         let json = serde_json::to_value(&registry.summaries()[0]).expect("序列化");
 
@@ -307,16 +324,5 @@ mod tests {
         );
         assert!(json.get("display_name").is_none());
         assert!(json.get("binary_path").is_none());
-    }
-
-    #[test]
-    fn display_name_falls_back_to_id_for_unknown_harness() {
-        assert_eq!(display_name_for("codex"), "Codex");
-        assert_eq!(display_name_for("claude-code"), "Claude Code");
-        assert_eq!(
-            display_name_for("mystery-cli"),
-            "mystery-cli",
-            "未登记的名字直接回显 id，不要编造"
-        );
     }
 }

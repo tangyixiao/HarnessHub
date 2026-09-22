@@ -34,7 +34,12 @@ Project → Session → Harness → Profile → Identity → Provider → Model 
 - **Harness**：外部 AI coding CLI/Agent（Codex、Claude Code、Gemini CLI、OpenCode…）。
 - **HarnessAdapter**：负责 detect / version / capabilities / launch / resume / stop / state。
 - **UsageAdapter**：负责 discover / import / watch / usage / sessions / models。与 HarnessAdapter **分离**。
-- **Capability**：能力不是 boolean 的"支持/不支持"，而是逐项、可独立演进的矩阵。
+- **Capability**：**Adapter 是否实现了**这项能力。静态事实，只随代码版本变化。
+  逐项、可独立演进的矩阵，不是单个 boolean。未实现必须为 `false`。
+- **Readiness**：**此刻**这台机器 / 这个 Profile / 这个 Session 能否使用该能力
+  （ready / blocked / unknown）。动态、随环境变化，**尚未实现**。
+  两者不可合并，见 `docs/adr/0005-capability-vs-readiness.md`：
+  binary 缺失、auth 过期只影响 readiness，不得回写 capability。
 - **hub_session_id**：Harness Hub 自己的全局 Session 标识。
 - **source_session_id**：外部 Harness 的原始 Session ID。二者不可混用。
 - **runtime_target_id**：Session/运行必须关联的运行目标（v0.1 只有 `local`，接口预留远程）。
