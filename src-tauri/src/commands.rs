@@ -9,8 +9,8 @@ use tauri::State;
 use crate::clock;
 use crate::db::DbHealth;
 use crate::error::{Error, Result};
+use crate::harness::inventory::{installation_id, reconcile_harnesses, ReconcileReport};
 use crate::harness::registry::HarnessSummary;
-use crate::harness::upsert_harness;
 use crate::session::{service::SessionService, SessionRecord};
 use crate::{runtime, AppState};
 
@@ -49,9 +49,30 @@ pub fn db_health(state: State<'_, AppState>) -> Result<DbHealth> {
 /// 「该行 `installed: false`」，而不是让整个页面拿不到数据。
 /// 这是 Walking Skeleton 里 UI 唯一被允许获取 Harness 信息的入口 ——
 /// 前端不做任何自己的二进制探测。
+///
+/// **本命令是纯读**：它不写 `harnesses` / `harness_installations`。
+/// 需要把检测结果落库时，请显式调用 [`refresh_harnesses`]
+/// （list / get / inspect 不修改状态；refresh / sync 才允许）。
 #[tauri::command]
 pub fn list_harnesses(state: State<'_, AppState>) -> Vec<HarnessSummary> {
     state.harnesses.summaries()
+}
+
+/// 显式同步 Harness 清单：`detect` → `reconcile` → SQLite。
+///
+/// 语义上是「允许修改状态」的操作，调用点只有：应用启动、用户点 Refresh
+/// （以及 `create_session` 的 invariant guard）。见 `harness::inventory`。
+#[tauri::command]
+pub fn refresh_harnesses(state: State<'_, AppState>) -> Result<ReconcileReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    runtime::local::ensure_local_target(database.connection())?;
+
+    reconcile_harnesses(
+        database.connection(),
+        &state.harnesses.summaries(),
+        runtime::local::LOCAL_TARGET_ID,
+        &clock::now_rfc3339(),
+    )
 }
 
 /// Session 列表的默认条数上限。
@@ -60,13 +81,13 @@ pub const DEFAULT_SESSION_LIMIT: u32 = 50;
 /// 单次查询允许的最大条数，避免前端传入超大 limit 拖垮查询。
 pub const MAX_SESSION_LIMIT: u32 = 500;
 
-/// 新建一条 Session 记录（`status = running`）。
+/// 登记一条 Session（`status = created`）。
 ///
-/// 注意：**这里不启动任何进程**。PTY 启动是 Task 4 的事；本命令只负责
-/// 「统一标识 + 运行目标绑定 + 落库」这段编排，Task 4 会在启动进程前后复用它。
-///
-/// 落库前必须先把 harness 行写进 `harnesses`：`sessions.harness_id` 有外键，
-/// 而检测结果平时只存在于内存注册表中（真实宿主上曾因此直接 FK 失败）。
+/// 注意两件事：
+///   1. **这里不启动任何进程**，因此状态是 `created` 而不是 `running`
+///      （Task 4 起成功 spawn 后才 mark_running）；
+///   2. 主同步路径是 [`refresh_harnesses`]；这里的 reconcile 只是
+///      **invariant guard**，保证 FK 依赖的 harness 定义与安装行一定存在。
 #[tauri::command]
 pub fn create_session(
     state: State<'_, AppState>,
@@ -83,17 +104,30 @@ pub fn create_session(
         .find(|summary| summary.id == harness_id)
         .ok_or_else(|| Error::InvalidInput(format!("未注册的 Harness：{harness_id}")))?;
 
-    upsert_harness(database.connection(), &summary, &clock::now_rfc3339())?;
+    // invariant guard：确保 harnesses 与 harness_installations 都有对应行，
+    // 否则 sessions 的外键会直接失败（真实宿主上踩过）。
     runtime::local::ensure_local_target(database.connection())?;
+    reconcile_harnesses(
+        database.connection(),
+        std::slice::from_ref(&summary),
+        runtime::local::LOCAL_TARGET_ID,
+        &clock::now_rfc3339(),
+    )?;
+
+    let installation = installation_id(&harness_id, runtime::local::LOCAL_TARGET_ID);
 
     SessionService::new(database.connection()).start(
         &harness_id,
+        Some(&installation),
         project_id.as_deref(),
         cwd.as_deref(),
     )
 }
 
 /// 结束一条仍处于 `running` 的会话；返回是否真的更新了行（幂等）。
+///
+/// 对 `created`（从未启动）的会话会返回 `false` —— 结束一个从未运行的会话
+/// 只会造出假历史。
 #[tauri::command]
 pub fn finish_session(
     state: State<'_, AppState>,

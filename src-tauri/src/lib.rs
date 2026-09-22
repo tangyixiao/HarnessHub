@@ -33,14 +33,16 @@ use tauri::Manager;
 
 use crate::db::Database;
 use crate::harness::adapters::codex::CodexAdapter;
+use crate::harness::inventory::reconcile_harnesses;
 use crate::harness::probe::SystemHostProbe;
 use crate::harness::registry::HarnessRegistry;
+use crate::runtime::local::{ensure_local_target, LOCAL_TARGET_ID};
 
 /// 应用级共享状态。
 ///
 /// - `db`：数据库句柄，命令层与领域服务共用同一个连接。
 /// - `harnesses`：已注册的 Harness 适配器。启动时一次性装配，之后只读，
-///   因此不需要加锁。**真实检测**发生在 `list_harnesses` 被调用时（`detect()`），
+///   因此不需要加锁。**真实检测**发生在读取或同步清单时（`detect()`），
 ///   不在启动时缓存 —— 用户可能在应用运行期间安装/卸载 Harness。
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -70,9 +72,20 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
 
             let database = Database::open(data_dir.join(DATABASE_FILE_NAME))?;
+            let harnesses = build_harness_registry();
+
+            // 启动时的清单同步：这是**明确的写路径**（detect → reconcile → SQLite），
+            // 与只读的 list_harnesses 分开。见 harness::inventory。
+            ensure_local_target(database.connection())?;
+            reconcile_harnesses(
+                database.connection(),
+                &harnesses.summaries(),
+                LOCAL_TARGET_ID,
+                &clock::now_rfc3339(),
+            )?;
             app.manage(AppState {
                 db: Mutex::new(database),
-                harnesses: build_harness_registry(),
+                harnesses,
             });
 
             Ok(())
@@ -83,7 +96,8 @@ pub fn run() {
             commands::create_session,
             commands::finish_session,
             commands::list_harnesses,
-            commands::list_sessions
+            commands::list_sessions,
+            commands::refresh_harnesses
         ])
         .run(tauri::generate_context!())
         .expect("Harness Hub 启动失败");
