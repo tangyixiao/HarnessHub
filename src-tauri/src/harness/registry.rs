@@ -282,7 +282,10 @@ mod tests {
             FakeAdapter::new("codex", true).with_display_name("完全自定义的名字"),
         ));
 
-        assert_eq!(registry.summaries("local")[0].display_name, "完全自定义的名字");
+        assert_eq!(
+            registry.summaries("local")[0].display_name,
+            "完全自定义的名字"
+        );
     }
 
     #[test]
