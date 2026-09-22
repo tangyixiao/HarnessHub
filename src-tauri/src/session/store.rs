@@ -1,21 +1,33 @@
-//! Session 持久化。
+//! Session 持久化与状态机。
 //!
 //! 硬约定（docs/adr/0004）：`hub_session_id` 是 Harness Hub 自己的全局标识，
 //! `source_session_id` 是外部 Harness 的原始标识，两者绝不可混用；
 //! `(harness_id, source_session_id)` 唯一，是导入幂等的基础。
+//!
+//! 状态机（docs/adr/0006）—— **没有进程就不能是 running**：
+//!
+//! ```text
+//! created ──mark_running──▶ running ──finish(0)───▶ exited
+//!    │                        └────finish(≠0)──▶ failed
+//!    └──fail──▶ failed        └────finish(None)─▶ unknown
+//! ```
+//!
+//! `unknown` 只用于「拿不到退出码」或「无法识别的存量数据」，不是万能兜底。
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-const SELECT_COLUMNS: &str = "hub_session_id, source_session_id, harness_id, project_id, \
-     runtime_target_id, parent_session_id, status, launch_mode, cwd, worktree_path, \
+const SELECT_COLUMNS: &str = "hub_session_id, source_session_id, harness_id, installation_id, \
+     project_id, runtime_target_id, parent_session_id, status, launch_mode, cwd, worktree_path, \
      started_at, ended_at, exit_code";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
+    /// 已登记，但还没有启动任何进程。
+    Created,
     Running,
     Exited,
     Failed,
@@ -26,6 +38,7 @@ pub enum SessionStatus {
 impl SessionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Created => "created",
             Self::Running => "running",
             Self::Exited => "exited",
             Self::Failed => "failed",
@@ -35,6 +48,7 @@ impl SessionStatus {
 
     fn from_db(value: &str) -> Self {
         match value {
+            "created" => Self::Created,
             "running" => Self::Running,
             "exited" => Self::Exited,
             "failed" => Self::Failed,
@@ -72,13 +86,15 @@ impl LaunchMode {
     }
 }
 
-/// 新建会话的输入。插入时 status 固定为 `running`。
+/// 新建会话的输入。插入时 status 固定为 `created`（不是 `running`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     pub hub_session_id: String,
     pub source_session_id: Option<String>,
     pub harness_id: String,
+    /// 关联到具体安装（`harness_installations.id`）。导入的历史会话可以为空。
+    pub installation_id: Option<String>,
     pub project_id: Option<String>,
     pub runtime_target_id: String,
     pub parent_session_id: Option<String>,
@@ -100,6 +116,7 @@ impl NewSession {
             hub_session_id: hub_session_id.into(),
             source_session_id: None,
             harness_id: harness_id.into(),
+            installation_id: None,
             project_id: None,
             runtime_target_id: runtime_target_id.into(),
             parent_session_id: None,
@@ -112,6 +129,11 @@ impl NewSession {
 
     pub fn with_source_session_id(mut self, source_session_id: impl Into<String>) -> Self {
         self.source_session_id = Some(source_session_id.into());
+        self
+    }
+
+    pub fn with_installation_id(mut self, installation_id: impl Into<String>) -> Self {
+        self.installation_id = Some(installation_id.into());
         self
     }
 
@@ -138,6 +160,7 @@ pub struct SessionRecord {
     pub hub_session_id: String,
     pub source_session_id: Option<String>,
     pub harness_id: String,
+    pub installation_id: Option<String>,
     pub project_id: Option<String>,
     pub runtime_target_id: String,
     pub parent_session_id: Option<String>,
@@ -160,18 +183,21 @@ impl<'conn> SessionStore<'conn> {
         Self { conn }
     }
 
-    /// 写入一条新会话。重复的 `(harness_id, source_session_id)` 会被数据库唯一索引拒绝。
+    /// 写入一条新会话，状态为 `created`（**不是 running**：此时还没有进程）。
+    ///
+    /// 重复的 `(harness_id, source_session_id)` 会被数据库唯一索引拒绝。
     pub fn insert(&self, session: &NewSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO sessions (
-                hub_session_id, source_session_id, harness_id, project_id, runtime_target_id,
-                parent_session_id, status, launch_mode, cwd, worktree_path,
+                hub_session_id, source_session_id, harness_id, installation_id, project_id,
+                runtime_target_id, parent_session_id, status, launch_mode, cwd, worktree_path,
                 started_at, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?9, ?10, ?10, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'created', ?8, ?9, ?10, ?11, ?11, ?11)",
             params![
                 session.hub_session_id,
                 session.source_session_id,
                 session.harness_id,
+                session.installation_id,
                 session.project_id,
                 session.runtime_target_id,
                 session.parent_session_id,
@@ -218,10 +244,32 @@ impl<'conn> SessionStore<'conn> {
         Ok(count)
     }
 
-    /// 结束一次仍处于 `running` 的会话。
+    /// `created` → `running`。**只有进程真的启动成功后才能调用。**
     ///
-    /// `exit_code` 为 `Some(0)` 记为 exited，非 0 记为 failed，缺失则记为 unknown。
-    /// 返回是否真的更新了行（幂等：重复调用返回 `false`）。
+    /// 返回是否真的发生了状态迁移（非法迁移返回 `false`，不报错）。
+    pub fn mark_running(&self, hub_session_id: &str, updated_at: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sessions SET status = 'running', updated_at = ?2
+              WHERE hub_session_id = ?1 AND status = 'created'",
+            params![hub_session_id, updated_at],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// 启动失败：`created` / `running` → `failed`。
+    pub fn fail(&self, hub_session_id: &str, ended_at: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sessions SET status = 'failed', ended_at = ?2, updated_at = ?2
+              WHERE hub_session_id = ?1 AND status IN ('created', 'running')",
+            params![hub_session_id, ended_at],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// 进程结束：**只接受 `running`**。
+    ///
+    /// `exit_code` 为 `Some(0)` 记为 exited，非 0 记为 failed，缺失记为 unknown。
+    /// 对 `created` 会话调用会返回 `false`：它从未启动过，结束它只会造出假历史。
     pub fn finish(
         &self,
         hub_session_id: &str,
@@ -246,23 +294,24 @@ impl<'conn> SessionStore<'conn> {
 }
 
 fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionRecord> {
-    let status: String = row.get(6)?;
-    let launch_mode: String = row.get(7)?;
+    let status: String = row.get(7)?;
+    let launch_mode: String = row.get(8)?;
 
     Ok(SessionRecord {
         hub_session_id: row.get(0)?,
         source_session_id: row.get(1)?,
         harness_id: row.get(2)?,
-        project_id: row.get(3)?,
-        runtime_target_id: row.get(4)?,
-        parent_session_id: row.get(5)?,
+        installation_id: row.get(3)?,
+        project_id: row.get(4)?,
+        runtime_target_id: row.get(5)?,
+        parent_session_id: row.get(6)?,
         status: SessionStatus::from_db(&status),
         launch_mode: LaunchMode::from_db(&launch_mode),
-        cwd: row.get(8)?,
-        worktree_path: row.get(9)?,
-        started_at: row.get(10)?,
-        ended_at: row.get(11)?,
-        exit_code: row.get(12)?,
+        cwd: row.get(9)?,
+        worktree_path: row.get(10)?,
+        started_at: row.get(11)?,
+        ended_at: row.get(12)?,
+        exit_code: row.get(13)?,
     })
 }
 
@@ -282,17 +331,37 @@ mod tests {
 
         let new_session = session("hub-1", "2026-01-01T10:00:00Z")
             .with_source_session_id("codex-abc")
+            .with_installation_id(crate::harness::inventory::installation_id(
+                HARNESS_ID,
+                RUNTIME_TARGET_ID,
+            ))
             .with_cwd("D:/work/project");
         store.insert(&new_session).expect("插入会话");
 
         let stored = store.get("hub-1").expect("查询").expect("应存在");
 
         assert_eq!(stored.source_session_id.as_deref(), Some("codex-abc"));
-        assert_eq!(stored.status, SessionStatus::Running);
+        assert_eq!(stored.installation_id.as_deref(), Some("codex@local"));
         assert_eq!(stored.launch_mode, LaunchMode::Terminal);
         assert_eq!(stored.cwd.as_deref(), Some("D:/work/project"));
         assert_eq!(stored.runtime_target_id, RUNTIME_TARGET_ID);
         assert!(stored.ended_at.is_none());
+    }
+
+    /// 新建的会话**绝不能**是 running：此时还没有任何进程。
+    #[test]
+    fn a_new_session_is_created_not_running() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        assert_eq!(
+            store.get("hub-1").expect("查询").expect("应存在").status,
+            SessionStatus::Created,
+            "没有进程就不能标记为 running"
+        );
     }
 
     #[test]
@@ -375,6 +444,85 @@ mod tests {
         assert_eq!(store.count().expect("计数"), 2);
     }
 
+    // ---- 状态机 ----
+
+    #[test]
+    fn mark_running_moves_created_to_running() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        assert!(store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("迁移"));
+
+        let stored = store.get("hub-1").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Running);
+        assert!(stored.ended_at.is_none(), "running 不应有结束时间");
+    }
+
+    #[test]
+    fn mark_running_is_rejected_for_already_running_sessions() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("首次");
+
+        assert!(
+            !store
+                .mark_running("hub-1", "2026-01-01T10:00:02Z")
+                .expect("重复"),
+            "running → running 不是合法迁移"
+        );
+    }
+
+    #[test]
+    fn fail_marks_a_never_started_session_as_failed() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        assert!(store
+            .fail("hub-1", "2026-01-01T10:00:05Z")
+            .expect("标记失败"));
+
+        let stored = store.get("hub-1").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Failed);
+        assert_eq!(stored.ended_at.as_deref(), Some("2026-01-01T10:00:05Z"));
+        assert!(stored.exit_code.is_none(), "启动失败没有退出码");
+    }
+
+    #[test]
+    fn fail_is_rejected_for_finished_sessions() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
+        store
+            .finish("hub-1", Some(0), "2026-01-01T10:00:02Z")
+            .expect("结束");
+
+        assert!(!store
+            .fail("hub-1", "2026-01-01T10:00:03Z")
+            .expect("不应生效"));
+        assert_eq!(
+            store.get("hub-1").expect("查询").expect("应存在").status,
+            SessionStatus::Exited
+        );
+    }
+
     #[test]
     fn finish_marks_exit_status_and_time() {
         let db = seeded_db();
@@ -382,6 +530,9 @@ mod tests {
         store
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
 
         assert!(store
             .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
@@ -400,6 +551,9 @@ mod tests {
         store
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
 
         store
             .finish("hub-1", Some(130), "2026-01-01T10:05:00Z")
@@ -418,6 +572,9 @@ mod tests {
         store
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
 
         store
             .finish("hub-1", None, "2026-01-01T10:05:00Z")
@@ -429,6 +586,24 @@ mod tests {
         );
     }
 
+    /// 从未启动的会话不能被「结束」——否则会造出 exited 但从未运行的假历史。
+    #[test]
+    fn finish_is_rejected_for_never_started_sessions() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        assert!(!store
+            .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
+            .expect("不应生效"));
+        assert_eq!(
+            store.get("hub-1").expect("查询").expect("应存在").status,
+            SessionStatus::Created
+        );
+    }
+
     #[test]
     fn finish_is_idempotent() {
         let db = seeded_db();
@@ -436,6 +611,9 @@ mod tests {
         store
             .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
             .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
 
         assert!(store
             .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
