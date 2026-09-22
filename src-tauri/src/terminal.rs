@@ -29,7 +29,11 @@ use crate::session::{service::SessionService, SessionRecord, TerminationReason};
 /// xterm.js 的 `write(Uint8Array)` 自带跨 chunk 的有状态 UTF-8 解码，
 /// 我们不做 lossy 转换（否则多字节字符会被破坏）。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum PtyEvent {
     Started {
         session_id: String,
@@ -575,5 +579,72 @@ mod tests {
             backend.killed.lock().expect("killed").is_empty(),
             "已结束的会话不得再收到 terminate"
         );
+    }
+}
+
+#[cfg(test)]
+mod event_contract_tests {
+    use super::*;
+
+    /// 前后端契约：事件字段必须是 camelCase。
+    ///
+    /// `rename_all` 只改变体名，**不**改结构变体的字段名 —— 真机 E2E 里
+    /// 前端因此读到 `exitCode: undefined`，界面上显示「退出码 undefined」。
+    #[test]
+    fn pty_events_serialize_with_camel_case_fields() {
+        let output = serde_json::to_value(PtyEvent::Output {
+            session_id: "hub-1".to_string(),
+            seq: 3,
+            data: vec![0x1b, b'[', b'6', b'n'],
+        })
+        .expect("序列化");
+        assert_eq!(output["kind"], "output");
+        assert_eq!(output["sessionId"], "hub-1");
+        assert!(
+            output.get("session_id").is_none(),
+            "不得输出 snake_case 键：{output}"
+        );
+        assert_eq!(output["data"], serde_json::json!([27, 91, 54, 110]));
+
+        let started = serde_json::to_value(PtyEvent::Started {
+            session_id: "hub-1".to_string(),
+            pid: Some(4242),
+        })
+        .expect("序列化");
+        assert_eq!(started["kind"], "started");
+        assert_eq!(started["sessionId"], "hub-1");
+        assert_eq!(started["pid"], 4242);
+
+        let exited = serde_json::to_value(PtyEvent::Exited {
+            session_id: "hub-1".to_string(),
+            exit_code: Some(137),
+            reason: TerminationReason::UserKilled,
+        })
+        .expect("序列化");
+        assert_eq!(exited["kind"], "exited");
+        assert_eq!(exited["sessionId"], "hub-1");
+        assert_eq!(exited["exitCode"], 137, "前端读的是 exitCode");
+        assert_eq!(exited["reason"], "user_killed");
+
+        let errored = serde_json::to_value(PtyEvent::Error {
+            session_id: "hub-1".to_string(),
+            message: "boom".to_string(),
+        })
+        .expect("序列化");
+        assert_eq!(errored["sessionId"], "hub-1");
+        assert_eq!(errored["message"], "boom");
+    }
+
+    /// 退出码缺失时必须是 null（而不是没有这个键），前端据此渲染。
+    #[test]
+    fn missing_exit_code_serializes_as_null() {
+        let exited = serde_json::to_value(PtyEvent::Exited {
+            session_id: "hub-1".to_string(),
+            exit_code: None,
+            reason: TerminationReason::Lost,
+        })
+        .expect("序列化");
+
+        assert!(exited["exitCode"].is_null(), "实际：{exited}");
     }
 }

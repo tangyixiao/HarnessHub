@@ -83,13 +83,21 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
-    /// **全部为 `false`**：PTY 启动链路与 usage 都还没有实现。
+    /// `launch` 已翻为 `true`：真实 installation → LaunchSpec → spawn → 生命周期
+    /// 已在本机端到端验收通过（真机 Codex 跑出 TUI、正常退出 / 用户 kill /
+    /// host_shutdown / lost 都落到正确终态）。
     ///
-    /// 语义提醒（docs/adr/0005）：本方法回答「Adapter 实现了没有」，不是
-    /// 「此刻能否运行」。`build_launch_spec` 只是启动路径的一半（另一半是 Task 4 的
-    /// PTY spawn 与端到端验收），因此在 Task 4 验收通过前 `launch` 保持 `false`。
+    /// `terminal` 仍为 `false`：GUI 侧的 resize 观测还差一次验收，
+    /// 翻它之前不能宣称「交互式终端」这一整项能力。
+    /// `usage` / `replay` 等仍未实现。
+    ///
+    /// 语义提醒（docs/adr/0005）：capability 回答「Adapter 实现了没有」，
+    /// 不因某台机器上 binary 缺失或 auth 过期而回退。
     fn capabilities(&self) -> HarnessCapabilities {
-        HarnessCapabilities::default()
+        HarnessCapabilities {
+            launch: true,
+            ..HarnessCapabilities::default()
+        }
     }
 
     fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
@@ -253,14 +261,22 @@ mod tests {
     }
 
     #[test]
-    fn no_capability_is_claimed_before_its_task_lands() {
+    fn only_verified_capabilities_are_claimed() {
         let capabilities = adapter(FakeHostProbe::new()).capabilities();
 
-        assert_eq!(
-            capabilities,
-            HarnessCapabilities::default(),
-            "PTY / usage / replay 都还没实现，任何能力为 true 都是不诚实的宣称"
-        );
+        assert!(capabilities.launch, "launch 已通过真机端到端验收");
+        for (name, value) in [
+            ("terminal", capabilities.terminal),
+            ("resume", capabilities.resume),
+            ("usage", capabilities.usage),
+            ("replay", capabilities.replay),
+            ("tool_calls", capabilities.tool_calls),
+            ("subagents", capabilities.subagents),
+            ("live_state", capabilities.live_state),
+            ("worktree", capabilities.worktree),
+        ] {
+            assert!(!value, "{name} 尚未验收，不得为 true");
+        }
     }
 
     /// `build_launch_spec` 只是启动路径的一半，因此 `capabilities.launch` 仍为
@@ -270,16 +286,25 @@ mod tests {
     /// capability 表示 Adapter 是否实现该能力，运行时成败属于 readiness
     /// （见 docs/adr/0005-capability-vs-readiness.md）。
     #[test]
-    fn launch_capability_stays_false_until_the_whole_launch_path_is_verified() {
+    fn launch_is_claimed_only_after_the_real_launch_path_passed_acceptance() {
         let codex = adapter(FakeHostProbe::new());
 
         assert!(
-            !codex.capabilities().launch,
-            "PTY 端到端验收前，launch capability 不得为 true"
+            codex.capabilities().launch,
+            "真实 installation → LaunchSpec → spawn → 生命周期已验收，launch 应为 true"
         );
         assert!(
             codex.build_launch_spec(launch_request(&[])).is_err(),
-            "配套前提：没装 Codex 时还生成不出 launch spec"
+            "配套前提：没装 Codex 时仍生成不出 launch spec（运行时失败属于 readiness）"
+        );
+    }
+
+    /// `terminal` 要等 GUI 侧 resize 也验收通过才翻。
+    #[test]
+    fn terminal_capability_waits_for_the_gui_resize_acceptance() {
+        assert!(
+            !adapter(FakeHostProbe::new()).capabilities().terminal,
+            "GUI 交互式终端还差 resize 观测，不得提前打勾"
         );
     }
 
