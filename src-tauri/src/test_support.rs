@@ -9,8 +9,8 @@ use crate::db::Database;
 /// 测试用 Harness id，与 `harnesses.id` 对应。
 pub const HARNESS_ID: &str = "codex";
 
-/// 测试用运行目标 id，与 `runtime_targets.id` 对应。
-pub const RUNTIME_TARGET_ID: &str = "local";
+/// 测试用运行目标 id。**引用生产常量**，避免两处硬编码漂移。
+pub const RUNTIME_TARGET_ID: &str = crate::runtime::local::LOCAL_TARGET_ID;
 
 /// 固定时间戳：测试里不要依赖真实当前时间。
 pub const NOW: &str = "2026-01-01T00:00:00Z";

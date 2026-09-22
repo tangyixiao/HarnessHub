@@ -7,9 +7,11 @@ pub mod adapter;
 pub mod adapters;
 pub mod probe;
 pub mod registry;
+pub mod store;
 
 pub use adapter::{
     DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest, ProcessHandle,
     ResumeRequest,
 };
-pub use registry::HarnessRegistry;
+pub use registry::{HarnessRegistry, HarnessSummary};
+pub use store::upsert_harness;

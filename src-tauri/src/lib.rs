@@ -5,6 +5,7 @@
 //! - 只有 `commands` 与 [`run`] 直接接触 Tauri；
 //! - SQLite 由本 crate 独占持有，Python sidecar 不得直连。
 
+pub mod clock;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -79,7 +80,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::db_health,
-            commands::list_harnesses
+            commands::create_session,
+            commands::finish_session,
+            commands::list_harnesses,
+            commands::list_sessions
         ])
         .run(tauri::generate_context!())
         .expect("Harness Hub 启动失败");

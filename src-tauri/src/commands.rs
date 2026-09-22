@@ -6,10 +6,13 @@
 use serde::Serialize;
 use tauri::State;
 
+use crate::clock;
 use crate::db::DbHealth;
 use crate::error::{Error, Result};
 use crate::harness::registry::HarnessSummary;
-use crate::AppState;
+use crate::harness::upsert_harness;
+use crate::session::{service::SessionService, SessionRecord};
+use crate::{runtime, AppState};
 
 /// 前端 Dashboard 顶部展示的应用信息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,4 +52,65 @@ pub fn db_health(state: State<'_, AppState>) -> Result<DbHealth> {
 #[tauri::command]
 pub fn list_harnesses(state: State<'_, AppState>) -> Vec<HarnessSummary> {
     state.harnesses.summaries()
+}
+
+/// Session 列表的默认条数上限。
+pub const DEFAULT_SESSION_LIMIT: u32 = 50;
+
+/// 单次查询允许的最大条数，避免前端传入超大 limit 拖垮查询。
+pub const MAX_SESSION_LIMIT: u32 = 500;
+
+/// 新建一条 Session 记录（`status = running`）。
+///
+/// 注意：**这里不启动任何进程**。PTY 启动是 Task 4 的事；本命令只负责
+/// 「统一标识 + 运行目标绑定 + 落库」这段编排，Task 4 会在启动进程前后复用它。
+///
+/// 落库前必须先把 harness 行写进 `harnesses`：`sessions.harness_id` 有外键，
+/// 而检测结果平时只存在于内存注册表中（真实宿主上曾因此直接 FK 失败）。
+#[tauri::command]
+pub fn create_session(
+    state: State<'_, AppState>,
+    harness_id: String,
+    project_id: Option<String>,
+    cwd: Option<String>,
+) -> Result<SessionRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+
+    let summary = state
+        .harnesses
+        .summaries()
+        .into_iter()
+        .find(|summary| summary.id == harness_id)
+        .ok_or_else(|| Error::InvalidInput(format!("未注册的 Harness：{harness_id}")))?;
+
+    upsert_harness(database.connection(), &summary, &clock::now_rfc3339())?;
+    runtime::local::ensure_local_target(database.connection())?;
+
+    SessionService::new(database.connection()).start(
+        &harness_id,
+        project_id.as_deref(),
+        cwd.as_deref(),
+    )
+}
+
+/// 结束一条仍处于 `running` 的会话；返回是否真的更新了行（幂等）。
+#[tauri::command]
+pub fn finish_session(
+    state: State<'_, AppState>,
+    hub_session_id: String,
+    exit_code: Option<i32>,
+) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    SessionService::new(database.connection()).finish(&hub_session_id, exit_code)
+}
+
+/// 最近会话，按开始时间倒序。
+#[tauri::command]
+pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<SessionRecord>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let limit = limit
+        .unwrap_or(DEFAULT_SESSION_LIMIT)
+        .min(MAX_SESSION_LIMIT);
+
+    SessionService::new(database.connection()).list_recent(limit)
 }
