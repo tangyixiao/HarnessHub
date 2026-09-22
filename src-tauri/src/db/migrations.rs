@@ -43,6 +43,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0003_session_installation_runtime_consistency.sql"),
         foreign_keys_off: true,
     },
+    Migration {
+        version: 4,
+        name: "0004_session_termination_reason",
+        sql: include_str!("migrations/0004_session_termination_reason.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -566,6 +572,71 @@ mod tests {
                 [],
             )
             .expect("没有 installation 的会话必须允许");
+    }
+
+    /// 迁移 0004：能可靠反推的存量终态行必须补上 termination_reason，
+    /// 分不清原因的（旧 'failed'）保持 NULL 表示「原因未记录」，而不是硬塞一个值。
+    #[test]
+    fn migration_0004_backfills_only_the_reasons_it_can_derive() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 3).expect("建到 v3");
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness");
+        conn.execute(
+            "INSERT INTO runtime_targets (id, kind, display_name, created_at)
+             VALUES ('local', 'local', '本机', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("runtime target");
+        for (id, status) in [
+            ("legacy-exited", "exited"),
+            ("legacy-failed", "failed"),
+            ("legacy-unknown", "unknown"),
+            ("legacy-running", "running"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions
+                    (hub_session_id, harness_id, installation_id, runtime_target_id, status, launch_mode, started_at, created_at, updated_at)
+                 VALUES (?1, 'codex', NULL, 'local', ?2, 'terminal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![id, status],
+            )
+            .expect("旧会话");
+        }
+
+        apply_until(&mut conn, 4).expect("升到 v4");
+
+        let reason_of = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT termination_reason FROM sessions WHERE hub_session_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("读取原因")
+        };
+
+        assert_eq!(
+            reason_of("legacy-exited").as_deref(),
+            Some("natural_exit"),
+            "正常结束可以可靠反推"
+        );
+        assert_eq!(
+            reason_of("legacy-unknown").as_deref(),
+            Some("lost"),
+            "没有终态信息的算 lost"
+        );
+        assert_eq!(
+            reason_of("legacy-failed"),
+            None,
+            "旧的 failed 分不清启动失败还是运行失败 —— 必须留 NULL 而不是猜"
+        );
+        assert_eq!(reason_of("legacy-running"), None, "running 没有终止原因");
     }
 
     /// 表重建迁移不得在最终 schema 里留下临时表名。

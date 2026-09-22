@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::clock;
 use crate::error::{Error, Result};
 use crate::harness::store::find_installation;
-use crate::session::store::{NewSession, SessionRecord, SessionStore};
+use crate::session::store::{NewSession, SessionRecord, SessionStore, TerminationReason};
 
 /// Session 表的编排入口。
 pub struct SessionService<'conn> {
@@ -81,15 +81,23 @@ impl<'conn> SessionService<'conn> {
             .mark_running(hub_session_id, &clock::now_rfc3339())
     }
 
-    /// 启动失败：`created` / `running` → `failed`。
+    /// 启动失败：**仅 `created` → `failed`**，并记录 `launch_failed`。
     pub fn fail(&self, hub_session_id: &str) -> Result<bool> {
         self.store.fail(hub_session_id, &clock::now_rfc3339())
     }
 
     /// 进程结束（只接受 `running`）；重复调用返回 `false`，不报错。
-    pub fn finish(&self, hub_session_id: &str, exit_code: Option<i32>) -> Result<bool> {
+    ///
+    /// `reason` 说明**为什么**结束，`exit_code` 是进程自己的退出码 —— 两者正交，
+    /// 由 [`TerminationReason::terminal_status`] 推导终态。
+    pub fn finish(
+        &self,
+        hub_session_id: &str,
+        exit_code: Option<i32>,
+        reason: TerminationReason,
+    ) -> Result<bool> {
         self.store
-            .finish(hub_session_id, exit_code, &clock::now_rfc3339())
+            .finish(hub_session_id, exit_code, reason, &clock::now_rfc3339())
     }
 
     pub fn list_recent(&self, limit: u32) -> Result<Vec<SessionRecord>> {
@@ -231,7 +239,11 @@ mod tests {
         );
 
         assert!(service
-            .finish(&started.hub_session_id, Some(0))
+            .finish(
+                &started.hub_session_id,
+                Some(0),
+                TerminationReason::NaturalExit
+            )
             .expect("结束"));
         let stored = service
             .get(&started.hub_session_id)
@@ -251,7 +263,11 @@ mod tests {
             .expect("登记");
 
         assert!(!service
-            .finish(&started.hub_session_id, Some(0))
+            .finish(
+                &started.hub_session_id,
+                Some(0),
+                TerminationReason::NaturalExit
+            )
             .expect("不应生效"));
         assert_eq!(
             service
@@ -361,10 +377,18 @@ mod tests {
         service.mark_running(&started.hub_session_id).expect("启动");
 
         assert!(service
-            .finish(&started.hub_session_id, Some(0))
+            .finish(
+                &started.hub_session_id,
+                Some(0),
+                TerminationReason::NaturalExit
+            )
             .expect("结束"));
         assert!(!service
-            .finish(&started.hub_session_id, Some(0))
+            .finish(
+                &started.hub_session_id,
+                Some(0),
+                TerminationReason::NaturalExit
+            )
             .expect("重复结束"));
     }
 
@@ -378,7 +402,11 @@ mod tests {
         service.mark_running(&started.hub_session_id).expect("启动");
 
         service
-            .finish(&started.hub_session_id, Some(130))
+            .finish(
+                &started.hub_session_id,
+                Some(130),
+                TerminationReason::NaturalExit,
+            )
             .expect("结束");
 
         assert_eq!(
@@ -396,7 +424,9 @@ mod tests {
         let db = seeded_db();
         let service = service_from(&db);
 
-        assert!(!service.finish("does-not-exist", Some(0)).expect("不应报错"));
+        assert!(!service
+            .finish("does-not-exist", Some(0), TerminationReason::NaturalExit)
+            .expect("不应报错"));
         assert!(service.list_recent(10).expect("列出").is_empty());
     }
 

@@ -7,4 +7,6 @@ pub mod service;
 pub mod store;
 
 pub use service::SessionService;
-pub use store::{LaunchMode, NewSession, SessionRecord, SessionStatus, SessionStore};
+pub use store::{
+    LaunchMode, NewSession, SessionRecord, SessionStatus, SessionStore, TerminationReason,
+};

@@ -11,7 +11,7 @@ use crate::db::DbHealth;
 use crate::error::{Error, Result};
 use crate::harness::inventory::{installation_id, reconcile_harnesses, ReconcileReport};
 use crate::harness::registry::HarnessSummary;
-use crate::session::{service::SessionService, SessionRecord};
+use crate::session::{service::SessionService, SessionRecord, TerminationReason};
 use crate::{runtime, AppState};
 
 /// 前端 Dashboard 顶部展示的应用信息。
@@ -127,6 +127,10 @@ pub fn create_session(
 
 /// 结束一条仍处于 `running` 的会话；返回是否真的更新了行（幂等）。
 ///
+/// 必须显式给出 `reason`：**非零退出码不等于同一种失败**。
+/// 用户强杀、CLI 参数错误、Agent 工作失败、Harness Hub 自身故障含义完全不同
+/// （见 migration 0004）。终态由 reason + exit_code 共同推导。
+///
 /// 对 `created`（从未启动）的会话会返回 `false` —— 结束一个从未运行的会话
 /// 只会造出假历史。
 #[tauri::command]
@@ -134,9 +138,10 @@ pub fn finish_session(
     state: State<'_, AppState>,
     hub_session_id: String,
     exit_code: Option<i32>,
+    reason: TerminationReason,
 ) -> Result<bool> {
     let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
-    SessionService::new(database.connection()).finish(&hub_session_id, exit_code)
+    SessionService::new(database.connection()).finish(&hub_session_id, exit_code, reason)
 }
 
 /// 最近会话，按开始时间倒序。

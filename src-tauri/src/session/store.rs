@@ -7,12 +7,13 @@
 //! 状态机（docs/adr/0006）—— **没有进程就不能是 running**：
 //!
 //! ```text
-//! created ──mark_running──▶ running ──finish(0)───▶ exited
-//!    │                        └────finish(≠0)──▶ failed
-//!    └──fail──▶ failed        └────finish(None)─▶ unknown
+//! created ──mark_running──▶ running ──finish(exit, reason)──▶ exited / failed / unknown
+//!    └──fail(launch_failed)──▶ failed
 //! ```
 //!
-//! `unknown` 只用于「拿不到退出码」或「无法识别的存量数据」，不是万能兜底。
+//! `unknown` 只用于「拿不到退出码」「宿主关闭」「失去联系」。
+//! 终态还额外记录 **termination_reason**（为什么结束），与 `exit_code` 正交 ——
+//! 非零退出不等于同一种失败（见 migration 0004 与 `TerminationReason`）。
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,70 @@ use crate::error::Result;
 
 const SELECT_COLUMNS: &str = "hub_session_id, source_session_id, harness_id, installation_id, \
      project_id, runtime_target_id, parent_session_id, status, launch_mode, cwd, worktree_path, \
-     started_at, ended_at, exit_code";
+     started_at, ended_at, exit_code, termination_reason";
+
+/// **为什么**会话结束了。与 `exit_code` 正交（见 migration 0004）。
+///
+/// 非零退出码不等于同一种失败：用户主动 kill、CLI 参数错误、Agent 真的工作失败、
+/// Harness Hub 自己管理进程失败，含义完全不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationReason {
+    /// 进程自己结束（退出码可能是 0 也可能是非 0）。
+    NaturalExit,
+    /// 用户主动结束。
+    UserKilled,
+    /// 启动就没成功（spawn 失败、binary 缺失等）。
+    LaunchFailed,
+    /// 运行期出错（Harness Hub 侧观测到的运行时故障）。
+    RuntimeError,
+    /// 宿主（Harness Hub）关闭导致的终止。
+    HostShutdown,
+    /// 失去联系 / 无法确定（含重启后发现残留的 running）。
+    Lost,
+}
+
+impl TerminationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NaturalExit => "natural_exit",
+            Self::UserKilled => "user_killed",
+            Self::LaunchFailed => "launch_failed",
+            Self::RuntimeError => "runtime_error",
+            Self::HostShutdown => "host_shutdown",
+            Self::Lost => "lost",
+        }
+    }
+
+    fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "natural_exit" => Some(Self::NaturalExit),
+            "user_killed" => Some(Self::UserKilled),
+            "launch_failed" => Some(Self::LaunchFailed),
+            "runtime_error" => Some(Self::RuntimeError),
+            "host_shutdown" => Some(Self::HostShutdown),
+            "lost" => Some(Self::Lost),
+            _ => None,
+        }
+    }
+
+    /// 终止原因 + 进程退出码 → 会话终态。
+    ///
+    /// 刻意让「用户主动结束」落到 `Exited` 而不是 `Failed`：
+    /// 那是我们让进程停的，不是 Agent 工作失败。
+    pub fn terminal_status(self, exit_code: Option<i32>) -> SessionStatus {
+        match self {
+            Self::NaturalExit => match exit_code {
+                Some(0) => SessionStatus::Exited,
+                Some(_) => SessionStatus::Failed,
+                None => SessionStatus::Unknown,
+            },
+            Self::UserKilled => SessionStatus::Exited,
+            Self::LaunchFailed | Self::RuntimeError => SessionStatus::Failed,
+            Self::HostShutdown | Self::Lost => SessionStatus::Unknown,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,6 +235,8 @@ pub struct SessionRecord {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub exit_code: Option<i32>,
+    /// 终止原因；`created` / `running` 阶段以及迁移前的存量终态行为 `None`（原因未记录）。
+    pub termination_reason: Option<TerminationReason>,
 }
 
 /// Session 表的读写入口。
@@ -256,13 +322,15 @@ impl<'conn> SessionStore<'conn> {
         Ok(updated > 0)
     }
 
-    /// 启动失败：**仅 `created` → `failed`**。
+    /// 启动失败：**仅 `created` → `failed`**，并记录 `launch_failed`。
     ///
     /// 已经 `running` 的会话必须走 [`Self::finish`]：否则并发下晚到的 `fail`
     /// 会覆盖 `running`（Task 4 的 spawn 线程与等待线程会真的并发）。
     pub fn fail(&self, hub_session_id: &str, ended_at: &str) -> Result<bool> {
         let updated = self.conn.execute(
-            "UPDATE sessions SET status = 'failed', ended_at = ?2, updated_at = ?2
+            "UPDATE sessions
+                SET status = 'failed', termination_reason = 'launch_failed',
+                    ended_at = ?2, updated_at = ?2
               WHERE hub_session_id = ?1 AND status = 'created'",
             params![hub_session_id, ended_at],
         )?;
@@ -271,25 +339,30 @@ impl<'conn> SessionStore<'conn> {
 
     /// 进程结束：**只接受 `running`**。
     ///
-    /// `exit_code` 为 `Some(0)` 记为 exited，非 0 记为 failed，缺失记为 unknown。
+    /// `reason` 决定「为什么结束」，`exit_code` 是进程自己的退出码 —— 两者正交。
+    /// 终态由 [`TerminationReason::terminal_status`] 推导。
     /// 对 `created` 会话调用会返回 `false`：它从未启动过，结束它只会造出假历史。
     pub fn finish(
         &self,
         hub_session_id: &str,
         exit_code: Option<i32>,
+        reason: TerminationReason,
         ended_at: &str,
     ) -> Result<bool> {
-        let status = match exit_code {
-            Some(0) => SessionStatus::Exited,
-            Some(_) => SessionStatus::Failed,
-            None => SessionStatus::Unknown,
-        };
+        let status = reason.terminal_status(exit_code);
 
         let updated = self.conn.execute(
             "UPDATE sessions
-                SET status = ?2, ended_at = ?3, exit_code = ?4, updated_at = ?3
+                SET status = ?2, termination_reason = ?3, ended_at = ?4,
+                    exit_code = ?5, updated_at = ?4
               WHERE hub_session_id = ?1 AND status = 'running'",
-            params![hub_session_id, status.as_str(), ended_at, exit_code],
+            params![
+                hub_session_id,
+                status.as_str(),
+                reason.as_str(),
+                ended_at,
+                exit_code
+            ],
         )?;
 
         Ok(updated > 0)
@@ -299,6 +372,7 @@ impl<'conn> SessionStore<'conn> {
 fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionRecord> {
     let status: String = row.get(7)?;
     let launch_mode: String = row.get(8)?;
+    let termination_reason: Option<String> = row.get(14)?;
 
     Ok(SessionRecord {
         hub_session_id: row.get(0)?,
@@ -315,6 +389,9 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionRecord> {
         started_at: row.get(11)?,
         ended_at: row.get(12)?,
         exit_code: row.get(13)?,
+        termination_reason: termination_reason
+            .as_deref()
+            .and_then(TerminationReason::from_db),
     })
 }
 
@@ -514,7 +591,12 @@ mod tests {
             .mark_running("hub-1", "2026-01-01T10:00:01Z")
             .expect("启动");
         store
-            .finish("hub-1", Some(0), "2026-01-01T10:00:02Z")
+            .finish(
+                "hub-1",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:00:02Z",
+            )
             .expect("结束");
 
         assert!(!store
@@ -565,7 +647,12 @@ mod tests {
                 .mark_running("hub-1", "2026-01-01T10:00:01Z")
                 .expect("启动");
             store
-                .finish("hub-1", terminal_update, "2026-01-01T10:00:02Z")
+                .finish(
+                    "hub-1",
+                    terminal_update,
+                    TerminationReason::NaturalExit,
+                    "2026-01-01T10:00:02Z",
+                )
                 .expect("结束");
             let terminal = store.get("hub-1").expect("查询").expect("应存在").status;
 
@@ -584,7 +671,12 @@ mod tests {
             );
             assert!(
                 !store
-                    .finish("hub-1", Some(0), "2026-01-01T10:00:03Z")
+                    .finish(
+                        "hub-1",
+                        Some(0),
+                        TerminationReason::NaturalExit,
+                        "2026-01-01T10:00:03Z"
+                    )
                     .expect("晚到 finish"),
                 "{label} 之后 finish 必须失败"
             );
@@ -607,7 +699,12 @@ mod tests {
             .expect("启动");
 
         assert!(store
-            .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
+            .finish(
+                "hub-1",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:05:00Z"
+            )
             .expect("结束"));
 
         let stored = store.get("hub-1").expect("查询").expect("应存在");
@@ -628,7 +725,12 @@ mod tests {
             .expect("启动");
 
         store
-            .finish("hub-1", Some(130), "2026-01-01T10:05:00Z")
+            .finish(
+                "hub-1",
+                Some(130),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:05:00Z",
+            )
             .expect("结束");
 
         assert_eq!(
@@ -649,7 +751,12 @@ mod tests {
             .expect("启动");
 
         store
-            .finish("hub-1", None, "2026-01-01T10:05:00Z")
+            .finish(
+                "hub-1",
+                None,
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:05:00Z",
+            )
             .expect("结束");
 
         assert_eq!(
@@ -668,7 +775,12 @@ mod tests {
             .expect("插入");
 
         assert!(!store
-            .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
+            .finish(
+                "hub-1",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:05:00Z"
+            )
             .expect("不应生效"));
         assert_eq!(
             store.get("hub-1").expect("查询").expect("应存在").status,
@@ -688,10 +800,20 @@ mod tests {
             .expect("启动");
 
         assert!(store
-            .finish("hub-1", Some(0), "2026-01-01T10:05:00Z")
+            .finish(
+                "hub-1",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:05:00Z"
+            )
             .expect("第一次"));
         assert!(!store
-            .finish("hub-1", Some(0), "2026-01-01T10:09:00Z")
+            .finish(
+                "hub-1",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:09:00Z"
+            )
             .expect("第二次"));
         assert_eq!(
             store
@@ -703,5 +825,123 @@ mod tests {
             Some("2026-01-01T10:05:00Z"),
             "重复结束不得改写结束时间"
         );
+    }
+
+    // ---- termination_reason（与 exit_code 正交） ----
+
+    #[test]
+    fn termination_reason_maps_to_the_right_terminal_status() {
+        use TerminationReason::*;
+
+        assert_eq!(NaturalExit.terminal_status(Some(0)), SessionStatus::Exited);
+        assert_eq!(NaturalExit.terminal_status(Some(2)), SessionStatus::Failed);
+        assert_eq!(NaturalExit.terminal_status(None), SessionStatus::Unknown);
+
+        assert_eq!(
+            UserKilled.terminal_status(Some(137)),
+            SessionStatus::Exited,
+            "用户主动结束不是业务失败，即使进程以非零码退出"
+        );
+
+        assert_eq!(LaunchFailed.terminal_status(None), SessionStatus::Failed);
+        assert_eq!(RuntimeError.terminal_status(Some(1)), SessionStatus::Failed);
+        assert_eq!(HostShutdown.terminal_status(None), SessionStatus::Unknown);
+        assert_eq!(Lost.terminal_status(None), SessionStatus::Unknown);
+    }
+
+    /// 用户强杀：状态是「已结束」，但退出码与原因都保留下来 —— 这就是拆分二者的意义。
+    #[test]
+    fn user_kill_keeps_both_the_reason_and_the_exit_code() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
+
+        store
+            .finish(
+                "hub-1",
+                Some(137),
+                TerminationReason::UserKilled,
+                "2026-01-01T10:05:00Z",
+            )
+            .expect("结束");
+
+        let stored = store.get("hub-1").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Exited);
+        assert_eq!(stored.exit_code, Some(137), "真实退出码必须保留");
+        assert_eq!(
+            stored.termination_reason,
+            Some(TerminationReason::UserKilled)
+        );
+    }
+
+    #[test]
+    fn launch_failure_is_recorded_with_its_own_reason() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        assert!(store
+            .fail("hub-1", "2026-01-01T10:00:05Z")
+            .expect("标记失败"));
+
+        let stored = store.get("hub-1").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Failed);
+        assert_eq!(
+            stored.termination_reason,
+            Some(TerminationReason::LaunchFailed),
+            "启动失败必须与运行期失败区分开"
+        );
+        assert!(stored.exit_code.is_none(), "启动失败没有退出码");
+    }
+
+    #[test]
+    fn running_sessions_have_no_termination_reason() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
+
+        let stored = store.get("hub-1").expect("查询").expect("应存在");
+        assert_eq!(stored.termination_reason, None);
+    }
+
+    /// 数据库层兜底：非法原因写不进去。
+    #[test]
+    fn database_rejects_an_unknown_termination_reason() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+
+        let invalid = db.connection().execute(
+            "UPDATE sessions SET status = 'failed', termination_reason = 'because-i-said-so'
+              WHERE hub_session_id = 'hub-1'",
+            [],
+        );
+
+        assert!(invalid.is_err(), "CHECK 约束必须拒绝未知的终止原因");
+    }
+
+    #[test]
+    fn termination_reason_round_trips_through_the_database() {
+        assert_eq!(
+            TerminationReason::from_db("host_shutdown"),
+            Some(TerminationReason::HostShutdown)
+        );
+        assert_eq!(TerminationReason::from_db("nonsense"), None);
+        assert_eq!(TerminationReason::NaturalExit.as_str(), "natural_exit");
+        assert_eq!(TerminationReason::UserKilled.as_str(), "user_killed");
     }
 }
