@@ -44,3 +44,60 @@ journal_mode: wal
   见 `docs/plans/2026-09-21-v0.1-walking-skeleton.md` Task 4 / 5 / 6。
 - Linux 平台：本机未验证（CI 配置已就位但未在真实 runner 上跑过）。
 - `.github/workflows/ci.yml`：本地无法执行，属未验证脚手架。
+
+---
+
+## 2026-09-21 — Task 2：Harness 能力矩阵接线到 IPC 与 UI（已验收）
+
+### 验收方式
+
+通过 WebView2 的远程调试端口（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`）
+用 CDP 驱动运行中的应用：`Page.navigate` 到 `#/harnesses`，再取 `document.body.innerText`
+与 `Page.captureScreenshot`。
+
+**该方式不触碰用户桌面**：不置顶窗口、不移动鼠标、不发送键盘事件、不截取整个屏幕。
+（早先尝试过窗口置顶 + 模拟点击/按键，会抢占用户桌面，已废弃。）
+
+### 实际检测结果（真实 detection，非 mock）
+
+```text
+location.href : http://localhost:1420/#/harnesses
+Codex / Harness ID：codex / 已安装
+版本          0.152.1
+可执行文件    D:\npm-global\codex.cmd
+数据目录（只读） C:\Users\tangy\.codex
+能力矩阵      启动 ✓ 终端 ✓ 恢复 ✓ Usage — 回放 — 工具调用 — 子代理 — 实时状态 — Worktree —
+侧边栏        Tauri 运行时已连接
+```
+
+对照命令：`D:\npm-global\codex.cmd --version` → `codex-cli 0.152.1`（一致）。
+
+### 本次真机验证发现并修复的缺陷（重要）
+
+第一次真机运行时 UI 显示 **版本未知**，`可执行文件` 为 `D:\npm-global\codex`：
+
+- `candidate_paths` 把**无扩展名**排在首位（对 Unix 正确）。但 npm 在 Windows 上同时生成
+  `codex`（POSIX bash 脚本）、`codex.cmd`、`codex.ps1`，无扩展名那份 **Windows 无法
+  CreateProcess**，于是 `--version` 永远读不出来。
+- 修复：Windows 上先枚举 `cmd / exe / bat / com / ps1`，无扩展名只作最后兜底；
+  非 Windows 保持无扩展名优先。
+- 回归锁：单元测试 `candidate_paths_puts_real_windows_executables_before_the_bash_shim`
+  ＋ 集成测试 `prefers_a_real_windows_executable_over_the_bare_bash_shim`
+  ＋ `detects_codex_without_lying_about_the_host` 中「选中可执行文件就必须读出版本」的断言。
+
+单靠 FakeHostProbe 的单元测试**无法**发现该缺陷：假宿主只会回答被我配置过的那个路径。
+这条缺陷是端到端启动应用才暴露出来的。
+
+### 本轮验证命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `pnpm verify` | 退出码 0（lint / typecheck / 34 前端用例 / build / rust fmt / clippy / 43 单元 + 2 集成用例） |
+| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
+| `cargo test --test codex_detection` | `2 passed`（真实 PATH + 真实子进程） |
+
+### 仍未验收
+
+- 用户桌面上窗口的**视觉观感**（字体、间距等主观项）：只看过 CDP 页面截图与 innerText。
+- 未安装 Harness 的机器上的 UI 表现：仅有 vitest 覆盖，没有真机。
+
