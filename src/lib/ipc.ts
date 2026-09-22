@@ -196,3 +196,124 @@ export async function listHarnesses(): Promise<IpcResult<HarnessSummary[]>> {
 
   return { ok: true, data: summaries };
 }
+
+/* ------------------------------------------------------------------ *
+ * Session
+ * ------------------------------------------------------------------ */
+
+export type SessionStatus = 'running' | 'exited' | 'failed' | 'unknown';
+export type LaunchMode = 'terminal' | 'resume' | 'imported';
+
+/**
+ * 与 Rust `SessionRecord`（serde camelCase）同形。
+ *
+ * `hubSessionId` 是 Harness Hub 自己的标识；`sourceSessionId` 是外部 Harness 的原始
+ * id（PTY 会话没有，导入的历史会话才有）。两者不可混用。
+ */
+export type SessionRecord = {
+  hubSessionId: string;
+  sourceSessionId: string | null;
+  harnessId: string;
+  projectId: string | null;
+  runtimeTargetId: string;
+  parentSessionId: string | null;
+  status: SessionStatus;
+  launchMode: LaunchMode;
+  cwd: string | null;
+  worktreePath: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  exitCode: number | null;
+};
+
+const SESSION_STATUSES = ['running', 'exited', 'failed', 'unknown'] as const;
+const LAUNCH_MODES = ['terminal', 'resume', 'imported'] as const;
+
+function asStringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `SessionRecord`。
+ *
+ * 未知 `status` 一律降级为 `unknown` —— 绝不能把没见过的状态当成 `running`
+ * （那会让 UI 声称一个可能已经死掉的会话仍在运行）。
+ */
+export function normalizeSessionRecord(raw: unknown): SessionRecord | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const hubSessionId = typeof source.hubSessionId === 'string' ? source.hubSessionId.trim() : '';
+  if (hubSessionId.length === 0) {
+    return null;
+  }
+
+  const status = SESSION_STATUSES.find((candidate) => candidate === source.status) ?? 'unknown';
+  const launchMode =
+    LAUNCH_MODES.find((candidate) => candidate === source.launchMode) ?? 'terminal';
+
+  return {
+    hubSessionId,
+    sourceSessionId: asStringOrNull(source.sourceSessionId),
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    projectId: asStringOrNull(source.projectId),
+    runtimeTargetId: typeof source.runtimeTargetId === 'string' ? source.runtimeTargetId : '',
+    parentSessionId: asStringOrNull(source.parentSessionId),
+    status,
+    launchMode,
+    cwd: asStringOrNull(source.cwd),
+    worktreePath: asStringOrNull(source.worktreePath),
+    startedAt: typeof source.startedAt === 'string' ? source.startedAt : '',
+    endedAt: asStringOrNull(source.endedAt),
+    exitCode: typeof source.exitCode === 'number' ? source.exitCode : null,
+  };
+}
+
+/** 最近会话，按开始时间倒序。 */
+export async function listSessions(limit?: number): Promise<IpcResult<SessionRecord[]>> {
+  const result = await invokeCommand<unknown>(
+    'list_sessions',
+    limit === undefined ? undefined : { limit },
+  );
+  if (!result.ok) {
+    return result;
+  }
+
+  const sessions = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeSessionRecord)
+        .filter((session): session is SessionRecord => session !== null)
+    : [];
+
+  return { ok: true, data: sessions };
+}
+
+/**
+ * 新建一条 Session 记录（`status = running`）。
+ *
+ * **不启动任何进程**：PTY 启动属于后续 Task。此命令只负责统一标识 + 运行目标绑定 + 落库。
+ */
+export function createSession(input: {
+  harnessId: string;
+  projectId?: string | null;
+  cwd?: string | null;
+}): Promise<IpcResult<SessionRecord>> {
+  return invokeCommand<SessionRecord>('create_session', {
+    harnessId: input.harnessId,
+    projectId: input.projectId ?? null,
+    cwd: input.cwd ?? null,
+  });
+}
+
+/** 结束一条仍处于 running 的会话；返回是否真的更新了行（幂等）。 */
+export function finishSession(
+  hubSessionId: string,
+  exitCode?: number | null,
+): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('finish_session', {
+    hubSessionId,
+    exitCode: exitCode ?? null,
+  });
+}

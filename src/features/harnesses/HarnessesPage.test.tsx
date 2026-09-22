@@ -131,12 +131,13 @@ describe('HarnessesPage', () => {
     expect(await screen.findByText(/detect failed/)).toBeInTheDocument();
   });
 
-  it('说明 — 的含义，避免用户误读为「不支持」', async () => {
+  it('说明 — 的准确含义是「当前未支持」，而不是「待验证」', async () => {
     stubHarnesses([INSTALLED_CODEX]);
 
     render(<HarnessesPage />);
     await screen.findByText('Codex');
 
-    expect(screen.getByText(/尚未验证支持/)).toBeInTheDocument();
+    expect(screen.getByText(/当前未支持/)).toBeInTheDocument();
+    expect(screen.queryByText(/待验证/)).not.toBeInTheDocument();
   });
 });

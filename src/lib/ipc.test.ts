@@ -2,12 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   NOT_IN_TAURI,
+  createSession,
+  finishSession,
   getAppInfo,
   getDbHealth,
   invokeCommand,
   isTauriRuntime,
   listHarnesses,
+  listSessions,
   normalizeHarnessSummary,
+  normalizeSessionRecord,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -228,5 +232,128 @@ describe('listHarnesses', () => {
     });
 
     await expect(listHarnesses()).resolves.toEqual({ ok: false, error: 'detect failed' });
+  });
+});
+
+/** 与 Rust `SessionRecord`（serde camelCase）同形。 */
+const SESSION_PAYLOAD = {
+  hubSessionId: '6f1c0f7e-0000-4000-8000-000000000001',
+  sourceSessionId: null,
+  harnessId: 'codex',
+  projectId: null,
+  runtimeTargetId: 'local',
+  parentSessionId: null,
+  status: 'running',
+  launchMode: 'terminal',
+  cwd: 'D:/work',
+  worktreePath: null,
+  startedAt: '2026-09-22T10:00:00Z',
+  endedAt: null,
+  exitCode: null,
+};
+
+describe('normalizeSessionRecord', () => {
+  it('保留合法 payload 的全部字段', () => {
+    expect(normalizeSessionRecord(SESSION_PAYLOAD)).toEqual(SESSION_PAYLOAD);
+  });
+
+  it('缺 hubSessionId 的条目返回 null', () => {
+    expect(normalizeSessionRecord({ status: 'running' })).toBeNull();
+    expect(normalizeSessionRecord(null)).toBeNull();
+    expect(normalizeSessionRecord({ hubSessionId: '   ' })).toBeNull();
+  });
+
+  it('未知 status 归一化为 unknown，不得当成 running', () => {
+    const record = normalizeSessionRecord({ ...SESSION_PAYLOAD, status: 'weird' });
+
+    expect(record?.status).toBe('unknown');
+  });
+
+  it('未知 launchMode 归一化为 terminal（与 Rust 侧解码一致）', () => {
+    const record = normalizeSessionRecord({ ...SESSION_PAYLOAD, launchMode: 'telepathy' });
+
+    expect(record?.launchMode).toBe('terminal');
+  });
+
+  it('字段缺失时补安全默认值', () => {
+    const record = normalizeSessionRecord({ hubSessionId: 'h1' });
+
+    expect(record).not.toBeNull();
+    expect(record?.harnessId).toBe('');
+    expect(record?.runtimeTargetId).toBe('');
+    expect(record?.status).toBe('unknown');
+    expect(record?.endedAt).toBeNull();
+    expect(record?.exitCode).toBeNull();
+  });
+
+  it('exitCode 非数字时视为 null，不把字符串渲染出来', () => {
+    const record = normalizeSessionRecord({ ...SESSION_PAYLOAD, exitCode: '130' });
+
+    expect(record?.exitCode).toBeNull();
+  });
+});
+
+describe('session commands', () => {
+  it('listSessions 使用 list_sessions 并按需传 limit', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [SESSION_PAYLOAD]);
+    stubTauri(invokeSpy);
+
+    const result = await listSessions(10);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('list_sessions');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ limit: 10 });
+    expect(result).toEqual({ ok: true, data: [SESSION_PAYLOAD] });
+  });
+
+  it('listSessions 不传 limit 时不带上 limit 参数', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => []);
+    stubTauri(invokeSpy);
+
+    await listSessions();
+
+    // @tauri-apps/api 会把缺失的 args 补成 {}，所以断言「没有 limit 键」而不是 undefined。
+    const args = invokeSpy.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    expect(args?.limit).toBeUndefined();
+  });
+
+  it('listSessions 后端返回非数组时按空列表处理', async () => {
+    stubTauri(async () => null);
+
+    await expect(listSessions()).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('createSession 传 camelCase 参数（Rust 侧 harness_id / project_id / cwd）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => SESSION_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await createSession({ harnessId: 'codex', cwd: 'D:/work' });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('create_session');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      harnessId: 'codex',
+      projectId: null,
+      cwd: 'D:/work',
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('finishSession 传 hubSessionId 与 exitCode', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
+    stubTauri(invokeSpy);
+
+    const result = await finishSession('h1', 0);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('finish_session');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ hubSessionId: 'h1', exitCode: 0 });
+    expect(result).toEqual({ ok: true, data: true });
+  });
+
+  it('不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(listSessions()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(createSession({ harnessId: 'codex' })).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(finishSession('h1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

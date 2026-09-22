@@ -110,8 +110,9 @@ export function HarnessesPage() {
             <HarnessCard key={summary.id} summary={summary} />
           ))}
           <p className="text-[11px] text-content-muted">
-            能力为 — 表示尚未验证支持，不等于不支持。Coding Harness 的能力逐项独立演进，
-            每一项只有在有测试或验收记录后才会显示为 ✓。
+            ✓ = 已实现该能力；— = <strong className="font-medium">当前未支持</strong>
+            （实现尚未落地）。能力逐项独立演进，不因某台机器的环境问题（binary 缺失、
+            auth 过期等）而改变 —— 那属于 readiness，见 ADR-0005。
           </p>
         </div>
       ) : null}
@@ -154,7 +155,12 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
                 <li
                   key={key}
                   data-testid={`capability-${key}`}
-                  aria-label={`${label}：${supported ? '支持' : '尚未验证支持'}`}
+                  title={
+                    supported
+                      ? `${label}：已实现`
+                      : `${label}：当前未支持（实现尚未落地）`
+                  }
+                  aria-label={`${label}：${supported ? '已实现' : '当前未支持'}`}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]',
                     supported
