@@ -256,11 +256,14 @@ impl<'conn> SessionStore<'conn> {
         Ok(updated > 0)
     }
 
-    /// 启动失败：`created` / `running` → `failed`。
+    /// 启动失败：**仅 `created` → `failed`**。
+    ///
+    /// 已经 `running` 的会话必须走 [`Self::finish`]：否则并发下晚到的 `fail`
+    /// 会覆盖 `running`（Task 4 的 spawn 线程与等待线程会真的并发）。
     pub fn fail(&self, hub_session_id: &str, ended_at: &str) -> Result<bool> {
         let updated = self.conn.execute(
             "UPDATE sessions SET status = 'failed', ended_at = ?2, updated_at = ?2
-              WHERE hub_session_id = ?1 AND status IN ('created', 'running')",
+              WHERE hub_session_id = ?1 AND status = 'created'",
             params![hub_session_id, ended_at],
         )?;
         Ok(updated > 0)
@@ -521,6 +524,75 @@ mod tests {
             store.get("hub-1").expect("查询").expect("应存在").status,
             SessionStatus::Exited
         );
+    }
+
+    /// `running` 的会话不得被 `fail` 改写 —— 进程已经跑起来了，终态必须由 finish 决定。
+    #[test]
+    fn fail_is_rejected_for_running_sessions() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("hub-1", "2026-01-01T10:00:01Z")
+            .expect("启动");
+
+        assert!(!store
+            .fail("hub-1", "2026-01-01T10:00:02Z")
+            .expect("不应生效"));
+        assert_eq!(
+            store.get("hub-1").expect("查询").expect("应存在").status,
+            SessionStatus::Running
+        );
+    }
+
+    /// **Task 4 并发契约**：终态一旦写入，晚到的状态更新必须全部失败。
+    ///
+    /// 典型真实竞态：进程已经退出并 `finish`，另一个线程随后才 `mark_running`
+    /// —— 若无条件 UPDATE，数据库就会显示 running 而进程早就死了（幽灵 session）。
+    #[test]
+    fn terminal_states_cannot_be_overwritten_by_late_updates() {
+        for (label, terminal_update) in
+            [("exited", Some(0)), ("failed", Some(1)), ("unknown", None)]
+        {
+            let db = seeded_db();
+            let store = SessionStore::new(db.connection());
+            store
+                .insert(&session("hub-1", "2026-01-01T10:00:00Z"))
+                .expect("插入");
+            store
+                .mark_running("hub-1", "2026-01-01T10:00:01Z")
+                .expect("启动");
+            store
+                .finish("hub-1", terminal_update, "2026-01-01T10:00:02Z")
+                .expect("结束");
+            let terminal = store.get("hub-1").expect("查询").expect("应存在").status;
+
+            // 晚到的所有其他迁移都必须失败
+            assert!(
+                !store
+                    .mark_running("hub-1", "2026-01-01T10:00:03Z")
+                    .expect("晚到 mark_running"),
+                "{label} 之后 mark_running 必须失败"
+            );
+            assert!(
+                !store
+                    .fail("hub-1", "2026-01-01T10:00:03Z")
+                    .expect("晚到 fail"),
+                "{label} 之后 fail 必须失败"
+            );
+            assert!(
+                !store
+                    .finish("hub-1", Some(0), "2026-01-01T10:00:03Z")
+                    .expect("晚到 finish"),
+                "{label} 之后 finish 必须失败"
+            );
+
+            let after = store.get("hub-1").expect("查询").expect("应存在");
+            assert_eq!(after.status, terminal, "{label} 状态被覆盖了");
+            assert_eq!(after.ended_at.as_deref(), Some("2026-01-01T10:00:02Z"));
+        }
     }
 
     #[test]

@@ -18,6 +18,46 @@ use rusqlite::{params, Connection};
 use crate::error::{Error, Result};
 use crate::harness::registry::HarnessSummary;
 
+/// 一条安装记录（读模型）。
+///
+/// Session 编排与启动路径都从这里取「这个安装属于哪个 Harness、在哪台 runtime 上、
+/// binary 在哪」—— 避免调用方被要求分别传这些值而构造出自相矛盾的组合。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessInstallation {
+    pub id: String,
+    pub harness_id: String,
+    pub runtime_target_id: String,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub availability: String,
+}
+
+/// 按 id 读取安装。不存在时返回 `Ok(None)`。
+pub fn find_installation(
+    conn: &Connection,
+    installation_id: &str,
+) -> Result<Option<HarnessInstallation>> {
+    let mut statement = conn.prepare(
+        "SELECT id, harness_id, runtime_target_id, binary_path, version, availability
+           FROM harness_installations WHERE id = ?1",
+    )?;
+    let mut rows = statement.query_map(params![installation_id], |row| {
+        Ok(HarnessInstallation {
+            id: row.get(0)?,
+            harness_id: row.get(1)?,
+            runtime_target_id: row.get(2)?,
+            binary_path: row.get(3)?,
+            version: row.get(4)?,
+            availability: row.get(5)?,
+        })
+    })?;
+
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
 /// 写入（或更新）Harness 定义行。
 ///
 /// 幂等：重复调用只更新 `display_name` / `updated_at`，`created_at` 保持首次值。
@@ -265,5 +305,40 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("解析");
         assert_eq!(value["toolCalls"], true);
         assert!(value.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn find_installation_returns_the_full_install_record() {
+        let db = empty_db();
+        seed_dependencies(&db);
+        let id = upsert_harness_installation(
+            db.connection(),
+            &summary(true, Some("0.152.1")),
+            RUNTIME_TARGET_ID,
+            "2026-09-22T10:00:00Z",
+        )
+        .expect("写入");
+
+        let found = find_installation(db.connection(), &id)
+            .expect("查询")
+            .expect("应存在");
+
+        assert_eq!(found.harness_id, "codex");
+        assert_eq!(found.runtime_target_id, RUNTIME_TARGET_ID);
+        assert_eq!(
+            found.binary_path.as_deref(),
+            Some("D:/npm-global/codex.cmd")
+        );
+        assert_eq!(found.version.as_deref(), Some("0.152.1"));
+        assert_eq!(found.availability, "available");
+    }
+
+    #[test]
+    fn find_installation_returns_none_for_unknown_id() {
+        let db = empty_db();
+
+        assert!(find_installation(db.connection(), "codex@nowhere")
+            .expect("查询")
+            .is_none());
     }
 }

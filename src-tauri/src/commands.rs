@@ -116,9 +116,10 @@ pub fn create_session(
 
     let installation = installation_id(&harness_id, runtime::local::LOCAL_TARGET_ID);
 
-    SessionService::new(database.connection()).start(
-        &harness_id,
-        Some(&installation),
+    // harness_id 与 runtime_target_id 由 installation 推导，
+    // 调用方无法构造出矛盾的组合（数据库层另有复合外键兜底）。
+    SessionService::new(database.connection()).start_from_installation(
+        &installation,
         project_id.as_deref(),
         cwd.as_deref(),
     )
