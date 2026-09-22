@@ -35,8 +35,11 @@ impl std::fmt::Display for HarnessId {
 
 /// 能力矩阵。刻意不用单个 boolean：每个 Harness 的能力独立演进，
 /// UI 需要能逐项灰度（launch ✓ / usage ✗ / replay ?）。
+///
+/// 序列化用 camelCase：与其余 IPC 载荷一致（`binaryPath` / `dataPaths` / `displayName`），
+/// 前端因此读 `toolCalls` / `liveState`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct HarnessCapabilities {
     pub launch: bool,
     pub terminal: bool,
@@ -105,4 +108,51 @@ pub trait HarnessAdapter: Send + Sync {
     fn launch(&self, request: LaunchRequest) -> Result<ProcessHandle>;
 
     fn resume(&self, request: ResumeRequest) -> Result<ProcessHandle>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_serialize_as_camel_case_for_ipc() {
+        let capabilities = HarnessCapabilities {
+            launch: true,
+            tool_calls: true,
+            live_state: true,
+            ..HarnessCapabilities::default()
+        };
+
+        // HarnessCapabilities 是 Copy，按值传入即可（clippy: needless_borrows_for_generic_args）。
+        let json = serde_json::to_value(capabilities).expect("序列化");
+
+        assert_eq!(json["launch"], true);
+        assert_eq!(json["toolCalls"], true, "IPC 契约是 camelCase");
+        assert_eq!(json["liveState"], true);
+        assert!(
+            json.get("tool_calls").is_none(),
+            "不得输出 snake_case 键：前端读的是 toolCalls"
+        );
+    }
+
+    #[test]
+    fn capabilities_default_is_all_unsupported() {
+        let capabilities = HarnessCapabilities::default();
+
+        assert_eq!(
+            capabilities,
+            HarnessCapabilities {
+                launch: false,
+                terminal: false,
+                resume: false,
+                usage: false,
+                replay: false,
+                tool_calls: false,
+                subagents: false,
+                live_state: false,
+                worktree: false,
+            },
+            "默认必须是「全不支持」，避免未验证就宣称能力"
+        );
+    }
 }

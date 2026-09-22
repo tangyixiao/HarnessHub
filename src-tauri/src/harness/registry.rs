@@ -2,7 +2,36 @@
 //!
 //! 注册表只负责「有哪些 Harness、各自能力如何」，不关心进程与 PTY 细节。
 
+use serde::Serialize;
+
 use crate::harness::adapter::{HarnessAdapter, HarnessCapabilities, HarnessId};
+
+/// 一个 Harness 的对外快照：检测结果 + 能力矩阵。
+///
+/// 这是 IPC 契约类型，字段名序列化为 camelCase，前端 `src/lib/ipc.ts` 的
+/// `HarnessSummary` 必须与之同形；改名即破坏契约，必须同步两侧测试。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSummary {
+    pub id: String,
+    pub display_name: String,
+    pub installed: bool,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub capabilities: HarnessCapabilities,
+    pub data_paths: Vec<String>,
+}
+
+/// 展示名映射。未登记的 Harness 直接回显 id，避免编造名字。
+fn display_name_for(id: &str) -> String {
+    match id {
+        "codex" => "Codex".to_string(),
+        "claude-code" => "Claude Code".to_string(),
+        "gemini-cli" => "Gemini CLI".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// 已注册适配器的集合。
 #[derive(Default)]
@@ -57,6 +86,29 @@ impl HarnessRegistry {
     /// 某个 Harness 的能力矩阵；未注册时返回 `None`。
     pub fn capabilities(&self, id: &HarnessId) -> Option<HarnessCapabilities> {
         self.get(id).map(|adapter| adapter.capabilities())
+    }
+
+    /// 面向 UI 的快照：逐个适配器执行真实检测，并带上其能力矩阵。
+    ///
+    /// `detect()` 不返回 `Result`（见 `HarnessAdapter`）：检测失败必须表现为
+    /// 「不可用但可展示」的状态，而不是让整个 IPC 调用失败。
+    pub fn summaries(&self) -> Vec<HarnessSummary> {
+        self.iter()
+            .map(|adapter| {
+                let id = adapter.id();
+                let detect = adapter.detect();
+
+                HarnessSummary {
+                    display_name: display_name_for(id.as_str()),
+                    id: id.as_str().to_string(),
+                    installed: detect.installed,
+                    binary_path: detect.binary_path,
+                    version: detect.version,
+                    capabilities: adapter.capabilities(),
+                    data_paths: detect.data_paths,
+                }
+            })
+            .collect()
     }
 }
 
@@ -190,5 +242,81 @@ mod tests {
         assert!(capabilities.launch);
         assert!(!capabilities.usage, "未声明的能力必须默认关闭");
         assert!(registry.capabilities(&HarnessId::from("missing")).is_none());
+    }
+
+    #[test]
+    fn summaries_describe_every_registered_adapter() {
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(FakeAdapter::new("codex", true)));
+
+        let summaries = registry.summaries();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "codex");
+        assert_eq!(summaries[0].display_name, "Codex");
+        assert!(summaries[0].installed);
+        assert_eq!(summaries[0].binary_path.as_deref(), Some("/usr/bin/codex"));
+        assert_eq!(summaries[0].version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn summaries_carry_the_adapters_capability_matrix() {
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(FakeAdapter::new("codex", true)));
+
+        let capabilities = registry.summaries()[0].capabilities;
+
+        assert!(capabilities.launch, "能力必须来自适配器，而不是注册表猜的");
+        assert!(capabilities.terminal);
+        assert!(!capabilities.usage);
+    }
+
+    #[test]
+    fn summaries_of_uninstalled_adapter_report_unavailable_without_lying() {
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(FakeAdapter::new("codex", false)));
+
+        let summary = &registry.summaries()[0];
+
+        assert!(!summary.installed);
+        assert!(summary.binary_path.is_none());
+        assert!(summary.version.is_none());
+    }
+
+    #[test]
+    fn summaries_serialize_with_camel_case_keys() {
+        // 前后端契约测试：src/features/harnesses 依赖这些键名。
+        // Rust 字段是 snake_case，JSON 必须是 camelCase，否则前端读到 undefined。
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(FakeAdapter::new("codex", true)));
+
+        let json = serde_json::to_value(&registry.summaries()[0]).expect("序列化");
+
+        assert_eq!(json["id"], "codex");
+        assert_eq!(json["displayName"], "Codex");
+        assert_eq!(json["installed"], true);
+        assert_eq!(json["binaryPath"], "/usr/bin/codex");
+        assert_eq!(json["version"], "1.0.0");
+        assert_eq!(json["dataPaths"], serde_json::json!([]));
+        assert_eq!(json["capabilities"]["launch"], true);
+        assert_eq!(json["capabilities"]["toolCalls"], false);
+        assert_eq!(json["capabilities"]["liveState"], false);
+        assert!(
+            json["capabilities"].get("tool_calls").is_none(),
+            "不得同时输出 snake_case 键，避免两套契约并存"
+        );
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("binary_path").is_none());
+    }
+
+    #[test]
+    fn display_name_falls_back_to_id_for_unknown_harness() {
+        assert_eq!(display_name_for("codex"), "Codex");
+        assert_eq!(display_name_for("claude-code"), "Claude Code");
+        assert_eq!(
+            display_name_for("mystery-cli"),
+            "mystery-cli",
+            "未登记的名字直接回显 id，不要编造"
+        );
     }
 }

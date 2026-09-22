@@ -8,6 +8,7 @@ use tauri::State;
 
 use crate::db::DbHealth;
 use crate::error::{Error, Result};
+use crate::harness::registry::HarnessSummary;
 use crate::AppState;
 
 /// 前端 Dashboard 顶部展示的应用信息。
@@ -37,4 +38,15 @@ pub fn app_info() -> AppInfo {
 pub fn db_health(state: State<'_, AppState>) -> Result<DbHealth> {
     let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
     database.health()
+}
+
+/// 已注册 Harness 的**真实**检测结果与能力矩阵。
+///
+/// 刻意返回 `Vec` 而不是 `Result`：单个 Harness 检测失败必须表现为
+/// 「该行 `installed: false`」，而不是让整个页面拿不到数据。
+/// 这是 Walking Skeleton 里 UI 唯一被允许获取 Harness 信息的入口 ——
+/// 前端不做任何自己的二进制探测。
+#[tauri::command]
+pub fn list_harnesses(state: State<'_, AppState>) -> Vec<HarnessSummary> {
+    state.harnesses.summaries()
 }

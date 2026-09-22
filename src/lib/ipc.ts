@@ -70,3 +70,129 @@ export function getAppInfo(): Promise<IpcResult<AppInfo>> {
 export function getDbHealth(): Promise<IpcResult<DbHealth>> {
   return invokeCommand<DbHealth>('db_health');
 }
+
+/* ------------------------------------------------------------------ *
+ * Harness 检测
+ * ------------------------------------------------------------------ */
+
+/**
+ * 能力矩阵。字段名与 Rust `HarnessCapabilities` 的 serde camelCase 一致：
+ * Rust 的 `tool_calls` / `live_state` 序列化为 `toolCalls` / `liveState`。
+ */
+export type HarnessCapabilities = {
+  launch: boolean;
+  terminal: boolean;
+  resume: boolean;
+  usage: boolean;
+  replay: boolean;
+  toolCalls: boolean;
+  subagents: boolean;
+  liveState: boolean;
+  worktree: boolean;
+};
+
+/** 与 Rust `HarnessRegistry::summaries()` 的序列化结果同形。 */
+export type HarnessSummary = {
+  id: string;
+  displayName: string;
+  installed: boolean;
+  binaryPath: string | null;
+  version: string | null;
+  capabilities: HarnessCapabilities;
+  dataPaths: string[];
+};
+
+const CAPABILITY_KEYS = [
+  'launch',
+  'terminal',
+  'resume',
+  'usage',
+  'replay',
+  'toolCalls',
+  'subagents',
+  'liveState',
+  'worktree',
+] as const satisfies ReadonlyArray<keyof HarnessCapabilities>;
+
+function unsupportedCapabilities(): HarnessCapabilities {
+  return {
+    launch: false,
+    terminal: false,
+    resume: false,
+    usage: false,
+    replay: false,
+    toolCalls: false,
+    subagents: false,
+    liveState: false,
+    worktree: false,
+  };
+}
+
+function normalizeCapabilities(raw: unknown): HarnessCapabilities {
+  if (typeof raw !== 'object' || raw === null) {
+    return unsupportedCapabilities();
+  }
+
+  const source = raw as Record<string, unknown>;
+  const capabilities = unsupportedCapabilities();
+
+  for (const key of CAPABILITY_KEYS) {
+    // 只有明确的 true 才算支持。缺字段、字符串、数字一律视为不支持 ——
+    // 「不确定」绝不能渲染成「支持」。
+    capabilities[key] = source[key] === true;
+  }
+
+  return capabilities;
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `HarnessSummary`。
+ *
+ * 后端 payload 变更（字段改名、字段缺失、类型变化）不应让整页白屏，
+ * 因此这里做运行时校验：拿不到 `id` 才丢弃该条目，其余一律补默认值。
+ */
+export function normalizeHarnessSummary(raw: unknown): HarnessSummary | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    displayName: typeof source.displayName === 'string' && source.displayName.length > 0
+      ? source.displayName
+      : id,
+    installed: source.installed === true,
+    binaryPath: typeof source.binaryPath === 'string' ? source.binaryPath : null,
+    version: typeof source.version === 'string' ? source.version : null,
+    capabilities: normalizeCapabilities(source.capabilities),
+    dataPaths: Array.isArray(source.dataPaths)
+      ? source.dataPaths.filter((path): path is string => typeof path === 'string')
+      : [],
+  };
+}
+
+/**
+ * 已注册 Harness 的**真实**检测结果（installed / version / binary path / 能力矩阵）。
+ *
+ * UI 不自己做任何二进制探测：本机扫描只发生在 Rust Control Plane。
+ */
+export async function listHarnesses(): Promise<IpcResult<HarnessSummary[]>> {
+  const result = await invokeCommand<unknown>('list_harnesses');
+  if (!result.ok) {
+    return result;
+  }
+
+  const summaries = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeHarnessSummary)
+        .filter((summary): summary is HarnessSummary => summary !== null)
+    : [];
+
+  return { ok: true, data: summaries };
+}

@@ -6,6 +6,8 @@ import {
   getDbHealth,
   invokeCommand,
   isTauriRuntime,
+  listHarnesses,
+  normalizeHarnessSummary,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -104,5 +106,127 @@ describe('typed command wrappers', () => {
     expect(invokeSpy).toHaveBeenCalledTimes(1);
     expect(invokeSpy.mock.calls[0]?.[0]).toBe('db_health');
     expect(result.ok).toBe(true);
+  });
+});
+
+/**
+ * Rust 侧 `HarnessSummary` 是 IPC 契约类型：serde camelCase，
+ * capabilities 的 `tool_calls` / `live_state` 序列化为 `toolCalls` / `liveState`。
+ * 这里用一份手工复刻的 payload 锁住前端侧的解析行为。
+ */
+const CODEX_PAYLOAD = {
+  id: 'codex',
+  displayName: 'Codex',
+  installed: true,
+  binaryPath: 'D:/npm-global/codex.cmd',
+  version: '0.152.1',
+  capabilities: {
+    launch: true,
+    terminal: true,
+    resume: true,
+    usage: false,
+    replay: false,
+    toolCalls: false,
+    subagents: false,
+    liveState: false,
+    worktree: false,
+  },
+  dataPaths: ['C:/Users/dev/.codex'],
+};
+
+describe('normalizeHarnessSummary', () => {
+  it('保留合法 payload 的全部字段', () => {
+    expect(normalizeHarnessSummary(CODEX_PAYLOAD)).toEqual(CODEX_PAYLOAD);
+  });
+
+  it('缺 id 的条目返回 null，由调用方过滤掉', () => {
+    expect(normalizeHarnessSummary({ displayName: 'Codex' })).toBeNull();
+    expect(normalizeHarnessSummary(null)).toBeNull();
+    expect(normalizeHarnessSummary('codex')).toBeNull();
+    expect(normalizeHarnessSummary({ id: '' })).toBeNull();
+  });
+
+  it('字段缺失时补安全默认值，而不是产生 undefined', () => {
+    const summary = normalizeHarnessSummary({ id: 'codex' });
+
+    expect(summary).not.toBeNull();
+    expect(summary?.displayName).toBe('codex');
+    expect(summary?.installed).toBe(false);
+    expect(summary?.binaryPath).toBeNull();
+    expect(summary?.version).toBeNull();
+    expect(summary?.dataPaths).toEqual([]);
+    expect(summary?.capabilities).toEqual({
+      launch: false,
+      terminal: false,
+      resume: false,
+      usage: false,
+      replay: false,
+      toolCalls: false,
+      subagents: false,
+      liveState: false,
+      worktree: false,
+    });
+  });
+
+  it('capabilities 不是对象时不崩溃', () => {
+    const summary = normalizeHarnessSummary({ id: 'codex', capabilities: 'nonsense' });
+
+    expect(summary?.capabilities.launch).toBe(false);
+  });
+
+  it('capabilities 里的非布尔值一律视为 false，不渲染假支持', () => {
+    const summary = normalizeHarnessSummary({
+      id: 'codex',
+      capabilities: { launch: 'yes', usage: 1, terminal: true },
+    });
+
+    expect(summary?.capabilities.terminal).toBe(true);
+    expect(summary?.capabilities.launch).toBe(false);
+    expect(summary?.capabilities.usage).toBe(false);
+  });
+
+  it('dataPaths 里的非字符串元素被过滤掉', () => {
+    const summary = normalizeHarnessSummary({ id: 'codex', dataPaths: ['/a', 42, null] });
+
+    expect(summary?.dataPaths).toEqual(['/a']);
+  });
+});
+
+describe('listHarnesses', () => {
+  it('使用 list_harnesses 命令名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [CODEX_PAYLOAD]);
+    stubTauri(invokeSpy);
+
+    const result = await listHarnesses();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('list_harnesses');
+    expect(result).toEqual({ ok: true, data: [CODEX_PAYLOAD] });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(listHarnesses()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+
+  it('后端返回非数组时不崩溃，按空列表处理', async () => {
+    stubTauri(async () => ({ unexpected: true }));
+
+    await expect(listHarnesses()).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('丢弃无法解析的条目而不是让整页失败', async () => {
+    stubTauri(async () => [CODEX_PAYLOAD, { nope: 1 }, null]);
+
+    const result = await listHarnesses();
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.data).toHaveLength(1);
+  });
+
+  it('命令抛错时返回 ok:false 而不是崩溃', async () => {
+    stubTauri(async () => {
+      throw new Error('detect failed');
+    });
+
+    await expect(listHarnesses()).resolves.toEqual({ ok: false, error: 'detect failed' });
   });
 });

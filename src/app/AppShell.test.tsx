@@ -57,7 +57,14 @@ describe('AppShell', () => {
   });
 
   it('未接入的功能页面如实说明尚未接入，不展示假数据', () => {
-    renderAt('/harnesses');
+    // Harnesses 页已接入真实检测，因此用仍然未实现的 Terminal 页做这条断言。
+    renderAt('/terminal');
     expect(screen.getByText('尚未接入')).toBeInTheDocument();
+  });
+
+  it('Harnesses 页不再显示占位文案', () => {
+    renderAt('/harnesses');
+
+    expect(screen.queryByText('尚未接入')).not.toBeInTheDocument();
   });
 });
