@@ -175,3 +175,92 @@ Sessions 页（reload 后）：已结束 / 结束时间 2026-09-22 11:26:44 / �
   本次是靠 `Page.reload` 才看到 exited 状态的 —— 这是预期行为，不是缺陷。
 - 多 Harness：注册表目前只注册 Codex，其他 Harness 仍是占位。
 
+---
+
+## 2026-09-22 — Task 3 收口：两处语义修正（已验收）
+
+review 结论：Task 3 架构方向通过，但必须先修两处语义，否则 Task 4 接 PTY 后更难理清。
+
+### 修正 1：没有进程就不得是 `running`
+
+新增 `created` 状态（ADR-0006）：
+
+```text
+create_session → created
+Task 4 spawn 成功 → running
+spawn 失败        → failed
+进程退出          → exited（exit≠0 为 failed；拿不到退出码为 unknown）
+```
+
+### 修正 2：Harness 落库走显式同步路径
+
+`list_harnesses` 保持**纯读**；写入只经过 `harness::inventory::reconcile_harnesses`，
+调用点只有：应用启动、IPC `refresh_harnesses`（用户点按钮）、
+`create_session` 的 invariant guard（ADR-0007）。同时把 `harnesses` 拆成
+「定义」与「安装」两张表，为 WSL / SSH / Container 预留。
+
+### 真实数据库上的 v1 → v2 迁移（最有价值的一段验证）
+
+被迁移的是**上一版应用真实创建的开发库**（不是构造出来的夹具）。
+
+迁移前：
+
+```text
+schema_migrations: [(1, '0001_init')]
+harnesses 列: id, display_name, installed, binary_path, version,
+              capabilities_json, data_paths_json, detected_at, created_at, updated_at
+harnesses 行: ('codex', 'Codex', 1, 'D:\npm-global\codex.cmd', '0.152.1', '2026-09-22T11:26:41Z')
+sessions  行: ('46d6b24c-…', 'exited', 'D:/HarnessHub', …, exit_code 0)
+无 harness_installations 表
+```
+
+迁移后（应用启动时执行）：
+
+```text
+schema_migrations: [(1, '0001_init'), (2, '0002_session_created_and_harness_installations')]
+harnesses 列: id, display_name, created_at, updated_at          ← 只剩定义
+sessions 有 installation_id: True
+harnesses（定义）:      [('codex', 'Codex')]
+harness_installations: [('codex@local', 'codex', 'local', 'D:\npm-global\codex.cmd',
+                         '0.152.1', 'available',
+                         first_detected_at='2026-09-22T11:26:41Z',   ← 保留旧 detected_at
+                         last_seen_at='2026-09-22T11:43:08Z')]      ← 启动同步刷新
+session 老数据: ('46d6b24c-…', 'exited', 'codex@local', 'local', …, 0)  ← installation_id 已回填
+runtime_targets: [('local', 'local', '本机')]                    ← 未被迁移污染
+journal_mode: wal
+PRAGMA foreign_key_check: 0 条违规                                ← 表重建没留下悬空引用
+```
+
+### created 语义的端到端验证
+
+```text
+listHarnesses()      → codex / installed / 0.152.1 / D:\npm-global\codex.cmd
+                       / 全部 capability 为 false（纯读，未写库）
+refreshHarnesses()   → { harnesses: 1, installations: 1 }        ← 显式写路径
+createSession(...)   → status: "created", installationId: "codex@local"
+                       （不是 running —— 此时没有任何进程）
+finishSession(该会话) → false                                     ← 拒绝结束未启动的会话
+Sessions 页          → 「已创建 · 尚未启动」/「尚未启动（没有进程）· 安装：codex@local」
+                       页面中不出现「仍在运行」
+Sessions 页（老数据）→ 「已结束」/「退出码 0」/「安装：codex@local」
+```
+
+### 本轮验证命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `pnpm verify` | 退出码 0（lint / typecheck / 65 前端用例 / build / rust fmt / clippy / 86 单元 + 2 集成用例） |
+| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
+
+### 新增的测试纪律（已写入 AGENTS.md）
+
+涉及 FK / migration / registry bootstrap 的行为，必须至少有一组**从真正空库开始、
+只调用生产代码填充前置状态**的用例；验证迁移必须用**裸 Connection** 控制版本
+（`Database::open_*` 会一次跑到最新，只能验证最终 schema，验证不了老数据搬运）。
+
+### 仍未验收
+
+- 上述 `running` 路径（`mark_running`）在真机上还没有触发点 —— 它属于 Task 4，
+  目前只有单元测试覆盖 `created → running → exited` 全链路。
+- 多 runtime target（WSL / SSH）只有单元测试，没有真实环境。
+

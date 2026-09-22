@@ -22,6 +22,23 @@
 - 不在没有证据时宣称完成。
 - 外部 Harness 的日志与 Session 数据**只读**。
 
+### 测试纪律：冷启动必须至少有一条真路径
+
+涉及 **FK / migration / registry bootstrap** 的行为，测试里必须保留至少一组
+**从真正空数据库开始、只调用生产代码填充前置状态**的用例。
+
+不允许让 `seeded_db()` 之类的夹具替生产代码补前置状态 —— 真实事故已经发生过两次：
+
+```text
+seeded fixture（夹具插好 harness 行）
+  → 单元测试全绿
+  → production cold start 爆 FOREIGN KEY constraint failed
+```
+
+同理，验证迁移必须用**裸 Connection** 控制版本（`apply_until`），
+因为 `Database::open_*` 会一次性把迁移跑到最新，那样只能验证最终 schema、
+验证不了「老数据被正确搬运」。
+
 ## 完成前
 
 至少执行并通过：
