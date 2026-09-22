@@ -86,7 +86,7 @@ pub fn run() {
             ensure_local_target(database.connection())?;
             reconcile_harnesses(
                 database.connection(),
-                &harnesses.summaries(),
+                &harnesses.summaries(LOCAL_TARGET_ID),
                 LOCAL_TARGET_ID,
                 &clock::now_rfc3339(),
             )?;

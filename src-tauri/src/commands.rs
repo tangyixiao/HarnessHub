@@ -59,7 +59,7 @@ pub fn db_health(state: State<'_, AppState>) -> Result<DbHealth> {
 /// （list / get / inspect 不修改状态；refresh / sync 才允许）。
 #[tauri::command]
 pub fn list_harnesses(state: State<'_, AppState>) -> Vec<HarnessSummary> {
-    state.harnesses.summaries()
+    state.harnesses.summaries(runtime::local::LOCAL_TARGET_ID)
 }
 
 /// 显式同步 Harness 清单：`detect` → `reconcile` → SQLite。
@@ -73,7 +73,7 @@ pub fn refresh_harnesses(state: State<'_, AppState>) -> Result<ReconcileReport> 
 
     reconcile_harnesses(
         database.connection(),
-        &state.harnesses.summaries(),
+        &state.harnesses.summaries(runtime::local::LOCAL_TARGET_ID),
         runtime::local::LOCAL_TARGET_ID,
         &clock::now_rfc3339(),
     )
@@ -103,7 +103,7 @@ pub fn create_session(
 
     let summary = state
         .harnesses
-        .summaries()
+        .summaries(runtime::local::LOCAL_TARGET_ID)
         .into_iter()
         .find(|summary| summary.id == harness_id)
         .ok_or_else(|| Error::InvalidInput(format!("未注册的 Harness：{harness_id}")))?;

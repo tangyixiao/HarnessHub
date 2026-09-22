@@ -140,6 +140,8 @@ impl TerminalRuntime {
         }
     }
 
+    /// 短事务：**只包住数据库读写**，绝不把 spawn / write / resize / kill / channel.send
+    /// 放进来。否则前端并发命令（输入、resize、kill）会互相堵死。
     fn with_db<T>(&self, action: impl FnOnce(&Database) -> Result<T>) -> Result<T> {
         let database = self.db.lock().map_err(|_| Error::StateLockPoisoned)?;
         action(&database)
@@ -153,12 +155,17 @@ impl TerminalRuntime {
             | PtyEvent::Error { session_id, .. } => session_id.clone(),
         };
 
-        if let Some(emitter) = self
+        // 先把 emitter 取出来、**放下锁**，再投递。
+        // 不能写成 `if let Some(e) = self.emitters.lock()...`：`if let` 的临时量
+        // 会活到整个 body 结束，于是 channel.send 会在持锁状态下执行 ——
+        // 一个慢消费者就能堵死所有会话的事件投递。
+        let emitter = self
             .emitters
             .lock()
             .ok()
-            .and_then(|map| map.get(&session_id).cloned())
-        {
+            .and_then(|map| map.get(&session_id).cloned());
+
+        if let Some(emitter) = emitter {
             emitter(event);
         }
     }

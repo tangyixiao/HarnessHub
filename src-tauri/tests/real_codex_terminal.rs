@@ -72,7 +72,7 @@ fn real_runtime() -> Option<(TerminalRuntime, String)> {
     harness_hub_lib::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
     reconcile_harnesses(
         db.connection(),
-        &adapter_registry(&adapter).summaries(),
+        &adapter_registry(&adapter).summaries(harness_hub_lib::runtime::local::LOCAL_TARGET_ID),
         harness_hub_lib::runtime::local::LOCAL_TARGET_ID,
         "2026-09-22T00:00:00Z",
     )
@@ -248,6 +248,7 @@ fn missing_binary_never_produces_a_running_session() {
     let summary = harness_hub_lib::harness::registry::HarnessSummary {
         id: harness_hub_lib::harness::adapters::codex::CODEX_ID.to_string(),
         display_name: "Codex".to_string(),
+        installation_id: None,
         installed: true,
         binary_path: Some("D:/definitely-missing/codex.cmd".to_string()),
         version: Some("0.152.1".to_string()),

@@ -36,6 +36,7 @@ pub fn detected_codex_summary() -> HarnessSummary {
     HarnessSummary {
         id: HARNESS_ID.to_string(),
         display_name: "Codex".to_string(),
+        installation_id: None,
         installed: true,
         binary_path: Some("D:/npm-global/codex.cmd".to_string()),
         version: Some("0.152.1".to_string()),

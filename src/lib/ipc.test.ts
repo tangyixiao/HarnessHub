@@ -122,6 +122,7 @@ describe('typed command wrappers', () => {
 const CODEX_PAYLOAD = {
   id: 'codex',
   displayName: 'Codex',
+  installationId: 'codex@local',
   installed: true,
   binaryPath: 'D:/npm-global/codex.cmd',
   version: '0.152.1',
@@ -253,6 +254,7 @@ const SESSION_PAYLOAD = {
   endedAt: null,
   exitCode: null,
   terminationReason: null,
+  pid: null,
 };
 
 describe('normalizeSessionRecord', () => {

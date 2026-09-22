@@ -15,6 +15,9 @@ use crate::harness::adapter::{HarnessAdapter, HarnessCapabilities, HarnessId};
 pub struct HarnessSummary {
     pub id: String,
     pub display_name: String,
+    /// 该 Harness 在指定运行目标上的安装 id（形如 codex@local）。
+    /// 前端据此调用终端 IPC，**不需要自己拼内部 id 格式**。
+    pub installation_id: Option<String>,
     pub installed: bool,
     pub binary_path: Option<String>,
     pub version: Option<String>,
@@ -83,7 +86,9 @@ impl HarnessRegistry {
     ///
     /// `detect()` 不返回 `Result`（见 `HarnessAdapter`）：检测失败必须表现为
     /// 「不可用但可展示」的状态，而不是让整个 IPC 调用失败。
-    pub fn summaries(&self) -> Vec<HarnessSummary> {
+    ///
+    /// `runtime_target_id` 用于推导安装 id：前端不该自己拼 `codex@local` 这种内部格式。
+    pub fn summaries(&self, runtime_target_id: &str) -> Vec<HarnessSummary> {
         self.iter()
             .map(|adapter| {
                 let id = adapter.id();
@@ -92,6 +97,10 @@ impl HarnessRegistry {
                 HarnessSummary {
                     display_name: adapter.display_name().to_string(),
                     id: id.as_str().to_string(),
+                    installation_id: Some(crate::harness::inventory::installation_id(
+                        id.as_str(),
+                        runtime_target_id,
+                    )),
                     installed: detect.installed,
                     binary_path: detect.binary_path,
                     version: detect.version,
@@ -255,7 +264,7 @@ mod tests {
             FakeAdapter::new("codex", true).with_display_name("Codex"),
         ));
 
-        let summaries = registry.summaries();
+        let summaries = registry.summaries("local");
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "codex");
@@ -273,7 +282,7 @@ mod tests {
             FakeAdapter::new("codex", true).with_display_name("完全自定义的名字"),
         ));
 
-        assert_eq!(registry.summaries()[0].display_name, "完全自定义的名字");
+        assert_eq!(registry.summaries("local")[0].display_name, "完全自定义的名字");
     }
 
     #[test]
@@ -281,7 +290,7 @@ mod tests {
         let mut registry = HarnessRegistry::new();
         registry.register(Box::new(FakeAdapter::new("codex", true)));
 
-        let capabilities = registry.summaries()[0].capabilities;
+        let capabilities = registry.summaries("local")[0].capabilities;
 
         assert!(capabilities.launch, "能力必须来自适配器，而不是注册表猜的");
         assert!(capabilities.terminal);
@@ -293,7 +302,7 @@ mod tests {
         let mut registry = HarnessRegistry::new();
         registry.register(Box::new(FakeAdapter::new("codex", false)));
 
-        let summary = &registry.summaries()[0];
+        let summary = &registry.summaries("local")[0];
 
         assert!(!summary.installed);
         assert!(summary.binary_path.is_none());
@@ -309,7 +318,7 @@ mod tests {
             FakeAdapter::new("codex", true).with_display_name("Codex"),
         ));
 
-        let json = serde_json::to_value(&registry.summaries()[0]).expect("序列化");
+        let json = serde_json::to_value(&registry.summaries("local")[0]).expect("序列化");
 
         assert_eq!(json["id"], "codex");
         assert_eq!(json["displayName"], "Codex");

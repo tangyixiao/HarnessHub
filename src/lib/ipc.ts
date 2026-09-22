@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 /**
  * 前端唯一的 IPC 入口。
@@ -72,6 +72,82 @@ export function getDbHealth(): Promise<IpcResult<DbHealth>> {
 }
 
 /* ------------------------------------------------------------------ *
+ * Terminal（Task 4）
+ *
+ * Session ID 是唯一的公共句柄：前端不持有 Rust PTY handle，PID 只是诊断字段。
+ * ------------------------------------------------------------------ */
+
+/** 与 Rust `PtyEvent` 同形（serde tag = "kind", camelCase）。 */
+export type PtyEvent =
+  | { kind: 'started'; sessionId: string; pid: number | null }
+  | { kind: 'output'; sessionId: string; seq: number; data: number[] }
+  | { kind: 'exited'; sessionId: string; exitCode: number | null; reason: TerminationReason }
+  | { kind: 'error'; sessionId: string; message: string };
+
+/**
+ * 启动终端会话，返回 hubSessionId。
+ *
+ * 输出走 Tauri Channel（有序、原始 bytes）。**调用前必须先就绪**：
+ * xterm 已 open、Channel 回调已挂、onData/onBinary 已挂、resize 已挂 ——
+ * 否则 Codex 首屏的 DSR 会早于 responder 就绪而卡住（见 ADR-0009）。
+ */
+export async function startTerminal(input: {
+  installationId: string;
+  cwd?: string | null;
+  cols: number;
+  rows: number;
+  onEvent: (event: PtyEvent) => void;
+}): Promise<IpcResult<SessionRecord>> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: NOT_IN_TAURI };
+  }
+
+  try {
+    const output = new Channel<PtyEvent>();
+    // 先挂回调再 invoke：Channel 必须在 start_terminal 之前 ready。
+    output.onmessage = input.onEvent;
+
+    const raw = await invoke('start_terminal', {
+      installationId: input.installationId,
+      cwd: input.cwd ?? null,
+      cols: input.cols,
+      rows: input.rows,
+      output,
+    });
+
+    const record = normalizeSessionRecord(raw);
+    return record
+      ? { ok: true, data: record }
+      : { ok: false, error: 'invalid-session-payload' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * 把**原始字节**写进 PTY。
+ *
+ * 不在 Rust 侧猜编码：onData 侧用 TextEncoder 编码，onBinary 侧按 code unit
+ * 低 8 位还原。DSR/CPR 的回应也走这条路径。
+ */
+export function writeTerminal(sessionId: string, bytes: Uint8Array): Promise<IpcResult<null>> {
+  return invokeCommand<null>('write_terminal', { sessionId, data: Array.from(bytes) });
+}
+
+export function resizeTerminal(
+  sessionId: string,
+  cols: number,
+  rows: number,
+): Promise<IpcResult<null>> {
+  return invokeCommand<null>('resize_terminal', { sessionId, cols, rows });
+}
+
+/** 用户主动结束。终态由 Rust 侧的 reaper 依真实退出写入。 */
+export function killTerminal(sessionId: string): Promise<IpcResult<null>> {
+  return invokeCommand<null>('kill_terminal', { sessionId });
+}
+
+/* ------------------------------------------------------------------ *
  * Harness 检测
  * ------------------------------------------------------------------ */
 
@@ -95,6 +171,8 @@ export type HarnessCapabilities = {
 export type HarnessSummary = {
   id: string;
   displayName: string;
+  /** 该 Harness 在当前运行目标上的安装 id（形如 codex@local），供终端 IPC 使用。 */
+  installationId: string | null;
   installed: boolean;
   binaryPath: string | null;
   version: string | null;
@@ -164,9 +242,11 @@ export function normalizeHarnessSummary(raw: unknown): HarnessSummary | null {
 
   return {
     id,
-    displayName: typeof source.displayName === 'string' && source.displayName.length > 0
-      ? source.displayName
-      : id,
+    displayName:
+      typeof source.displayName === 'string' && source.displayName.length > 0
+        ? source.displayName
+        : id,
+    installationId: asStringOrNull(source.installationId),
     installed: source.installed === true,
     binaryPath: typeof source.binaryPath === 'string' ? source.binaryPath : null,
     version: typeof source.version === 'string' ? source.version : null,
@@ -242,6 +322,8 @@ export type SessionRecord = {
   exitCode: number | null;
   /** 终止原因；created / running 阶段以及迁移前的存量终态行为 null（原因未记录）。 */
   terminationReason: TerminationReason | null;
+  /** 进程 PID。**只用于诊断**，不是 IPC 句柄（PID 会复用）。 */
+  pid: number | null;
 };
 
 const SESSION_STATUSES = ['created', 'running', 'exited', 'failed', 'unknown'] as const;
@@ -298,6 +380,7 @@ export function normalizeSessionRecord(raw: unknown): SessionRecord | null {
     // 未知的终止原因视为「未记录」，绝不当成正常退出。
     terminationReason:
       TERMINATION_REASONS.find((candidate) => candidate === source.terminationReason) ?? null,
+    pid: typeof source.pid === 'number' ? source.pid : null,
   };
 }
 

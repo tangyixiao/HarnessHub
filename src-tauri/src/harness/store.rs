@@ -143,6 +143,7 @@ mod tests {
         HarnessSummary {
             id: "codex".to_string(),
             display_name: "Codex".to_string(),
+            installation_id: None,
             installed,
             binary_path: installed.then(|| "D:/npm-global/codex.cmd".to_string()),
             version: version.map(str::to_string),
