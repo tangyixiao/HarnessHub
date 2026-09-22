@@ -12,6 +12,7 @@ import {
   listSessions,
   normalizeHarnessSummary,
   normalizeSessionRecord,
+  refreshHarnesses,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -240,10 +241,11 @@ const SESSION_PAYLOAD = {
   hubSessionId: '6f1c0f7e-0000-4000-8000-000000000001',
   sourceSessionId: null,
   harnessId: 'codex',
+  installationId: 'codex@local',
   projectId: null,
   runtimeTargetId: 'local',
   parentSessionId: null,
-  status: 'running',
+  status: 'created',
   launchMode: 'terminal',
   cwd: 'D:/work',
   worktreePath: null,
@@ -263,6 +265,12 @@ describe('normalizeSessionRecord', () => {
     expect(normalizeSessionRecord({ hubSessionId: '   ' })).toBeNull();
   });
 
+  it('created 是合法状态，不得被降级为 unknown', () => {
+    expect(normalizeSessionRecord({ ...SESSION_PAYLOAD, status: 'created' })?.status).toBe(
+      'created',
+    );
+  });
+
   it('未知 status 归一化为 unknown，不得当成 running', () => {
     const record = normalizeSessionRecord({ ...SESSION_PAYLOAD, status: 'weird' });
 
@@ -280,6 +288,7 @@ describe('normalizeSessionRecord', () => {
 
     expect(record).not.toBeNull();
     expect(record?.harnessId).toBe('');
+    expect(record?.installationId).toBeNull();
     expect(record?.runtimeTargetId).toBe('');
     expect(record?.status).toBe('unknown');
     expect(record?.endedAt).toBeNull();
@@ -355,5 +364,33 @@ describe('session commands', () => {
       error: NOT_IN_TAURI,
     });
     await expect(finishSession('h1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+describe('refreshHarnesses', () => {
+  it('使用 refresh_harnesses 命令名并返回同步计数', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({
+      harnesses: 1,
+      installations: 1,
+    }));
+    stubTauri(invokeSpy);
+
+    const result = await refreshHarnesses();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('refresh_harnesses');
+    expect(result).toEqual({ ok: true, data: { harnesses: 1, installations: 1 } });
+  });
+
+  it('后端返回异常形状时收敛为 0，而不是抛错', async () => {
+    stubTauri(async () => ({ unexpected: true }));
+
+    await expect(refreshHarnesses()).resolves.toEqual({
+      ok: true,
+      data: { harnesses: 0, installations: 0 },
+    });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(refreshHarnesses()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

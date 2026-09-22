@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { HarnessesPage } from '@/features/harnesses/HarnessesPage';
@@ -14,6 +15,27 @@ function stubHarnesses(payload: unknown): void {
   (window as unknown as Internals).__TAURI_INTERNALS__ = {
     invoke: vi.fn(async () => payload),
   };
+}
+
+/**
+ * 按命令名分派，便于验证「哪个命令在什么时候被调用」。
+ *
+ * 值可以是直接返回的数据，也可以是**惰性求值的函数**：要模拟失败必须用函数形式，
+ * 否则 `Promise.reject(...)` 在桩定义时就被创建，等到真正 await 之前已是孤儿拒绝，
+ * vitest 会报 unhandled rejection。
+ */
+function stubCommands(
+  handlers: Record<string, unknown | (() => unknown)>,
+): ReturnType<typeof vi.fn> {
+  const invoke = vi.fn(async (command: string) => {
+    if (!(command in handlers)) {
+      throw new Error(`未预期的命令：${command}`);
+    }
+    const handler = handlers[command];
+    return typeof handler === 'function' ? (handler as () => unknown)() : handler;
+  });
+  (window as unknown as Internals).__TAURI_INTERNALS__ = { invoke };
+  return invoke;
 }
 
 /** 与 Rust `HarnessRegistry::summaries()` 序列化结果同形（camelCase）。 */
@@ -139,5 +161,56 @@ describe('HarnessesPage', () => {
 
     expect(screen.getByText(/当前未支持/)).toBeInTheDocument();
     expect(screen.queryByText(/待验证/)).not.toBeInTheDocument();
+  });
+
+  it('初次加载只读：只调用 list_harnesses，不写库', async () => {
+    const invoke = stubCommands({ list_harnesses: [INSTALLED_CODEX] });
+
+    render(<HarnessesPage />);
+    await screen.findByText('Codex');
+
+    const commands = invoke.mock.calls.map((call) => call[0]);
+    expect(commands).toEqual(['list_harnesses']);
+    expect(commands).not.toContain('refresh_harnesses');
+  });
+
+  it('点「重新检测并同步」才触发写路径，并展示同步结果', async () => {
+    const invoke = stubCommands({
+      list_harnesses: [INSTALLED_CODEX],
+      refresh_harnesses: { harnesses: 1, installations: 1 },
+    });
+
+    render(<HarnessesPage />);
+    await screen.findByText('Codex');
+
+    await userEvent.click(screen.getByRole('button', { name: '重新检测并同步' }));
+
+    const commands = invoke.mock.calls.map((call) => call[0]);
+    expect(commands).toEqual(['list_harnesses', 'refresh_harnesses', 'list_harnesses']);
+    expect(await screen.findByText(/已同步：1 个 Harness 定义 \/ 1 个安装/)).toBeInTheDocument();
+  });
+
+  it('同步失败时展示错误，而不是静默忽略', async () => {
+    stubCommands({
+      list_harnesses: [INSTALLED_CODEX],
+      refresh_harnesses: () => {
+        throw new Error('inventory sync failed');
+      },
+    });
+
+    render(<HarnessesPage />);
+    await screen.findByText('Codex');
+
+    await userEvent.click(screen.getByRole('button', { name: '重新检测并同步' }));
+
+    // refreshHarnesses 捕获异常后返回 ok:false
+    expect(await screen.findByText(/inventory sync failed/)).toBeInTheDocument();
+  });
+
+  it('浏览器模式下同步按钮不可点，避免发起注定失败的调用', async () => {
+    render(<HarnessesPage />);
+    await screen.findByText(/请用 pnpm tauri dev 启动桌面应用/);
+
+    expect(screen.getByRole('button', { name: '重新检测并同步' })).toBeDisabled();
   });
 });

@@ -11,6 +11,7 @@ import {
 } from '@/lib/ipc';
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
+  created: '已创建 · 尚未启动',
   running: '运行中',
   exited: '已结束',
   failed: '失败',
@@ -18,11 +19,30 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 };
 
 const STATUS_STYLE: Record<SessionStatus, string> = {
+  created: 'border-signal-warn/40 bg-signal-warn/10 text-signal-warn',
   running: 'border-accent/40 bg-accent/10 text-accent',
   exited: 'border-signal-ok/40 bg-signal-ok/10 text-signal-ok',
   failed: 'border-signal-error/40 bg-signal-error/10 text-signal-error',
   unknown: 'border-border-subtle bg-surface-overlay/40 text-content-muted',
 };
+
+/**
+ * 状态说明。**`created` 绝不能显示成「仍在运行」** —— 它登记了但还没有任何进程
+ * （见 docs/adr/0006-session-state-machine.md）。
+ */
+function statusDetail(session: SessionRecord): string {
+  switch (session.status) {
+    case 'created':
+      return '尚未启动（没有进程）';
+    case 'running':
+      return '仍在运行（尚未收到退出码）';
+    case 'unknown':
+      return '已结束，退出码未知';
+    case 'exited':
+    case 'failed':
+      return session.exitCode === null ? '已结束，退出码未记录' : `退出码 ${session.exitCode}`;
+  }
+}
 
 type PageState =
   | { kind: 'loading' }
@@ -111,6 +131,10 @@ export function SessionsPage() {
           {state.sessions.map((session) => (
             <SessionCard key={session.hubSessionId} session={session} />
           ))}
+          <p className="text-[11px] text-content-muted">
+            「已创建 · 尚未启动」表示会话已登记但**没有任何进程**：它是 Task 4 接入 PTY 之前
+            唯一诚实的状态（见 ADR-0006）。
+          </p>
         </div>
       ) : null}
     </div>
@@ -118,8 +142,6 @@ export function SessionsPage() {
 }
 
 function SessionCard({ session }: { session: SessionRecord }) {
-  const running = session.status === 'running';
-
   return (
     <section aria-label={session.hubSessionId}>
       <Card>
@@ -151,11 +173,8 @@ function SessionCard({ session }: { session: SessionRecord }) {
         </dl>
 
         <p className="mt-3 text-[11px] text-content-muted">
-          {running
-            ? '仍在运行（尚未收到退出码）'
-            : session.exitCode === null
-              ? '已结束，退出码未记录'
-              : `退出码 ${session.exitCode}`}
+          {statusDetail(session)}
+          {session.installationId === null ? '' : ` · 安装：${session.installationId}`}
           {session.sourceSessionId === null
             ? ' · 无外部 source session id（由 Harness Hub 创建）'
             : ` · 外部 session：${session.sourceSessionId}`}

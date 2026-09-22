@@ -1,13 +1,17 @@
 import { useEffect, useState } from 'react';
 
+import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
 import { cn } from '@/lib/utils';
 import {
   NOT_IN_TAURI,
+  isTauriRuntime,
   listHarnesses,
+  refreshHarnesses,
   type HarnessCapabilities,
   type HarnessSummary,
+  type ReconcileReport,
 } from '@/lib/ipc';
 
 /**
@@ -35,12 +39,18 @@ type PageState =
 /**
  * Harnesses 页面。
  *
- * 数据全部来自 Rust Control Plane 的真实检测（`list_harnesses`）。
+ * 数据全部来自 Rust Control Plane 的真实检测（`list_harnesses`，**纯读**）。
  * 本页**不做**任何自己的二进制探测，也不缓存检测结果：
  * 用户可能在应用运行期间安装或卸载 Harness。
+ *
+ * 把检测结果写进 SQLite 是**另一个明确的操作**：用户点「重新检测并同步」按钮
+ * 才调用 `refresh_harnesses`（见 ADR-0007：inspect 不改状态，refresh 才改）。
  */
 export function HarnessesPage() {
   const [state, setState] = useState<PageState>({ kind: 'loading' });
+  const [syncing, setSyncing] = useState(false);
+  const [report, setReport] = useState<ReconcileReport | null>(null);
+  const connected = isTauriRuntime();
 
   useEffect(() => {
     let cancelled = false;
@@ -63,12 +73,48 @@ export function HarnessesPage() {
     };
   }, []);
 
+  const refresh = async () => {
+    setSyncing(true);
+    setReport(null);
+
+    const synced = await refreshHarnesses();
+    if (!synced.ok) {
+      setSyncing(false);
+      setState(
+        synced.error === NOT_IN_TAURI
+          ? { kind: 'ipc-unavailable' }
+          : { kind: 'error', message: synced.error },
+      );
+      return;
+    }
+    setReport(synced.data);
+
+    const listed = await listHarnesses();
+    setSyncing(false);
+    if (listed.ok) {
+      setState({ kind: 'ready', summaries: listed.data });
+    } else if (listed.error !== NOT_IN_TAURI) {
+      setState({ kind: 'error', message: listed.error });
+    }
+  };
+
   return (
     <div>
       <PageHeader
         title="Harnesses"
         description="本机已安装的 AI Coding Harness：检测结果、能力矩阵与只读数据目录。"
+        actions={
+          <Button onClick={() => void refresh()} disabled={!connected || syncing}>
+            {syncing ? '同步中…' : '重新检测并同步'}
+          </Button>
+        }
       />
+
+      {report ? (
+        <p className="pb-4 text-[11px] text-content-muted">
+          已同步：{report.harnesses} 个 Harness 定义 / {report.installations} 个安装（写入本地 SQLite）。
+        </p>
+      ) : null}
 
       {state.kind === 'loading' ? (
         <Card>

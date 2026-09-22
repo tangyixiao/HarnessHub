@@ -201,7 +201,7 @@ export async function listHarnesses(): Promise<IpcResult<HarnessSummary[]>> {
  * Session
  * ------------------------------------------------------------------ */
 
-export type SessionStatus = 'running' | 'exited' | 'failed' | 'unknown';
+export type SessionStatus = 'created' | 'running' | 'exited' | 'failed' | 'unknown';
 export type LaunchMode = 'terminal' | 'resume' | 'imported';
 
 /**
@@ -209,11 +209,15 @@ export type LaunchMode = 'terminal' | 'resume' | 'imported';
  *
  * `hubSessionId` 是 Harness Hub 自己的标识；`sourceSessionId` 是外部 Harness 的原始
  * id（PTY 会话没有，导入的历史会话才有）。两者不可混用。
+ *
+ * `installationId` 指向 `harness_installations.id`（形如 `codex@local`），
+ * 因此同一个 Harness 在不同 runtime target 上的安装可以被区分。
  */
 export type SessionRecord = {
   hubSessionId: string;
   sourceSessionId: string | null;
   harnessId: string;
+  installationId: string | null;
   projectId: string | null;
   runtimeTargetId: string;
   parentSessionId: string | null;
@@ -226,7 +230,7 @@ export type SessionRecord = {
   exitCode: number | null;
 };
 
-const SESSION_STATUSES = ['running', 'exited', 'failed', 'unknown'] as const;
+const SESSION_STATUSES = ['created', 'running', 'exited', 'failed', 'unknown'] as const;
 const LAUNCH_MODES = ['terminal', 'resume', 'imported'] as const;
 
 function asStringOrNull(value: unknown): string | null {
@@ -258,6 +262,7 @@ export function normalizeSessionRecord(raw: unknown): SessionRecord | null {
     hubSessionId,
     sourceSessionId: asStringOrNull(source.sourceSessionId),
     harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    installationId: asStringOrNull(source.installationId),
     projectId: asStringOrNull(source.projectId),
     runtimeTargetId: typeof source.runtimeTargetId === 'string' ? source.runtimeTargetId : '',
     parentSessionId: asStringOrNull(source.parentSessionId),
@@ -316,4 +321,36 @@ export function finishSession(
     hubSessionId,
     exitCode: exitCode ?? null,
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * Harness 清单同步
+ * ------------------------------------------------------------------ */
+
+/** 一次同步的结果（与 Rust `ReconcileReport` 同形）。 */
+export type ReconcileReport = {
+  harnesses: number;
+  installations: number;
+};
+
+/**
+ * 显式同步 Harness 清单：`detect` → `reconcile` → SQLite。
+ *
+ * 语义上是**写操作**（会更新 `harnesses` / `harness_installations`），
+ * 因此只在用户点 Refresh 或应用启动时调用；`listHarnesses()` 保持纯读。
+ */
+export async function refreshHarnesses(): Promise<IpcResult<ReconcileReport>> {
+  const result = await invokeCommand<unknown>('refresh_harnesses');
+  if (!result.ok) {
+    return result;
+  }
+
+  const source = (result.data ?? {}) as Record<string, unknown>;
+  return {
+    ok: true,
+    data: {
+      harnesses: typeof source.harnesses === 'number' ? source.harnesses : 0,
+      installations: typeof source.installations === 'number' ? source.installations : 0,
+    },
+  };
 }

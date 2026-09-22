@@ -17,14 +17,15 @@ function stubSessions(payload: unknown): void {
 }
 
 /** 与 Rust `SessionRecord`（serde camelCase）同形。 */
-const RUNNING_SESSION = {
+const CREATED_SESSION = {
   hubSessionId: '6f1c0f7e-0000-4000-8000-000000000001',
   sourceSessionId: null,
   harnessId: 'codex',
+  installationId: 'codex@local',
   projectId: null,
   runtimeTargetId: 'local',
   parentSessionId: null,
-  status: 'running',
+  status: 'created',
   launchMode: 'terminal',
   cwd: 'D:/work/harness-hub',
   worktreePath: null,
@@ -33,8 +34,10 @@ const RUNNING_SESSION = {
   exitCode: null,
 };
 
+const RUNNING_SESSION = { ...CREATED_SESSION, status: 'running' };
+
 const EXITED_SESSION = {
-  ...RUNNING_SESSION,
+  ...CREATED_SESSION,
   hubSessionId: '6f1c0f7e-0000-4000-8000-000000000002',
   status: 'exited',
   endedAt: '2026-09-22T10:05:00Z',
@@ -42,6 +45,21 @@ const EXITED_SESSION = {
 };
 
 describe('SessionsPage', () => {
+  /**
+   * 最重要的一条：**没有进程就不能显示成「仍在运行」**。
+   * 见 docs/adr/0006-session-state-machine.md。
+   */
+  it('已创建但未启动的会话显示「已创建 · 尚未启动」，绝不能显示「仍在运行」', async () => {
+    stubSessions([CREATED_SESSION]);
+
+    render(<SessionsPage />);
+
+    expect(await screen.findByText('已创建 · 尚未启动')).toBeInTheDocument();
+    expect(screen.getByText(/尚未启动（没有进程）/)).toBeInTheDocument();
+    expect(screen.queryByText('运行中')).not.toBeInTheDocument();
+    expect(screen.queryByText(/仍在运行/)).not.toBeInTheDocument();
+  });
+
   it('展示真实会话记录与状态', async () => {
     stubSessions([RUNNING_SESSION, EXITED_SESSION]);
 
@@ -60,6 +78,15 @@ describe('SessionsPage', () => {
     await screen.findByText('运行中');
 
     expect(screen.getByText(RUNNING_SESSION.hubSessionId)).toBeInTheDocument();
+  });
+
+  it('展示安装 id，区分同一 Harness 的不同安装', async () => {
+    stubSessions([CREATED_SESSION]);
+
+    render(<SessionsPage />);
+    await screen.findByText('已创建 · 尚未启动');
+
+    expect(screen.getByText(/安装：codex@local/)).toBeInTheDocument();
   });
 
   it('结束时间与退出码在会话结束后才显示', async () => {
