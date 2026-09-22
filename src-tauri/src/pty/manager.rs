@@ -503,6 +503,68 @@ mod tests {
         );
     }
 
+    /// **约束 3：大输出不得破坏顺序 / seq / 跨块 UTF-8，也不得有界缓存历史。**
+    ///
+    /// PTY 输出不只是聊天：`cat huge.log`、`npm install`、`cargo build` 都可能
+    /// 瞬间产生几 MB。传输层必须：固定大小分块、逐块转发、**不保留历史**
+    /// （允许背压，但绝不无限吃内存、也绝不静默丢字节）。
+    #[test]
+    fn large_output_streams_in_order_without_keeping_history() {
+        const BLOCK_SIZE: usize = 8 * 1024;
+        /// 3 字节字符重复这么多次 ≈ 4 MB，且每个块边界都会切开某个字符
+        /// （8192 % 3 != 0），因此必然命中「跨块 UTF-8」场景。
+        const REPEAT: usize = 1_400_000;
+
+        let payload: Vec<u8> = "你".repeat(REPEAT).into_bytes();
+        let blocks: Vec<Vec<u8>> = payload.chunks(BLOCK_SIZE).map(<[u8]>::to_vec).collect();
+        let expected_blocks = blocks.len();
+        assert!(expected_blocks > 500, "载荷应足够大：{expected_blocks} 块");
+        assert!(
+            payload.len() % 3 != 0 || BLOCK_SIZE % 3 != 0,
+            "测试前提：块边界应当切开多字节字符"
+        );
+
+        let backend = Arc::new(FakePtyBackend::new().with_output(blocks));
+        let (manager, chunks) = manager(Arc::clone(&backend));
+        manager.spawn("hub-1", spec(), 80, 24).expect("spawn");
+        manager.start_reading("hub-1").expect("开始读取");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while chunks.lock().expect("chunks").len() < expected_blocks {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "大输出在 20 秒内没有读完，实际 {} / {expected_blocks} 块",
+                chunks.lock().expect("chunks").len()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let captured = chunks.lock().expect("chunks").clone();
+
+        // 1) 不得静默丢块；seq 严格有序
+        assert_eq!(
+            captured.len(),
+            expected_blocks,
+            "块数必须与写入一致，不得静默丢字节"
+        );
+        for (index, (seq, _)) in captured.iter().enumerate() {
+            assert_eq!(*seq, index as u64, "seq 必须严格有序（顺序不得错乱）");
+        }
+
+        // 2) 逐字节一致：顺序、内容、跨块边界都没有被破坏
+        let joined: Vec<u8> = captured
+            .iter()
+            .flat_map(|(_, block)| block.iter().copied())
+            .collect();
+        assert_eq!(joined.len(), payload.len(), "总字节数必须一致");
+        assert_eq!(joined, payload, "重新拼装后必须逐字节完全相同");
+
+        // 3) 跨块的多字节字符仍然可解码（终端模拟器的有状态 decoder 才有这个前提）
+        let text = String::from_utf8(joined).expect("跨块多字节字符必须仍然合法");
+        assert_eq!(text.chars().count(), REPEAT);
+        assert!(text.chars().all(|character| character == '你'));
+    }
+
     #[test]
     fn zero_sized_resize_is_rejected_with_a_clear_error() {
         let backend = Arc::new(FakePtyBackend::new());

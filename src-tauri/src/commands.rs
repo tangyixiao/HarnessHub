@@ -3,7 +3,10 @@
 //! 这一层是**唯一**允许接触 Tauri GUI 类型的领域入口（另一个是 [`crate::run`]）。
 //! 每个命令都应当薄：只做参数整形 + 调用领域模块，业务逻辑留在各自的领域模块里。
 
+use std::sync::Arc;
+
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::clock;
@@ -12,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::harness::inventory::{installation_id, reconcile_harnesses, ReconcileReport};
 use crate::harness::registry::HarnessSummary;
 use crate::session::{service::SessionService, SessionRecord, TerminationReason};
+use crate::terminal::{Emitter, PtyEvent};
 use crate::{runtime, AppState};
 
 /// 前端 Dashboard 顶部展示的应用信息。
@@ -153,4 +157,59 @@ pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<V
         .min(MAX_SESSION_LIMIT);
 
     SessionService::new(database.connection()).list_recent(limit)
+}
+
+/* ------------------------------------------------------------------ *
+ * Terminal（Task 4）
+ *
+ * 公共句柄**只有 hub_session_id**：PID 仅用于诊断，不做权限句柄
+ * （PID 会复用，而且「有进程」≠「我们仍拥有这个 PTY」）。
+ * 这样 WSL / SSH / Container 未来可以保持同一套 API。
+ * ------------------------------------------------------------------ */
+
+/// 启动一次终端会话，返回它的 `hub_session_id`。
+///
+/// 输出通过 Tauri Channel 流式推送（有序、原始 bytes）。
+/// **前端必须先就绪**（xterm 已 open、Channel 回调已挂、onData/resize 已挂）
+/// 再调用本命令 —— 否则 Codex 首屏的 DSR 会早于 responder 就绪而卡住。
+#[tauri::command]
+pub fn start_terminal(
+    state: State<'_, AppState>,
+    installation_id: String,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    output: Channel<PtyEvent>,
+) -> Result<SessionRecord> {
+    let emitter: Emitter = Arc::new(move |event| {
+        // Channel 发送失败（前端已卸载）只意味着没人再听，不影响进程本身。
+        let _ = output.send(event);
+    });
+
+    state
+        .terminal
+        .start(&installation_id, cwd.as_deref(), cols, rows, Some(emitter))
+}
+
+/// 把用户输入（含终端协议响应，例如 xterm.js 对 DSR 的回答）写入 PTY。
+#[tauri::command]
+pub fn write_terminal(state: State<'_, AppState>, session_id: String, data: Vec<u8>) -> Result<()> {
+    state.terminal.write(&session_id, &data)
+}
+
+/// 调整 PTY 尺寸。
+#[tauri::command]
+pub fn resize_terminal(
+    state: State<'_, AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    state.terminal.resize(&session_id, cols, rows)
+}
+
+/// 用户主动结束会话。终态由 reaper 依真实退出写入（见 ADR-0010）。
+#[tauri::command]
+pub fn kill_terminal(state: State<'_, AppState>, session_id: String) -> Result<()> {
+    state.terminal.kill(&session_id)
 }

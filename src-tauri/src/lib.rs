@@ -37,18 +37,21 @@ use crate::harness::adapters::codex::CodexAdapter;
 use crate::harness::inventory::reconcile_harnesses;
 use crate::harness::probe::SystemHostProbe;
 use crate::harness::registry::HarnessRegistry;
+use crate::pty::PortablePtyBackend;
 use crate::runtime::local::{ensure_local_target, LOCAL_TARGET_ID};
 use crate::session::{service::SessionService, TerminationReason};
+use crate::terminal::TerminalRuntime;
 
 /// 应用级共享状态。
 ///
-/// - `db`：数据库句柄，命令层与领域服务共用同一个连接。
-/// - `harnesses`：已注册的 Harness 适配器。启动时一次性装配，之后只读，
-///   因此不需要加锁。**真实检测**发生在读取或同步清单时（`detect()`），
-///   不在启动时缓存 —— 用户可能在应用运行期间安装/卸载 Harness。
+/// - `db`：数据库句柄。用 `Arc` 是因为 [`TerminalRuntime`] 的 reaper 回调
+///   也需要写终态（终态事实由进程退出驱动，不是由命令驱动）。
+/// - `harnesses`：已注册的 Harness 适配器，启动后只读。
+/// - `terminal`：终端运行编排（PTY + 会话状态）。
 pub struct AppState {
-    pub db: Mutex<Database>,
-    pub harnesses: HarnessRegistry,
+    pub db: Arc<Mutex<Database>>,
+    pub harnesses: Arc<HarnessRegistry>,
+    pub terminal: TerminalRuntime,
 }
 
 /// 数据库文件名。放在 Tauri 的 app data 目录下，保持 local-first。
@@ -74,10 +77,12 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
 
             let database = Database::open(data_dir.join(DATABASE_FILE_NAME))?;
-            let harnesses = build_harness_registry();
+            let harnesses = Arc::new(build_harness_registry());
+            let db = Arc::new(Mutex::new(database));
 
             // 启动时的清单同步：这是**明确的写路径**（detect → reconcile → SQLite），
             // 与只读的 list_harnesses 分开。见 harness::inventory。
+            let database = db.lock().map_err(|_| "数据库锁中毒")?;
             ensure_local_target(database.connection())?;
             reconcile_harnesses(
                 database.connection(),
@@ -95,10 +100,12 @@ pub fn run() {
             if converged > 0 {
                 eprintln!("启动收敛：{converged} 条遗留 running 会话被标记为 lost");
             }
+            drop(database);
 
             app.manage(AppState {
-                db: Mutex::new(database),
-                harnesses,
+                db: Arc::clone(&db),
+                harnesses: Arc::clone(&harnesses),
+                terminal: TerminalRuntime::new(db, harnesses, Arc::new(PortablePtyBackend::new())),
             });
 
             Ok(())
@@ -108,9 +115,13 @@ pub fn run() {
             commands::db_health,
             commands::create_session,
             commands::finish_session,
+            commands::kill_terminal,
             commands::list_harnesses,
             commands::list_sessions,
-            commands::refresh_harnesses
+            commands::refresh_harnesses,
+            commands::resize_terminal,
+            commands::start_terminal,
+            commands::write_terminal
         ])
         .build(tauri::generate_context!())
         .expect("构建 Harness Hub 失败")
