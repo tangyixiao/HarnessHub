@@ -38,6 +38,7 @@ use crate::harness::inventory::reconcile_harnesses;
 use crate::harness::probe::SystemHostProbe;
 use crate::harness::registry::HarnessRegistry;
 use crate::runtime::local::{ensure_local_target, LOCAL_TARGET_ID};
+use crate::session::{service::SessionService, TerminationReason};
 
 /// 应用级共享状态。
 ///
@@ -84,6 +85,17 @@ pub fn run() {
                 LOCAL_TARGET_ID,
                 &clock::now_rfc3339(),
             )?;
+
+            // **启动时的孤儿收敛**（约束 2）：上一个实例遗留的 running 会话
+            // 在当前版本无法重新附着 PTY，因此绝不恢复成 running ——
+            // 即使 PID 还活着，也只说明「进程可能还在，但 PTY 控制已丢失」。
+            let converged = SessionService::new(database.connection())
+                .reconcile_orphans(TerminationReason::Lost)
+                .unwrap_or(0);
+            if converged > 0 {
+                eprintln!("启动收敛：{converged} 条遗留 running 会话被标记为 lost");
+            }
+
             app.manage(AppState {
                 db: Mutex::new(database),
                 harnesses,
@@ -100,6 +112,18 @@ pub fn run() {
             commands::list_sessions,
             commands::refresh_harnesses
         ])
-        .run(tauri::generate_context!())
-        .expect("Harness Hub 启动失败");
+        .build(tauri::generate_context!())
+        .expect("构建 Harness Hub 失败")
+        .run(|app_handle, event| {
+            // **正常关闭**：把仍在 running 的会话收敛为 unknown/host_shutdown。
+            // 来不及落库（崩溃/强杀）的情形由下次启动的孤儿收敛兜底。
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Ok(database) = state.db.lock() {
+                        let _ = SessionService::new(database.connection())
+                            .reconcile_orphans(TerminationReason::HostShutdown);
+                    }
+                }
+            }
+        });
 }

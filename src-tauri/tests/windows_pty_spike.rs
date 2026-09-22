@@ -266,3 +266,48 @@ fn windows_cmd_shim_is_spawned_directly_and_needs_dsr_answers() {
         "如果这条开始成功，说明引号规则变了，需要重新评估 build_launch_spec"
     );
 }
+
+/// **环境继承回归**：`portable-pty` 在 Windows 上曾有「吞掉自定义 PATH」的报告
+/// （wezterm#4205）。Codex 启动后会去调用 `node` / `git`，
+/// PATH 丢了就会以非常难排查的方式失败，所以这里显式锁住。
+#[test]
+fn pty_child_inherits_path_and_can_locate_node_and_git() {
+    let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let run_cmd = |command: String| {
+        attempt(
+            &comspec,
+            &["/D".to_string(), "/C".to_string(), command],
+            Duration::from_secs(20),
+        )
+    };
+
+    for tool in ["node", "git"] {
+        let result = run_cmd(format!("where {tool}"));
+
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "PTY 子进程在 PATH 里找不到 {tool}，输出：{:?}",
+            result.output
+        );
+        assert!(
+            result.output.to_lowercase().contains(tool),
+            "where {tool} 的输出应包含路径：{:?}",
+            result.output
+        );
+    }
+
+    // 不只是「看得到」，还要「跑得起来」
+    let node = run_cmd("node --version".to_string());
+    assert_eq!(
+        node.exit_code,
+        Some(0),
+        "node 无法执行，输出：{:?}",
+        node.output
+    );
+    assert!(
+        node.output.contains('v'),
+        "node --version 应输出版本号：{:?}",
+        node.output
+    );
+}

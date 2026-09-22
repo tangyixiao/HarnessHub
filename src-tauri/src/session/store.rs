@@ -329,6 +329,31 @@ impl<'conn> SessionStore<'conn> {
         Ok(updated > 0)
     }
 
+    /// 收敛「上一个实例遗留的 `running` 会话」（约束 2）。
+    ///
+    /// 当前版本**无法重新附着旧 PTY**，因此不得继续宣称 `running`：
+    /// 即使 PID 还活着，我们能确定的也只是「进程可能仍存在，但 PTY 控制已丢失」。
+    ///
+    /// **PID 存活不能单独作为恢复 running 的依据**：PID 会被复用，
+    /// 而且「有进程」≠「我们仍拥有这个 PTY」。
+    ///
+    /// - 异常退出（崩溃/强杀）遗留 → 调用方传 `Lost`；
+    /// - 正常宿主关闭且来得及落库 → 调用方传 `HostShutdown`。
+    ///
+    /// 两者都落到 `unknown`（见 [`TerminationReason::terminal_status`]）。
+    pub fn reconcile_orphans(&self, reason: TerminationReason, ended_at: &str) -> Result<usize> {
+        let status = reason.terminal_status(None);
+
+        let updated = self.conn.execute(
+            "UPDATE sessions
+                SET status = ?1, termination_reason = ?2, ended_at = ?3, updated_at = ?3
+              WHERE status = 'running'",
+            params![status.as_str(), reason.as_str(), ended_at],
+        )?;
+
+        Ok(updated)
+    }
+
     /// 启动失败：**仅 `created` → `failed`**，并记录 `launch_failed`。
     ///
     /// 已经 `running` 的会话必须走 [`Self::finish`]：否则并发下晚到的 `fail`
@@ -951,5 +976,116 @@ mod tests {
         assert_eq!(TerminationReason::from_db("nonsense"), None);
         assert_eq!(TerminationReason::NaturalExit.as_str(), "natural_exit");
         assert_eq!(TerminationReason::UserKilled.as_str(), "user_killed");
+    }
+
+    // ---- 启动时收敛遗留 running（约束 2） ----
+
+    /// 崩溃遗留的 running 必须收敛掉：当前版本无法重新附着旧 PTY，
+    /// 即使 PID 还活着也不能继续宣称 running。
+    #[test]
+    fn crash_orphans_are_converged_to_unknown_lost() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("orphan", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("orphan", Some(4242), "2026-01-01T10:00:01Z")
+            .expect("启动");
+
+        let converged = store
+            .reconcile_orphans(TerminationReason::Lost, "2026-01-01T11:00:00Z")
+            .expect("收敛");
+
+        assert_eq!(converged, 1);
+        let stored = store.get("orphan").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Unknown, "绝不恢复成 running");
+        assert_eq!(stored.termination_reason, Some(TerminationReason::Lost));
+        assert_eq!(stored.pid, Some(4242), "PID 保留作为诊断线索");
+        assert_eq!(
+            stored.ended_at.as_deref(),
+            Some("2026-01-01T11:00:00Z"),
+            "收敛时必须写结束时间"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_converges_orphans_as_host_shutdown() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("orphan", "2026-01-01T10:00:00Z"))
+            .expect("插入");
+        store
+            .mark_running("orphan", None, "2026-01-01T10:00:01Z")
+            .expect("启动");
+
+        store
+            .reconcile_orphans(TerminationReason::HostShutdown, "2026-01-01T11:00:00Z")
+            .expect("收敛");
+
+        let stored = store.get("orphan").expect("查询").expect("应存在");
+        assert_eq!(stored.status, SessionStatus::Unknown);
+        assert_eq!(
+            stored.termination_reason,
+            Some(TerminationReason::HostShutdown)
+        );
+    }
+
+    /// 收敛只动 running：created 与终态行都不许被碰。
+    #[test]
+    fn reconciliation_touches_only_running_sessions() {
+        let db = seeded_db();
+        let store = SessionStore::new(db.connection());
+        store
+            .insert(&session("created-one", "2026-01-01T10:00:00Z"))
+            .expect("插入 created");
+        store
+            .insert(&session("running-one", "2026-01-01T10:01:00Z"))
+            .expect("插入 running");
+        store
+            .mark_running("running-one", Some(1), "2026-01-01T10:01:01Z")
+            .expect("启动");
+        store
+            .insert(&session("exited-one", "2026-01-01T10:02:00Z"))
+            .expect("插入 exited");
+        store
+            .mark_running("exited-one", Some(2), "2026-01-01T10:02:01Z")
+            .expect("启动");
+        store
+            .finish(
+                "exited-one",
+                Some(0),
+                TerminationReason::NaturalExit,
+                "2026-01-01T10:03:00Z",
+            )
+            .expect("结束");
+
+        let converged = store
+            .reconcile_orphans(TerminationReason::Lost, "2026-01-01T11:00:00Z")
+            .expect("收敛");
+
+        assert_eq!(converged, 1, "只有 running 那一行该被收敛");
+        assert_eq!(
+            store
+                .get("created-one")
+                .expect("查询")
+                .expect("存在")
+                .status,
+            SessionStatus::Created
+        );
+        assert_eq!(
+            store.get("exited-one").expect("查询").expect("存在").status,
+            SessionStatus::Exited
+        );
+        assert_eq!(
+            store
+                .get("exited-one")
+                .expect("查询")
+                .expect("存在")
+                .termination_reason,
+            Some(TerminationReason::NaturalExit),
+            "终态的原因不得被收敛覆盖"
+        );
     }
 }

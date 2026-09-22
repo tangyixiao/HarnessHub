@@ -135,10 +135,12 @@ impl PtyBackend for PortablePtyBackend {
 
     fn kill(&self, session_id: &str) -> Result<()> {
         let mut sessions = lock(&self.sessions)?;
-        let mut session = sessions
-            .remove(session_id)
+        let session = sessions
+            .get_mut(session_id)
             .ok_or_else(|| Error::InvalidInput(format!("未知会话：{session_id}")))?;
 
+        // **不移除**会话：reaper 还要靠 try_wait 读到真实退出状态。
+        // 移除会让 try_wait 永远返回 None，终态就永远写不下去。
         session
             .child
             .kill()
@@ -157,6 +159,12 @@ impl PtyBackend for PortablePtyBackend {
             .map_err(|error| Error::InvalidInput(format!("查询进程状态失败：{error}")))?;
 
         Ok(status.map(|status| status.exit_code() as i32))
+    }
+
+    /// 显式丢弃会话（终态写入之后由上层调用，释放 PTY 句柄）。
+    fn forget(&self, session_id: &str) -> Result<()> {
+        lock(&self.sessions)?.remove(session_id);
+        Ok(())
     }
 
     fn is_running(&self, session_id: &str) -> Result<bool> {

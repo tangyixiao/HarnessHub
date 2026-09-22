@@ -87,6 +87,14 @@ impl<'conn> SessionService<'conn> {
         self.store.fail(hub_session_id, &clock::now_rfc3339())
     }
 
+    /// 收敛上一个实例遗留的 `running` 会话，返回被收敛的条数。
+    ///
+    /// 应用启动时用 `Lost`（崩溃/强杀），正常关闭时用 `HostShutdown`。
+    /// 当前版本无法重新附着旧 PTY，所以绝不恢复成 `running`。
+    pub fn reconcile_orphans(&self, reason: TerminationReason) -> Result<usize> {
+        self.store.reconcile_orphans(reason, &clock::now_rfc3339())
+    }
+
     /// 进程结束（只接受 `running`）；重复调用返回 `false`，不报错。
     ///
     /// `reason` 说明**为什么**结束，`exit_code` 是进程自己的退出码 —— 两者正交，

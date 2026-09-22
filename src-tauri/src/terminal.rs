@@ -265,12 +265,43 @@ impl TerminalRuntime {
         self.pty.resize(session_id, cols, rows)
     }
 
-    /// 用户主动结束：先记意图再 kill，这样退出回调能写对 `termination_reason`。
+    /// 用户主动结束：**只表达意图，不写终态**。
+    ///
+    /// 语义（约束 1）：
+    ///   1. 进程若已经结束 → 什么都不做（绝不因为用户点过 Kill 就把自然退出改写成 user_killed）；
+    ///   2. 确认向**仍存活**的 child 发出 terminate 之后，才 arm `user_killed`；
+    ///   3. kill 失败 → 撤销意图并如实报错（不假装 user_killed）。
+    ///
+    /// 真正的退出事实由 reaper 的 `try_wait` 决定，终态也由它写入。
+    ///
+    /// 残余竞态（如实记录）：`is_running` 为真之后、`kill` 返回之前，进程仍可能
+    /// 恰好自然退出。此时意图已 arm，会被记为 `user_killed`。在没有 OS 级
+    /// 「谁先动手」证据的前提下这不可避免 —— 但至少**从未发出 terminate 的情况下
+    /// 绝不会误标**。
     pub fn kill(&self, session_id: &str) -> Result<()> {
-        if let Ok(mut intents) = self.intents.lock() {
-            intents.insert(session_id.to_string(), TerminationReason::UserKilled);
+        if !self.pty.is_running(session_id)? {
+            if let Ok(mut intents) = self.intents.lock() {
+                intents.remove(session_id);
+            }
+            return Ok(());
         }
-        self.pty.kill(session_id)
+
+        self.arm_intent(session_id, TerminationReason::UserKilled);
+
+        if let Err(error) = self.pty.kill(session_id) {
+            if let Ok(mut intents) = self.intents.lock() {
+                intents.remove(session_id);
+            }
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    fn arm_intent(&self, session_id: &str, reason: TerminationReason) {
+        if let Ok(mut intents) = self.intents.lock() {
+            intents.insert(session_id.to_string(), reason);
+        }
     }
 
     pub fn is_running(&self, session_id: &str) -> Result<bool> {
@@ -346,6 +377,24 @@ mod tests {
             Arc::new(move |event| sink.lock().expect("events").push(event)),
             events,
         )
+    }
+
+    /// 等会话进入终态（reaper 是异步的）。
+    fn wait_for_terminal(runtime: &TerminalRuntime, session_id: &str) -> SessionRecord {
+        for _ in 0..120 {
+            if let Some(record) = runtime
+                .list_sessions(10)
+                .expect("列出")
+                .into_iter()
+                .find(|record| record.hub_session_id == session_id)
+            {
+                if record.status != SessionStatus::Running {
+                    return record;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("会话没有在预期时间内进入终态");
     }
 
     #[test]
@@ -458,6 +507,66 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
             "codex-cli 0.152.1"
+        );
+    }
+
+    /// 约束 1：kill 只表达意图，终态由 reaper 依真实退出写成。
+    #[test]
+    fn kill_on_a_running_session_is_recorded_as_user_killed() {
+        let backend = Arc::new(FakePtyBackend::new());
+        let (runtime, installation) = runtime(Arc::clone(&backend));
+        let session = runtime
+            .start(&installation, None, 80, 24, None)
+            .expect("启动");
+        assert_eq!(session.status, SessionStatus::Running);
+
+        runtime.kill(&session.hub_session_id).expect("kill");
+
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
+        assert_eq!(finished.status, SessionStatus::Exited);
+        assert_eq!(
+            finished.termination_reason,
+            Some(TerminationReason::UserKilled)
+        );
+        assert_eq!(
+            finished.exit_code,
+            Some(137),
+            "退出码必须来自 reaper 的真实观测，而不是猜的"
+        );
+    }
+
+    /// 约束 1 的另一半：进程已经自然结束时，用户的 Kill 不得改写原因。
+    #[test]
+    fn kill_after_a_natural_exit_does_not_rewrite_the_reason() {
+        let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
+        let (runtime, installation) = runtime(Arc::clone(&backend));
+        let session = runtime
+            .start(&installation, None, 80, 24, None)
+            .expect("启动");
+
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
+        assert_eq!(
+            finished.termination_reason,
+            Some(TerminationReason::NaturalExit)
+        );
+
+        // 用户此时点 Kill：既不该改终态，也不该真的再发 terminate
+        runtime.kill(&session.hub_session_id).expect("kill 应无害");
+
+        let after = runtime
+            .list_sessions(10)
+            .expect("列出")
+            .into_iter()
+            .find(|record| record.hub_session_id == session.hub_session_id)
+            .expect("应存在");
+        assert_eq!(
+            after.termination_reason,
+            Some(TerminationReason::NaturalExit),
+            "自然退出不得被改写成 user_killed"
+        );
+        assert!(
+            backend.killed.lock().expect("killed").is_empty(),
+            "已结束的会话不得再收到 terminate"
         );
     }
 }

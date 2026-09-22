@@ -54,8 +54,12 @@ pub trait PtyBackend: Send + Sync {
 
     fn kill(&self, session_id: &str) -> Result<()>;
 
-    /// 非阻塞查询退出码；`Ok(None)` 表示仍在运行。
+    /// 非阻塞查询退出码；`Ok(None)` 表示仍在运行。**reaper 是唯一调用者。**
     fn try_wait(&self, session_id: &str) -> Result<Option<i32>>;
 
     fn is_running(&self, session_id: &str) -> Result<bool>;
+
+    /// 丢弃会话句柄（终态写入之后调用）。`kill` **不得**隐式丢弃 ——
+    /// 否则 reaper 读不到退出状态，终态永远写不下去。
+    fn forget(&self, session_id: &str) -> Result<()>;
 }

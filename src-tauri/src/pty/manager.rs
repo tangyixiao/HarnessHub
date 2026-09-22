@@ -1,10 +1,21 @@
-//! PTY 会话管理：起读线程、按序转发原始字节、在 EOF 时上报退出码。
+//! PTY 会话管理：**reader 与 reaper 是两条独立生命周期**。
 //!
-//! 仍然只是传输层：**不解析字节内容**，只保证
-//!   1. 顺序（`seq` 单调递增，每个会话一个读线程，天然有序）；
-//!   2. 完整性（原始 `&[u8]`，不做 UTF-8 lossy 转换 —— 跨 chunk 的多字节字符
-//!      由终端模拟器的有状态 decoder 处理）；
-//!   3. 退出上报（EOF 后带重试地取退出码，避免进程尚未被回收时拿到 `None`）。
+//! ```text
+//! reader 线程：输出字节 + EOF        —— 只表达「输出流结束了」
+//! reaper 线程：wait / try_wait       —— **唯一**的退出状态事实来源
+//! ```
+//!
+//! 为什么必须分开（docs/adr/0010-reader-vs-reaper.md）：
+//!
+//! ```text
+//! PTY EOF ≠ 已经拿到 exit status
+//! ```
+//!
+//! 把 EOF 当成「进程结束了，猜个退出码」会在下面这种情形下说谎：
+//! 子进程 fork 出后台进程、或 shell 提前关闭了 pty —— 输出流结束但进程还在跑。
+//! 因此本模块**禁止**由 EOF 推导退出码。
+//!
+//! 仍然只是传输层：**不解析字节内容**，保证顺序、字节完整与退出上报。
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,12 +30,11 @@ use crate::pty::backend::{PtyBackend, PtyProcessHandle};
 /// 原始输出回调：`(session_id, seq, bytes)`。
 pub type OutputSink = Arc<dyn Fn(&str, u64, &[u8]) + Send + Sync>;
 
-/// 进程结束回调：`(session_id, exit_code)`。`exit_code` 为 `None` 表示拿不到。
+/// 进程结束回调：`(session_id, exit_code)`。**只由 reaper 线程调用。**
 pub type ExitSink = Arc<dyn Fn(&str, Option<i32>) + Send + Sync>;
 
-/// EOF 之后等待退出码的重试次数与间隔（进程被回收需要一点时间）。
-const EXIT_CODE_RETRIES: u32 = 40;
-const EXIT_CODE_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// reaper 轮询间隔。
+const REAP_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct PtyManager {
     backend: Arc<dyn PtyBackend>,
@@ -76,7 +86,11 @@ impl PtyManager {
         Ok(handle)
     }
 
-    /// 启动读线程。**必须在 `mark_running` 成功之后调用。**
+    /// 启动 reader 与 reaper 线程。**必须在 `mark_running` 成功之后调用。**
+    ///
+    /// 两个线程职责严格分离：
+    /// - reader：按序转发输出；读到 EOF 就结束，**不碰退出码**；
+    /// - reaper：轮询 `try_wait`，只有拿到真实退出状态才调用 [`ExitSink`]。
     pub fn start_reading(&self, session_id: &str) -> Result<()> {
         let reader = self
             .pending_readers
@@ -85,11 +99,9 @@ impl PtyManager {
             .remove(session_id)
             .ok_or_else(|| Error::InvalidInput(format!("会话没有待读取的 PTY：{session_id}")))?;
 
-        let backend = Arc::clone(&self.backend);
+        // ---- reader：只负责输出与 EOF ----
         let on_output = Arc::clone(&self.on_output);
-        let on_exit = Arc::clone(&self.on_exit);
         let reader_session = session_id.to_string();
-
         thread::spawn(move || {
             let mut seq: u64 = 0;
             let mut reader = reader;
@@ -97,7 +109,7 @@ impl PtyManager {
 
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) => break,
+                    Ok(0) => break, // EOF：仅表示输出流结束
                     Ok(read) => {
                         // 原样转发：这里绝不解析、绝不改写字节。
                         on_output(&reader_session, seq, &chunk[..read]);
@@ -106,21 +118,26 @@ impl PtyManager {
                     Err(_) => break,
                 }
             }
+        });
 
-            // EOF 不代表退出码立刻可取（进程可能还没被回收）。
-            let mut exit_code = None;
-            for _ in 0..EXIT_CODE_RETRIES {
-                match backend.try_wait(&reader_session) {
-                    Ok(Some(code)) => {
-                        exit_code = Some(code);
-                        break;
-                    }
-                    Ok(None) => thread::sleep(EXIT_CODE_RETRY_DELAY),
-                    Err(_) => break,
+        // ---- reaper：唯一的退出状态事实来源 ----
+        let backend = Arc::clone(&self.backend);
+        let on_exit = Arc::clone(&self.on_exit);
+        let reaper_session = session_id.to_string();
+        thread::spawn(move || loop {
+            match backend.try_wait(&reaper_session) {
+                Ok(Some(code)) => {
+                    on_exit(&reaper_session, Some(code));
+                    break;
+                }
+                // 仍在运行：继续等，**绝不猜测**
+                Ok(None) => thread::sleep(REAP_INTERVAL),
+                Err(_) => {
+                    // 连退出状态都读不到：如实上报「拿不到」，由上层映射成 unknown/lost
+                    on_exit(&reaper_session, None);
+                    break;
                 }
             }
-
-            on_exit(&reader_session, exit_code);
         });
 
         Ok(())
@@ -149,6 +166,11 @@ impl PtyManager {
 
     pub fn try_wait(&self, session_id: &str) -> Result<Option<i32>> {
         self.backend.try_wait(session_id)
+    }
+
+    /// 丢弃会话句柄（终态写入之后调用）。
+    pub fn forget(&self, session_id: &str) -> Result<()> {
+        self.backend.forget(session_id)
     }
 }
 
@@ -212,6 +234,8 @@ pub(crate) mod fake {
         /// 为真时所有会话都视为「已退出」，退出码取 `always_exit_code`。
         always_exited: Mutex<bool>,
         always_exit_code: Mutex<Option<i32>>,
+        /// 被 kill 后进程的退出码（模拟真实被终止的进程）。
+        killed_exit_code: i32,
         pub pid: Option<u32>,
     }
 
@@ -219,6 +243,7 @@ pub(crate) mod fake {
         pub fn new() -> Self {
             Self {
                 pid: Some(4242),
+                killed_exit_code: 137,
                 ..Self::default()
             }
         }
@@ -294,6 +319,14 @@ pub(crate) mod fake {
                 .lock()
                 .expect("killed")
                 .push(session_id.to_string());
+
+            // 真实语义：kill 之后进程**会**退出，reaper 随后就能读到退出状态。
+            if !*self.always_exited.lock().expect("always_exited") {
+                self.exit_codes
+                    .lock()
+                    .expect("exit_codes")
+                    .insert(session_id.to_string(), Some(self.killed_exit_code));
+            }
             Ok(())
         }
 
@@ -313,6 +346,10 @@ pub(crate) mod fake {
 
         fn is_running(&self, session_id: &str) -> Result<bool> {
             Ok(self.try_wait(session_id)?.is_none())
+        }
+
+        fn forget(&self, _session_id: &str) -> Result<()> {
+            Ok(())
         }
     }
 }
