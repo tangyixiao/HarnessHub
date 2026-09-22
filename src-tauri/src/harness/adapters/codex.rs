@@ -76,17 +76,19 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
-    /// v0.1 的诚实取值。
+    /// **全部为 `false`**，这是当前唯一诚实的取值。
     ///
-    /// `usage` 保持 `false`：直到 ccusage 夹具回归通过才置 `true`
-    /// （ADR-0022：「能检测到」不算支持，「可稳定回归」才算）。
+    /// Global Constraint #8 / ADR-0022：能力为 `true` 必须有测试或验收记录支撑。
+    /// 目前：
+    ///   - `launch` / `terminal`：PTY 尚未实现，`launch()` 只会返回错误 → 不得宣称支持；
+    ///   - `resume`：同上；
+    ///   - `usage`：ccusage 夹具回归尚未建立 → 不得宣称支持；
+    ///   - 其余能力（replay / tool_calls / subagents / live_state / worktree）：未开始。
+    ///
+    /// 每实现一项，就在对应 Task 落地并通过验收后于此处单独置 `true`，
+    /// 而不是提前把整组打开。
     fn capabilities(&self) -> HarnessCapabilities {
-        HarnessCapabilities {
-            launch: true,
-            terminal: true,
-            resume: true,
-            ..HarnessCapabilities::default()
-        }
+        HarnessCapabilities::default()
     }
 
     fn launch(&self, _request: LaunchRequest) -> Result<ProcessHandle> {
@@ -240,14 +242,35 @@ mod tests {
     }
 
     #[test]
-    fn usage_capability_stays_false_until_ccusage_regression_passes() {
+    fn no_capability_is_claimed_before_its_task_lands() {
         let capabilities = adapter(FakeHostProbe::new()).capabilities();
 
-        assert!(capabilities.launch);
-        assert!(capabilities.terminal);
-        assert!(
-            !capabilities.usage,
-            "ccusage 夹具回归通过前不得宣称支持 Usage（ADR-0022）"
+        assert_eq!(
+            capabilities,
+            HarnessCapabilities::default(),
+            "PTY / usage / replay 都还没实现，任何能力为 true 都是不诚实的宣称"
+        );
+    }
+
+    /// 能力矩阵必须与实现状态一致：`launch` 报 false，就必须真的不能启动。
+    #[test]
+    fn reported_capabilities_match_actual_behaviour() {
+        use crate::harness::adapter::LaunchRequest;
+
+        let codex = adapter(FakeHostProbe::new());
+        let can_launch = codex
+            .launch(LaunchRequest {
+                project_id: None,
+                cwd: "D:/work".to_string(),
+                args: Vec::new(),
+                runtime_target_id: "local".to_string(),
+            })
+            .is_ok();
+
+        assert_eq!(
+            codex.capabilities().launch,
+            can_launch,
+            "capabilities.launch 必须等于 launch() 的真实可用性"
         );
     }
 
