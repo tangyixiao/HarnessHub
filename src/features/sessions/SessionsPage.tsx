@@ -8,6 +8,7 @@ import {
   listSessions,
   type SessionRecord,
   type SessionStatus,
+  type TerminationReason,
 } from '@/lib/ipc';
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
@@ -26,9 +27,21 @@ const STATUS_STYLE: Record<SessionStatus, string> = {
   unknown: 'border-border-subtle bg-surface-overlay/40 text-content-muted',
 };
 
+const TERMINATION_LABEL: Record<TerminationReason, string> = {
+  natural_exit: '正常退出',
+  user_killed: '用户主动结束',
+  launch_failed: '启动失败',
+  runtime_error: '运行故障',
+  host_shutdown: 'Harness Hub 关闭',
+  lost: '失去联系',
+};
+
 /**
  * 状态说明。**`created` 绝不能显示成「仍在运行」** —— 它登记了但还没有任何进程
  * （见 docs/adr/0006-session-state-machine.md）。
+ *
+ * 终态同时展示**终止原因**与**退出码**：非零退出不等于同一种失败，
+ * 旧数据没有原因时如实说「原因未记录」，不猜。
  */
 function statusDetail(session: SessionRecord): string {
   switch (session.status) {
@@ -36,11 +49,14 @@ function statusDetail(session: SessionRecord): string {
       return '尚未启动（没有进程）';
     case 'running':
       return '仍在运行（尚未收到退出码）';
-    case 'unknown':
-      return '已结束，退出码未知';
-    case 'exited':
-    case 'failed':
-      return session.exitCode === null ? '已结束，退出码未记录' : `退出码 ${session.exitCode}`;
+    default: {
+      const reason =
+        session.terminationReason === null
+          ? '原因未记录'
+          : TERMINATION_LABEL[session.terminationReason];
+      const code = session.exitCode === null ? '' : ` · 退出码 ${session.exitCode}`;
+      return `${reason}${code}`;
+    }
   }
 }
 

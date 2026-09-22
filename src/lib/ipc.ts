@@ -205,6 +205,18 @@ export type SessionStatus = 'created' | 'running' | 'exited' | 'failed' | 'unkno
 export type LaunchMode = 'terminal' | 'resume' | 'imported';
 
 /**
+ * **为什么**会话结束了。与 `exitCode` 正交：非零退出码不等于同一种失败
+ * （用户强杀 / CLI 参数错误 / Agent 工作失败 / Harness Hub 自身故障）。
+ */
+export type TerminationReason =
+  | 'natural_exit'
+  | 'user_killed'
+  | 'launch_failed'
+  | 'runtime_error'
+  | 'host_shutdown'
+  | 'lost';
+
+/**
  * 与 Rust `SessionRecord`（serde camelCase）同形。
  *
  * `hubSessionId` 是 Harness Hub 自己的标识；`sourceSessionId` 是外部 Harness 的原始
@@ -228,10 +240,20 @@ export type SessionRecord = {
   startedAt: string;
   endedAt: string | null;
   exitCode: number | null;
+  /** 终止原因；created / running 阶段以及迁移前的存量终态行为 null（原因未记录）。 */
+  terminationReason: TerminationReason | null;
 };
 
 const SESSION_STATUSES = ['created', 'running', 'exited', 'failed', 'unknown'] as const;
 const LAUNCH_MODES = ['terminal', 'resume', 'imported'] as const;
+const TERMINATION_REASONS = [
+  'natural_exit',
+  'user_killed',
+  'launch_failed',
+  'runtime_error',
+  'host_shutdown',
+  'lost',
+] as const;
 
 function asStringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
@@ -273,6 +295,9 @@ export function normalizeSessionRecord(raw: unknown): SessionRecord | null {
     startedAt: typeof source.startedAt === 'string' ? source.startedAt : '',
     endedAt: asStringOrNull(source.endedAt),
     exitCode: typeof source.exitCode === 'number' ? source.exitCode : null,
+    // 未知的终止原因视为「未记录」，绝不当成正常退出。
+    terminationReason:
+      TERMINATION_REASONS.find((candidate) => candidate === source.terminationReason) ?? null,
   };
 }
 
@@ -312,14 +337,21 @@ export function createSession(input: {
   });
 }
 
-/** 结束一条仍处于 running 的会话；返回是否真的更新了行（幂等）。 */
+/**
+ * 结束一条仍处于 running 的会话；返回是否真的更新了行（幂等）。
+ *
+ * `reason` 必填：**非零退出码不等于同一种失败**，调用方必须说明是用户主动结束、
+ * 运行故障还是启动失败。终态由 Rust 侧用 reason + exitCode 共同推导。
+ */
 export function finishSession(
   hubSessionId: string,
+  reason: TerminationReason,
   exitCode?: number | null,
 ): Promise<IpcResult<boolean>> {
   return invokeCommand<boolean>('finish_session', {
     hubSessionId,
     exitCode: exitCode ?? null,
+    reason,
   });
 }
 

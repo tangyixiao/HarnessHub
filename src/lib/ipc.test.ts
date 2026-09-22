@@ -252,6 +252,7 @@ const SESSION_PAYLOAD = {
   startedAt: '2026-09-22T10:00:00Z',
   endedAt: null,
   exitCode: null,
+  terminationReason: null,
 };
 
 describe('normalizeSessionRecord', () => {
@@ -299,6 +300,30 @@ describe('normalizeSessionRecord', () => {
     const record = normalizeSessionRecord({ ...SESSION_PAYLOAD, exitCode: '130' });
 
     expect(record?.exitCode).toBeNull();
+  });
+
+  it('terminationReason 保留已知值', () => {
+    for (const reason of [
+      'natural_exit',
+      'user_killed',
+      'launch_failed',
+      'runtime_error',
+      'host_shutdown',
+      'lost',
+    ]) {
+      expect(
+        normalizeSessionRecord({ ...SESSION_PAYLOAD, terminationReason: reason })?.terminationReason,
+      ).toBe(reason);
+    }
+  });
+
+  it('未知 terminationReason 视为未记录，绝不当作正常退出', () => {
+    const record = normalizeSessionRecord({
+      ...SESSION_PAYLOAD,
+      terminationReason: 'because-i-said-so',
+    });
+
+    expect(record?.terminationReason).toBeNull();
   });
 });
 
@@ -350,10 +375,14 @@ describe('session commands', () => {
     const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
     stubTauri(invokeSpy);
 
-    const result = await finishSession('h1', 0);
+    const result = await finishSession('h1', 'user_killed', 0);
 
     expect(invokeSpy.mock.calls[0]?.[0]).toBe('finish_session');
-    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ hubSessionId: 'h1', exitCode: 0 });
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      hubSessionId: 'h1',
+      exitCode: 0,
+      reason: 'user_killed',
+    });
     expect(result).toEqual({ ok: true, data: true });
   });
 
@@ -363,7 +392,10 @@ describe('session commands', () => {
       ok: false,
       error: NOT_IN_TAURI,
     });
-    await expect(finishSession('h1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(finishSession('h1', 'natural_exit')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
   });
 });
 

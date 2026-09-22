@@ -32,6 +32,7 @@ const CREATED_SESSION = {
   startedAt: '2026-09-22T10:00:00Z',
   endedAt: null,
   exitCode: null,
+  terminationReason: null,
 };
 
 const RUNNING_SESSION = { ...CREATED_SESSION, status: 'running' };
@@ -42,6 +43,7 @@ const EXITED_SESSION = {
   status: 'exited',
   endedAt: '2026-09-22T10:05:00Z',
   exitCode: 0,
+  terminationReason: 'natural_exit',
 };
 
 describe('SessionsPage', () => {
@@ -96,7 +98,63 @@ describe('SessionsPage', () => {
     await screen.findByText('已结束');
 
     expect(screen.getByText(/2026-09-22 10:05:00/)).toBeInTheDocument();
+    expect(screen.getByText(/正常退出/)).toBeInTheDocument();
     expect(screen.getByText(/退出码 0/)).toBeInTheDocument();
+  });
+
+  /**
+   * 拆分 termination_reason 的意义：用户强杀（非零退出）不是业务失败。
+   */
+  it('用户强杀显示为已结束 + 用户主动结束，而不是失败', async () => {
+    stubSessions([
+      {
+        ...EXITED_SESSION,
+        status: 'exited',
+        exitCode: 137,
+        terminationReason: 'user_killed',
+      },
+    ]);
+
+    render(<SessionsPage />);
+
+    expect(await screen.findByText('已结束')).toBeInTheDocument();
+    expect(screen.getByText(/用户主动结束/)).toBeInTheDocument();
+    expect(screen.getByText(/退出码 137/)).toBeInTheDocument();
+    expect(screen.queryByText('失败')).not.toBeInTheDocument();
+  });
+
+  it('启动失败与运行故障分别显示各自原因', async () => {
+    stubSessions([
+      {
+        ...EXITED_SESSION,
+        hubSessionId: 'h-launch',
+        status: 'failed',
+        endedAt: '2026-09-22T10:01:00Z',
+        exitCode: null,
+        terminationReason: 'launch_failed',
+      },
+      {
+        ...EXITED_SESSION,
+        hubSessionId: 'h-runtime',
+        status: 'failed',
+        terminationReason: 'runtime_error',
+      },
+    ]);
+
+    render(<SessionsPage />);
+
+    expect(await screen.findByText(/启动失败/)).toBeInTheDocument();
+    expect(screen.getByText(/运行故障/)).toBeInTheDocument();
+    expect(screen.getAllByText('失败')).toHaveLength(2);
+  });
+
+  it('迁移前的存量终态行显示「原因未记录」，不猜原因', async () => {
+    stubSessions([{ ...EXITED_SESSION, terminationReason: null }]);
+
+    render(<SessionsPage />);
+    await screen.findByText('已结束');
+
+    expect(screen.getByText(/原因未记录/)).toBeInTheDocument();
   });
 
   it('运行中的会话不显示退出码数值，而是明确说仍在运行', async () => {
