@@ -101,3 +101,77 @@ Codex / Harness ID：codex / 已安装
 - 用户桌面上窗口的**视觉观感**（字体、间距等主观项）：只看过 CDP 页面截图与 innerText。
 - 未安装 Harness 的机器上的 UI 表现：仅有 vitest 覆盖，没有真机。
 
+---
+
+## 2026-09-22 — Task 3：Clock / LocalRuntimeTarget / Session 编排（已验收）
+
+### 验收方式
+
+与 Task 2 相同：WebView2 CDP（`--remote-debugging-port=9222`）驱动运行中的应用，
+`Page.navigate` / `Page.reload` + `Runtime.evaluate` + `Page.captureScreenshot`。
+不置顶窗口、不动鼠标键盘、不截屏幕。
+
+调用链路走**前端自己的 `ipc.ts`**（`await import('/src/lib/ipc.ts')`）而不是直调
+`window.__TAURI_INTERNALS__.invoke`，因此同时覆盖了 `ipc.ts` 的参数整形与结果归一化。
+
+### 端到端结果
+
+```text
+create_session({ harnessId: 'codex', cwd: 'D:/HarnessHub' })
+  → { hubSessionId: "46d6b24c-…", runtimeTargetId: "local", status: "running",
+      launchMode: "terminal", cwd: "D:/HarnessHub", startedAt: "2026-09-22T11:26:41Z",
+      sourceSessionId: null, endedAt: null, exitCode: null }
+
+Sessions 页（running）：codex / 46d6b24c-… / 运行中 / 开始时间 2026-09-22 11:26:41
+                        / 结束时间 — / 工作目录 D:/HarnessHub
+                        / 「仍在运行（尚未收到退出码） · 无外部 source session id」
+
+finish_session(hubSessionId, 0) → true
+list_sessions(limit 5)         → status "exited"、endedAt "2026-09-22T11:26:44Z"、exitCode 0
+
+Sessions 页（reload 后）：已结束 / 结束时间 2026-09-22 11:26:44 / 退出码 0
+```
+
+**进程级重启后的持久化**（Release Gate 项「退出重启后 Session 历史仍存在」）：
+
+```text
+1. Stop-Process harness-hub        （不是页面刷新，是真正杀进程）
+2. 用 Python 标准库读磁盘数据库：
+   sessions(1): ('46d6b24c-…', 'codex', 'exited', 'terminal', 'D:/HarnessHub',
+                 '2026-09-22T11:26:41Z', '2026-09-22T11:26:44Z', 0, 'local')
+   harnesses:        [('codex', 'Codex', 1, '0.152.1', '2026-09-22T11:26:41Z')]
+   runtime_targets:  [('local', 'local', '本机')]   ← utf-8 b'\xe6\x9c\xac\xe6\x9c\xba'
+3. 重新 pnpm tauri dev → Sessions 页仍显示该会话（已结束 / 退出码 0）
+```
+
+### 本次真机验证发现并修复的缺陷（重要）
+
+第一次 `create_session` 在真实应用里返回：
+
+```text
+数据库错误：FOREIGN KEY constraint failed
+```
+
+原因：`sessions.harness_id` 有指向 `harnesses(id)` 的外键，但**没有任何生产代码往
+`harnesses` 表写过行** —— 检测结果一直只存在于内存注册表中。
+
+- 单元测试**抓不到**：夹具 `seeded_db()` 会替调用方把 harness 行插好，
+  正好掩盖了生产路径上缺失的那一步。
+- 修复：新增 `harness/store.rs::upsert_harness()`，`create_session` 在落库前先按
+  注册表的检测结果 upsert harness 行（未注册的 Harness 返回明确错误）。
+- 回归锁：`upsert_harness` 的 4 个测试，其中
+  `upserted_harness_satisfies_the_sessions_foreign_key` 直接复现原先失败的那条路径。
+
+### 本轮验证命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `pnpm verify` | 退出码 0（lint / typecheck / 55 前端用例 / build / rust fmt / clippy / 66 单元 + 2 集成用例） |
+| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
+
+### 仍未验收
+
+- 会话的**实时刷新**：页面不会自动感知后台状态变化（缺「实时状态」能力）。
+  本次是靠 `Page.reload` 才看到 exited 状态的 —— 这是预期行为，不是缺陷。
+- 多 Harness：注册表目前只注册 Codex，其他 Harness 仍是占位。
+
