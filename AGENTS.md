@@ -39,6 +39,19 @@ seeded fixture（夹具插好 harness 行）
 因为 `Database::open_*` 会一次性把迁移跑到最新，那样只能验证最终 schema、
 验证不了「老数据被正确搬运」。
 
+### 跨 IPC 的契约纪律
+
+同一类事故已经发生两次（`HarnessCapabilities` 的 snake_case、`PtyEvent` 的
+`rename_all_fields`），因此固定成规则：
+
+- **任何跨 Tauri IPC 的 Rust DTO / enum，必须有 JSON serialization contract test**
+  锁定实际输出的键名与嵌套形状（注意 `rename_all` 只改变体名，结构变体字段要用
+  `rename_all_fields`）。
+- **任何 TS normalize / decoder，必须有对应的 fixture test**，用同一形状的 payload
+  锁住解析行为与安全默认值。
+- 新增 Provider / MCP / Trace Event 等 DTO 时同样适用：不靠「看起来应该是
+  camelCase」猜。
+
 ## 完成前
 
 至少执行并通过：

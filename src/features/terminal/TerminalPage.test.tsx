@@ -10,11 +10,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * 这里用 mock 记录调用顺序来锁死它。
  */
 const calls: string[] = [];
+let observerCallback: (() => void) | null = null;
 
+const xtermInstances: Array<{ cols: number; rows: number }> = [];
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 100;
     rows = 30;
+    constructor() {
+      xtermInstances.push(this);
+    }
     open() {
       calls.push('terminal.open');
     }
@@ -111,7 +116,12 @@ beforeEach(() => {
   writeTerminal.mockResolvedValue({ ok: true, data: null });
   resizeTerminal.mockResolvedValue({ ok: true, data: null });
 
+  observerCallback = null;
+  xtermInstances.length = 0;
   globalThis.ResizeObserver = class {
+    constructor(callback: () => void) {
+      observerCallback = callback;
+    }
     observe() {
       calls.push('resizeObserver.observe');
     }
@@ -215,5 +225,38 @@ describe('TerminalPage', () => {
 
     expect(await screen.findByText(/IPC 不可用（浏览器模式）/)).toBeInTheDocument();
     expect(startTerminal).not.toHaveBeenCalled();
+  });
+
+  /**
+   * [9] resize 的参数透传：ResizeObserver 触发时必须把 **xterm 当前的 cols/rows**
+   * 交给 resize_terminal，而不是发旧值或空值。
+   */
+  it('resize：把 xterm 当前 cols/rows 透传给 resize_terminal', async () => {
+    render(<TerminalPage />);
+    await waitFor(() => expect(startTerminal).toHaveBeenCalled());
+
+    const terminal = xtermInstances[0];
+    terminal.cols = 132;
+    terminal.rows = 43;
+
+    expect(observerCallback).not.toBeNull();
+    observerCallback?.();
+
+    await waitFor(() => expect(resizeTerminal).toHaveBeenCalled());
+    expect(resizeTerminal).toHaveBeenCalledWith('hub-1', 132, 43);
+  });
+
+  /**
+   * resize 边界：session id 还没回来时 ResizeObserver 可能先触发 ——
+   * 此时绝不能用空 id 发 resize（也不做补发队列：start_terminal 本身
+   * 已经带了初始 cols/rows）。
+   */
+  it('resize：session id 尚未返回时不得发送', async () => {
+    render(<TerminalPage />);
+
+    expect(observerCallback).not.toBeNull();
+    observerCallback?.();
+
+    expect(resizeTerminal).not.toHaveBeenCalled();
   });
 });
