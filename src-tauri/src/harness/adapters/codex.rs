@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::harness::adapter::{
-    DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest, ProcessHandle,
-    ResumeRequest,
+    DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest,
 };
+use crate::harness::launch::{program_for, LaunchSpec};
 use crate::harness::probe::HostProbe;
 
 /// 规范 Harness id，与 `harnesses.id` 一致。
@@ -83,28 +83,37 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
-    /// **全部为 `false`**：因为 PTY / launch / resume / usage **都还没有实现**。
+    /// **全部为 `false`**：PTY 启动链路与 usage 都还没有实现。
     ///
     /// 语义提醒（docs/adr/0005）：本方法回答「Adapter 实现了没有」，不是
-    /// 「此刻能否运行」。所以 Task 4 实现 launch 之后就要在这里置 `true`，
-    /// 而那之后**不会**因为某台机器上 binary 缺失、auth 过期导致某次 `launch()` 失败
-    /// 就把它改回 `false` —— 那是 readiness 维度（ready / blocked / unknown，待实现）。
+    /// 「此刻能否运行」。`build_launch_spec` 只是启动路径的一半（另一半是 Task 4 的
+    /// PTY spawn 与端到端验收），因此在 Task 4 验收通过前 `launch` 保持 `false`。
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities::default()
     }
 
-    fn launch(&self, _request: LaunchRequest) -> Result<ProcessHandle> {
-        Err(Error::InvalidInput(
-            "Codex 尚未接入 PTY 启动（见 docs/plans/2026-09-21-v0.1-walking-skeleton.md Task 4）"
-                .to_string(),
-        ))
-    }
+    fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
+        let binary = self.probe.find_executable(EXECUTABLE_NAME).ok_or_else(|| {
+            Error::InvalidInput("Codex 未安装：PATH 中找不到可执行文件".to_string())
+        })?;
 
-    fn resume(&self, _request: ResumeRequest) -> Result<ProcessHandle> {
-        Err(Error::InvalidInput(
-            "Codex resume 尚未接入 PTY（见 docs/plans/2026-09-21-v0.1-walking-skeleton.md Task 4）"
-                .to_string(),
-        ))
+        // 平台差异只在这里解决：Windows 的 npm shim（.cmd 直接执行、.ps1 交给 pwsh）。
+        let (program, mut args) = program_for(&binary);
+        args.extend(request.args);
+
+        let cwd = if request.cwd.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(request.cwd))
+        };
+
+        Ok(LaunchSpec {
+            program,
+            args,
+            cwd,
+            env: Vec::new(),
+            runtime_target_id: request.runtime_target_id,
+        })
     }
 }
 
@@ -254,70 +263,130 @@ mod tests {
         );
     }
 
-    /// 当前 launch 仍是 stub，因此 `capabilities.launch` 必须是 `false`。
+    /// `build_launch_spec` 只是启动路径的一半，因此 `capabilities.launch` 仍为
+    /// `false`（另一半是 Task 4 的 PTY spawn 与端到端验收）。
     ///
-    /// 刻意**不**建立「capabilities.launch == 某次 launch() 是否成功」这种长期契约：
+    /// 刻意**不**建立「capabilities.launch == 某次启动是否成功」这种长期契约：
     /// capability 表示 Adapter 是否实现该能力，运行时成败属于 readiness
-    /// （见 docs/adr/0005-capability-vs-readiness.md）。Task 4 实现 launch 后，
-    /// 这里会改成断言 `launch == true`，而 launch() 依然可能因为 binary 缺失、
-    /// auth 过期等原因失败 —— 那不影响 capability。
+    /// （见 docs/adr/0005-capability-vs-readiness.md）。
     #[test]
-    fn launch_capability_is_false_while_launch_is_still_a_stub() {
+    fn launch_capability_stays_false_until_the_whole_launch_path_is_verified() {
         let codex = adapter(FakeHostProbe::new());
 
         assert!(
             !codex.capabilities().launch,
-            "launch 还没实现，capability 就不能为 true"
+            "PTY 端到端验收前，launch capability 不得为 true"
         );
         assert!(
-            codex
-                .launch(crate::harness::adapter::LaunchRequest {
-                    project_id: None,
-                    cwd: "D:/work".to_string(),
-                    args: Vec::new(),
-                    runtime_target_id: "local".to_string(),
-                })
-                .is_err(),
-            "配套前提：此时 launch() 确实还是 stub"
+            codex.build_launch_spec(launch_request(&[])).is_err(),
+            "配套前提：没装 Codex 时还生成不出 launch spec"
         );
     }
 
-    #[test]
-    fn launch_reports_a_clear_error_before_pty_wiring() {
-        use crate::harness::adapter::LaunchRequest;
+    // ---- LaunchSpec（Task 4 的接口冻结，本期只定义边界） ----
 
-        let request = LaunchRequest {
+    fn launch_request(extra_args: &[&str]) -> crate::harness::adapter::LaunchRequest {
+        crate::harness::adapter::LaunchRequest {
             project_id: None,
             cwd: "D:/work".to_string(),
-            args: Vec::new(),
+            args: extra_args.iter().map(|arg| arg.to_string()).collect(),
             runtime_target_id: "local".to_string(),
-        };
+        }
+    }
 
+    #[test]
+    fn launch_spec_is_rejected_when_codex_is_not_installed() {
         let error = adapter(FakeHostProbe::new())
-            .launch(request)
-            .expect_err("PTY 接线完成前必须失败");
+            .build_launch_spec(launch_request(&[]))
+            .expect_err("未安装必须失败");
 
         assert!(
-            error.to_string().contains("PTY"),
-            "错误信息要指出缺失的能力：{error}"
+            error.to_string().contains("未安装"),
+            "错误信息要说明原因：{error}"
+        );
+    }
+
+    /// Windows 上 npm 的 `.cmd` shim：直接执行，不套 shell。
+    #[test]
+    fn launch_spec_executes_cmd_shim_directly() {
+        let probe = FakeHostProbe::new().with_binary(
+            "codex",
+            "D:/npm-global/codex.cmd",
+            "codex-cli 0.152.1",
+        );
+
+        let spec = adapter(probe)
+            .build_launch_spec(launch_request(&["--model", "gpt-5"]))
+            .expect("生成 spec");
+
+        assert_eq!(
+            spec.program,
+            PathBuf::from("D:/npm-global/codex.cmd"),
+            "必须是可执行文件本身，不得退化成 cmd /c 之类的外壳"
+        );
+        assert_eq!(spec.args, vec!["--model".to_string(), "gpt-5".to_string()]);
+        assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
+        assert_eq!(spec.runtime_target_id, "local");
+    }
+
+    /// 只有 `.ps1` 时不能被 CreateProcess 执行，必须交给 pwsh。
+    #[test]
+    fn launch_spec_hosts_ps1_shim_with_powershell() {
+        let probe = FakeHostProbe::new().with_binary(
+            "codex",
+            "D:/npm-global/codex.ps1",
+            "codex-cli 0.152.1",
+        );
+
+        let spec = adapter(probe)
+            .build_launch_spec(launch_request(&["--version"]))
+            .expect("生成 spec");
+
+        assert_eq!(spec.program, PathBuf::from("pwsh"));
+        assert_eq!(
+            spec.args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-File".to_string(),
+                "D:/npm-global/codex.ps1".to_string(),
+                "--version".to_string(),
+            ],
+            "用户参数必须排在 shim 前置参数之后"
         );
     }
 
     #[test]
-    fn resume_reports_a_clear_error_before_pty_wiring() {
-        use crate::harness::adapter::ResumeRequest;
+    fn launch_spec_omits_empty_cwd_instead_of_passing_an_empty_string() {
+        let probe = FakeHostProbe::new().with_binary(
+            "codex",
+            "D:/npm-global/codex.cmd",
+            "codex-cli 0.152.1",
+        );
+        let mut request = launch_request(&[]);
+        request.cwd = String::new();
 
-        let request = ResumeRequest {
-            hub_session_id: "hub-1".to_string(),
-            source_session_id: None,
-            cwd: "D:/work".to_string(),
-            runtime_target_id: "local".to_string(),
-        };
+        let spec = adapter(probe)
+            .build_launch_spec(request)
+            .expect("生成 spec");
 
-        let error = adapter(FakeHostProbe::new())
-            .resume(request)
-            .expect_err("PTY 接线完成前必须失败");
+        assert!(spec.cwd.is_none(), "空 cwd 应视为「未指定」");
+    }
 
-        assert!(error.to_string().contains("resume"));
+    #[test]
+    fn launch_spec_carries_the_runtime_target() {
+        let probe = FakeHostProbe::new().with_binary(
+            "codex",
+            "D:/npm-global/codex.cmd",
+            "codex-cli 0.152.1",
+        );
+        let mut request = launch_request(&[]);
+        request.runtime_target_id = "wsl-ubuntu".to_string();
+
+        let spec = adapter(probe)
+            .build_launch_spec(request)
+            .expect("生成 spec");
+
+        assert_eq!(spec.runtime_target_id, "wsl-ubuntu");
     }
 }

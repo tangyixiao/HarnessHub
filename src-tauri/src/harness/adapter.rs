@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::harness::launch::LaunchSpec;
 
 /// Harness 的规范标识，例如 `codex` / `claude-code` / `gemini-cli`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -94,6 +95,10 @@ pub struct ProcessHandle {
 }
 
 /// Harness 生命周期接口。实现者必须可跨线程共享（注册表按 `&dyn` 持有）。
+///
+/// 注意这里**没有** `launch()`：Adapter 负责「怎么启动」（生成
+/// [`LaunchSpec`]），进程与 PTY 的生命周期归 Control Plane 的 PTY 层
+/// （见 docs/adr/0008-launch-spec-boundary.md）。
 pub trait HarnessAdapter: Send + Sync {
     fn id(&self) -> HarnessId;
 
@@ -113,14 +118,17 @@ pub trait HarnessAdapter: Send + Sync {
     ///
     /// 语义边界（重要）：这里回答的是「代码实现了没有」，**不是**「此刻这台机器能不能用」。
     /// 例如 Task 4 之后 `launch` 实现完成即为 `true`，即使某台机器上 binary 被删、
-    /// auth 缺失、profile 配坏导致这一次 `launch()` 失败，也**不得**因此把
+    /// auth 缺失、profile 配坏导致这一次启动失败，也**不得**因此把
     /// `capabilities.launch` 改回 `false` —— 那是 readiness 维度的事
     /// （ready / blocked / unknown，尚未实现）。
     fn capabilities(&self) -> HarnessCapabilities;
 
-    fn launch(&self, request: LaunchRequest) -> Result<ProcessHandle>;
-
-    fn resume(&self, request: ResumeRequest) -> Result<ProcessHandle>;
+    /// 生成**结构化**启动描述。
+    ///
+    /// 平台差异（Windows 的 npm shim、`.ps1` 需要 pwsh 宿主、参数转义、未来 WSL/SSH
+    /// 的可执行形态）全部在这一层解决。PTY 层只执行 [`LaunchSpec`]，
+    /// **不得**自己拼 shell 命令字符串。
+    fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec>;
 }
 
 #[cfg(test)]

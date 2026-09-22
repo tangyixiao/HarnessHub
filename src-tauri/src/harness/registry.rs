@@ -106,10 +106,10 @@ impl HarnessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{Error, Result};
-    use crate::harness::adapter::{
-        DetectResult, HarnessCapabilities, LaunchRequest, ProcessHandle, ResumeRequest,
-    };
+    use crate::error::Result;
+    use crate::harness::adapter::{DetectResult, HarnessCapabilities, LaunchRequest};
+    use crate::harness::launch::LaunchSpec;
+    use std::path::PathBuf;
 
     struct FakeAdapter {
         id: HarnessId,
@@ -164,12 +164,14 @@ mod tests {
             self.capabilities
         }
 
-        fn launch(&self, _request: LaunchRequest) -> Result<ProcessHandle> {
-            Err(Error::InvalidInput("fake adapter 不启动进程".to_string()))
-        }
-
-        fn resume(&self, _request: ResumeRequest) -> Result<ProcessHandle> {
-            Err(Error::InvalidInput("fake adapter 不恢复进程".to_string()))
+        fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
+            Ok(LaunchSpec {
+                program: PathBuf::from(format!("/usr/bin/{}", self.id)),
+                args: request.args,
+                cwd: Some(PathBuf::from(request.cwd)),
+                env: Vec::new(),
+                runtime_target_id: request.runtime_target_id,
+            })
         }
     }
 

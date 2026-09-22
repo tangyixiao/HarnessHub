@@ -9,6 +9,7 @@
 pub mod adapter;
 pub mod adapters;
 pub mod inventory;
+pub mod launch;
 pub mod probe;
 pub mod registry;
 pub mod store;
@@ -18,4 +19,5 @@ pub use adapter::{
     ResumeRequest,
 };
 pub use inventory::ReconcileReport;
+pub use launch::LaunchSpec;
 pub use registry::{HarnessRegistry, HarnessSummary};
