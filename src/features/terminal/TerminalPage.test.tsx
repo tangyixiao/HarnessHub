@@ -484,3 +484,57 @@ describe('TerminalPage launch options（cwd）', () => {
     expect(input.cwd).toBeUndefined();
   });
 });
+
+/*
+ * 补上上一轮标注的 cwd 缺口。
+ *
+ * 受控 input 不能直接 `input.value = x`（React 的 value tracker 会当成「没变」），
+ * 正确写法是走原型上的原生 value setter 再抛 input 事件 —— 这也是 RTL 内部的做法。
+ */
+describe('TerminalPage cwd 透传', () => {
+  const setCwdInput = (value: string) => {
+    const input = screen.getByLabelText('工作目录（可选）') as HTMLInputElement;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    nativeSetter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  it('非空 cwd（含反斜杠）→ trim 后精确透传', async () => {
+    render(<TerminalPage />);
+    await settle();
+
+    setCwdInput('   D:\\HarnessHub-E2E\\claude-terminal   ');
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    const input = startTerminal.mock.calls[0]?.[0] as { cwd?: string };
+    expect(input.cwd).toBe('D:\\HarnessHub-E2E\\claude-terminal');
+  });
+
+  it('running 禁用 cwd；ended 后改 cwd → 新 session 用新值', async () => {
+    render(<TerminalPage />);
+    await settle();
+
+    setCwdInput('D:\\first');
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect((screen.getByLabelText('工作目录（可选）') as HTMLInputElement).disabled).toBe(true);
+    expect((startTerminal.mock.calls[0]?.[0] as { cwd?: string }).cwd).toBe('D:\\first');
+    // 运行中展示的是**事实**（activeCwd），不是输入框里的选择
+    expect(screen.getByText(/cwd D:\\first/)).toBeInTheDocument();
+
+    const onEvent = startTerminal.mock.calls[0]?.[0]?.onEvent as (event: unknown) => void;
+    onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    await settle();
+
+    expect((screen.getByLabelText('工作目录（可选）') as HTMLInputElement).disabled).toBe(false);
+    setCwdInput('D:\\second');
+    startTerminal.mockResolvedValue({ ok: true, data: { ...SESSION, hubSessionId: 'hub-2' } });
+    (screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect((startTerminal.mock.calls[1]?.[0] as { cwd?: string }).cwd).toBe('D:\\second');
+    expect(screen.getByText(/session hub-2/)).toBeInTheDocument();
+  });
+});
