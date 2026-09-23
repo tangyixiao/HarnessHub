@@ -52,7 +52,6 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
 struct Observation {
     output: Vec<u8>,
     exited: Option<u32>,
-    errors: Vec<String>,
 }
 
 /// 起真实 Claude，读 `deadline`，期间可选地应答 DSR、可选地在某个时刻写入字节。
@@ -141,11 +140,7 @@ fn observe(
     }
 
     let output = output.lock().expect("sink").clone();
-    Observation {
-        output,
-        exited,
-        errors: Vec::new(),
-    }
+    Observation { output, exited }
 }
 
 fn describe(label: &str, observation: &Observation) -> String {

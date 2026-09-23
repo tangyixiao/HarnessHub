@@ -112,10 +112,7 @@ fn drain(
     bytes: &mut Vec<u8>,
     answered: &mut usize,
 ) {
-    let events: Vec<PtyEvent> = {
-        let mut guard = sink.lock().expect("sink");
-        guard.events.drain(..).collect()
-    };
+    let events: Vec<PtyEvent> = std::mem::take(&mut sink.lock().expect("sink").events);
 
     for event in events {
         if let PtyEvent::Output { data, .. } = event {
