@@ -526,3 +526,21 @@ S4 lost        : status=Unknown + lost + running=0，pid=45860（PID 是否存�
 观察过（Task 4：窗口 maximize/restore → viewport 1280↔1707、xterm screen 972↔1401），
 Claude 侧尚未做同样的观察。下一轮补：窗口尺寸变化 → WebView viewport → xterm layout →
 Claude TUI reflow（不新增 debug API）。
+
+### 7B.1 最后一块：Claude 的真实 GUI resize/reflow（2026-09-23）
+
+形式沿用 Task 4（真实窗口尺寸变化 → viewport → xterm layout → TUI 重绘），不读精确
+cols/rows、不加 debug API。触发方式：`ShowWindow(SW_MAXIMIZE/SW_RESTORE)`（Task 4 已确认
+`SetWindowPos` 不会触发 WebView2 reflow，ShowWindow 才会）。
+
+```text
+before: innerWidth 1280  container 992x480  screen 972x475  rule 136  text 1766
+after : innerWidth 1707  container 1419x480 screen 1401x475 rule 196  text 1964
+changed: innerWidth=true container=true screen=true ruleWidth=true text=true
+RESULT: PASS
+xterm 首行: ╭─── Claude Code v2.1.126 ───…
+```
+
+`container/screen` 宽度与 TUI 里那条横线的长度（136 → 196）同时变化，说明**不只是容器变大，
+Claude 自己也按新宽度重绘了**。至此 `terminal=true` 的验收契约（真实 TUI + 双向交互 + resize）
+全部补齐，7B/7B.1 彻底关账。
