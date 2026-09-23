@@ -19,14 +19,14 @@ Phase 1 Walking Skeleton —— **项目框架已就位**：Tauri 2 应用壳、
 
 前置条件：
 
-| 依赖 | 版本 | 说明 |
-| --- | --- | --- |
-| Node.js | ≥ 20 | 前端与工具链 |
-| pnpm | 11.x | 包管理器（`corepack enable` 或 `npm i -g pnpm`） |
-| Rust | stable（含 `rustfmt`、`clippy`） | Control Plane |
-| MSVC Build Tools | VS 2022 或更新 | Windows 上编译 Rust / bundled SQLite |
-| WebView2 Runtime | 任意近期版本 | Windows 上运行 Tauri 窗口（Win11 通常已内置） |
-| uv | 0.5+ | 仅 Python sidecar 需要 |
+| 依赖             | 版本                             | 说明                                             |
+| ---------------- | -------------------------------- | ------------------------------------------------ |
+| Node.js          | ≥ 20                             | 前端与工具链                                     |
+| pnpm             | 11.x                             | 包管理器（`corepack enable` 或 `npm i -g pnpm`） |
+| Rust             | stable（含 `rustfmt`、`clippy`） | Control Plane                                    |
+| MSVC Build Tools | VS 2022 或更新                   | Windows 上编译 Rust / bundled SQLite             |
+| WebView2 Runtime | 任意近期版本                     | Windows 上运行 Tauri 窗口（Win11 通常已内置）    |
+| uv               | 0.5+                             | 仅 Python sidecar 需要                           |
 
 ```bash
 git clone <repo> harness-hub && cd harness-hub
@@ -38,15 +38,15 @@ pnpm tauri dev       # 启动桌面应用（会自动拉起 Vite dev server）
 
 ## 常用命令
 
-| 命令 | 作用 |
-| --- | --- |
-| `pnpm dev` | 只启动前端（浏览器里可跑 UI，IPC 调用会降级为不可用状态） |
-| `pnpm tauri dev` | 启动完整桌面应用 |
-| `pnpm test` | 前端单元测试（Vitest） |
-| `pnpm rust:test` | Rust 单元/集成测试 |
-| `pnpm rust:clippy` | Rust 静态检查（`-D warnings`） |
-| `pnpm python:test` | Python sidecar 测试 |
-| `pnpm verify` | 提交前完整验证 |
+| 命令               | 作用                                                      |
+| ------------------ | --------------------------------------------------------- |
+| `pnpm dev`         | 只启动前端（浏览器里可跑 UI，IPC 调用会降级为不可用状态） |
+| `pnpm tauri dev`   | 启动完整桌面应用                                          |
+| `pnpm test`        | 前端单元测试（Vitest）                                    |
+| `pnpm rust:test`   | Rust 单元/集成测试                                        |
+| `pnpm rust:clippy` | Rust 静态检查（`-D warnings`）                            |
+| `pnpm python:test` | Python sidecar 测试                                       |
+| `pnpm verify`      | 提交前完整验证                                            |
 
 ## 仓库结构（节选）
 

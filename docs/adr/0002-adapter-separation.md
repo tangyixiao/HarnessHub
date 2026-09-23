@@ -25,6 +25,7 @@
   ```
 
   日志解析**不得**塞进 `HarnessAdapter`。能力用 `HarnessCapabilities` 矩阵表达，而不是单个 boolean。
+
 - **Alternatives**:
   - 单一 `HarnessAdapter` 包办一切：接口简单，但会把"Usage 可得性"耦合进启动路径。
   - 每个 Harness 一套无接口的具体实现：初期更快，但无法做 cross-harness 聚合与能力 UI。

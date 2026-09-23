@@ -112,14 +112,17 @@ export function HarnessesPage() {
 
       {report ? (
         <p className="pb-4 text-[11px] text-content-muted">
-          已同步：{report.harnesses} 个 Harness 定义 / {report.installations} 个安装（写入本地 SQLite）。
+          已同步：{report.harnesses} 个 Harness 定义 / {report.installations} 个安装（写入本地
+          SQLite）。
         </p>
       ) : null}
 
       {state.kind === 'loading' ? (
         <Card>
           <CardTitle>正在检测本机 Harness…</CardTitle>
-          <CardDescription>扫描 PATH 与已知数据目录，只读访问，不修改任何外部文件。</CardDescription>
+          <CardDescription>
+            扫描 PATH 与已知数据目录，只读访问，不修改任何外部文件。
+          </CardDescription>
         </Card>
       ) : null}
 
@@ -157,8 +160,8 @@ export function HarnessesPage() {
           ))}
           <p className="text-[11px] text-content-muted">
             ✓ = 已实现该能力；— = <strong className="font-medium">当前未支持</strong>
-            （实现尚未落地）。能力逐项独立演进，不因某台机器的环境问题（binary 缺失、
-            auth 过期等）而改变 —— 那属于 readiness，见 ADR-0005。
+            （实现尚未落地）。能力逐项独立演进，不因某台机器的环境问题（binary 缺失、 auth
+            过期等）而改变 —— 那属于 readiness，见 ADR-0005。
           </p>
         </div>
       ) : null}
@@ -183,11 +186,7 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
           <Field label="可执行文件" value={summary.binaryPath ?? '未检测到可执行文件'} />
           <Field
             label="数据目录（只读）"
-            value={
-              summary.dataPaths.length > 0
-                ? summary.dataPaths.join('、')
-                : '未检测到数据目录'
-            }
+            value={summary.dataPaths.length > 0 ? summary.dataPaths.join('、') : '未检测到数据目录'}
           />
         </dl>
 
@@ -201,11 +200,7 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
                 <li
                   key={key}
                   data-testid={`capability-${key}`}
-                  title={
-                    supported
-                      ? `${label}：已实现`
-                      : `${label}：当前未支持（实现尚未落地）`
-                  }
+                  title={supported ? `${label}：已实现` : `${label}：当前未支持（实现尚未落地）`}
                   aria-label={`${label}：${supported ? '已实现' : '当前未支持'}`}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]',

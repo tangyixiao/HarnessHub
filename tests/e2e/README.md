@@ -7,15 +7,15 @@
 环境：Windows（x86_64-pc-windows-msvc）、Node 26.9.0、pnpm 11.0.9、rustc 1.98.1、
 Python 3.14.3（sidecar venv 由 uv 解析为 CPython 3.12.14）、WebView2 153.0.4234.48。
 
-| 项 | 命令 | 结果 |
-| --- | --- | --- |
-| 前端 lint / typecheck / build | `pnpm verify` | 通过 |
-| 前端单元测试 | `pnpm test` | `Test Files 2 passed`、`Tests 13 passed` |
-| Rust 单元测试 | `cargo test --manifest-path src-tauri/Cargo.toml` | `36 passed; 0 failed` |
-| Rust 静态检查 | `cargo clippy --all-targets -- -D warnings` | 无警告 |
-| Rust 格式 | `cargo fmt --all -- --check` | 通过 |
-| Python sidecar | `pnpm python:test` | `Ran 12 tests ... OK` |
-| 真实宿主检测冒烟 | `cargo test --test codex_detection` | `1 passed`（真实 PATH + 真实子进程） |
+| 项                            | 命令                                              | 结果                                     |
+| ----------------------------- | ------------------------------------------------- | ---------------------------------------- |
+| 前端 lint / typecheck / build | `pnpm verify`                                     | 通过                                     |
+| 前端单元测试                  | `pnpm test`                                       | `Test Files 2 passed`、`Tests 13 passed` |
+| Rust 单元测试                 | `cargo test --manifest-path src-tauri/Cargo.toml` | `36 passed; 0 failed`                    |
+| Rust 静态检查                 | `cargo clippy --all-targets -- -D warnings`       | 无警告                                   |
+| Rust 格式                     | `cargo fmt --all -- --check`                      | 通过                                     |
+| Python sidecar                | `pnpm python:test`                                | `Ran 12 tests ... OK`                    |
+| 真实宿主检测冒烟              | `cargo test --test codex_detection`               | `1 passed`（真实 PATH + 真实子进程）     |
 
 ### 真实启动落库验收（已验收）
 
@@ -90,11 +90,11 @@ Codex / Harness ID：codex / 已安装
 
 ### 本轮验证命令与结果
 
-| 命令 | 结果 |
-| --- | --- |
-| `pnpm verify` | 退出码 0（lint / typecheck / 34 前端用例 / build / rust fmt / clippy / 43 单元 + 2 集成用例） |
-| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
-| `cargo test --test codex_detection` | `2 passed`（真实 PATH + 真实子进程） |
+| 命令                                | 结果                                                                                          |
+| ----------------------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm verify`                       | 退出码 0（lint / typecheck / 34 前端用例 / build / rust fmt / clippy / 43 单元 + 2 集成用例） |
+| `pnpm python:test`                  | 退出码 0（`Ran 12 tests ... OK`）                                                             |
+| `cargo test --test codex_detection` | `2 passed`（真实 PATH + 真实子进程）                                                          |
 
 ### 仍未验收
 
@@ -164,10 +164,10 @@ Sessions 页（reload 后）：已结束 / 结束时间 2026-09-22 11:26:44 / �
 
 ### 本轮验证命令与结果
 
-| 命令 | 结果 |
-| --- | --- |
-| `pnpm verify` | 退出码 0（lint / typecheck / 55 前端用例 / build / rust fmt / clippy / 66 单元 + 2 集成用例） |
-| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
+| 命令               | 结果                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `pnpm verify`      | 退出码 0（lint / typecheck / 55 前端用例 / build / rust fmt / clippy / 66 单元 + 2 集成用例） |
+| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`）                                                             |
 
 ### 仍未验收
 
@@ -247,10 +247,10 @@ Sessions 页（老数据）→ 「已结束」/「退出码 0」/「安装：cod
 
 ### 本轮验证命令与结果
 
-| 命令 | 结果 |
-| --- | --- |
-| `pnpm verify` | 退出码 0（lint / typecheck / 65 前端用例 / build / rust fmt / clippy / 86 单元 + 2 集成用例） |
-| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`） |
+| 命令               | 结果                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `pnpm verify`      | 退出码 0（lint / typecheck / 65 前端用例 / build / rust fmt / clippy / 86 单元 + 2 集成用例） |
+| `pnpm python:test` | 退出码 0（`Ran 12 tests ... OK`）                                                             |
 
 ### 新增的测试纪律（已写入 AGENTS.md）
 
@@ -263,4 +263,3 @@ Sessions 页（老数据）→ 「已结束」/「退出码 0」/「安装：cod
 - 上述 `running` 路径（`mark_running`）在真机上还没有触发点 —— 它属于 Task 4，
   目前只有单元测试覆盖 `created → running → exited` 全链路。
 - 多 runtime target（WSL / SSH）只有单元测试，没有真实环境。
-

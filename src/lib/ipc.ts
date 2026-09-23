@@ -116,9 +116,7 @@ export async function startTerminal(input: {
     });
 
     const record = normalizeSessionRecord(raw);
-    return record
-      ? { ok: true, data: record }
-      : { ok: false, error: 'invalid-session-payload' };
+    return record ? { ok: true, data: record } : { ok: false, error: 'invalid-session-payload' };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -289,12 +287,7 @@ export type LaunchMode = 'terminal' | 'resume' | 'imported';
  * （用户强杀 / CLI 参数错误 / Agent 工作失败 / Harness Hub 自身故障）。
  */
 export type TerminationReason =
-  | 'natural_exit'
-  | 'user_killed'
-  | 'launch_failed'
-  | 'runtime_error'
-  | 'host_shutdown'
-  | 'lost';
+  'natural_exit' | 'user_killed' | 'launch_failed' | 'runtime_error' | 'host_shutdown' | 'lost';
 
 /**
  * 与 Rust `SessionRecord`（serde camelCase）同形。

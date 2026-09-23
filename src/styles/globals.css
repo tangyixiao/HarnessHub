@@ -30,7 +30,12 @@
     background-color: var(--color-surface-base);
     color: var(--color-content-primary);
     font-family:
-      'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, 'Noto Sans SC', sans-serif;
+      'Segoe UI Variable',
+      'Segoe UI',
+      system-ui,
+      -apple-system,
+      'Noto Sans SC',
+      sans-serif;
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
   }

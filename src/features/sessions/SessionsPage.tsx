@@ -204,9 +204,7 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
   return (
     <div>
       <dt className="text-content-muted">{label}</dt>
-      <dd
-        className={cn('mt-0.5 break-all text-[11px] text-content-primary', mono && 'font-mono')}
-      >
+      <dd className={cn('mt-0.5 break-all text-[11px] text-content-primary', mono && 'font-mono')}>
         {value}
       </dd>
     </div>

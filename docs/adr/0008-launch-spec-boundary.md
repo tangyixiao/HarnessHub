@@ -45,10 +45,10 @@
   2. **平台差异只在这一层解决**：`harness::launch::program_for()` 决定
      「检测到的可执行文件 → 真正要执行的 program + 前置参数」：
 
-     | 检测到的文件 | program | 前置参数 |
-     | --- | --- | --- |
-     | `codex.cmd` / `codex.exe` / 无扩展名 | 该文件本身 | 无 |
-     | `codex.ps1` | `pwsh` | `-NoLogo -NoProfile -File <脚本>` |
+     | 检测到的文件                         | program    | 前置参数                          |
+     | ------------------------------------ | ---------- | --------------------------------- |
+     | `codex.cmd` / `codex.exe` / 无扩展名 | 该文件本身 | 无                                |
+     | `codex.ps1`                          | `pwsh`     | `-NoLogo -NoProfile -File <脚本>` |
 
   3. **PTY 层只认识 `LaunchSpec`**：它不知道什么是 Codex，也不允许拼字符串。
      它的职责是「给我一个结构化描述，我负责运行」。
@@ -73,6 +73,7 @@
                                               ↘ spawn 失败 → fail
     进程退出 → finish(exit_code)
     ```
+
   - `capabilities.launch` 在 Task 4 端到端验收通过前保持 `false`：
     `build_launch_spec` 只是启动路径的一半。
   - 未来接入 WSL / SSH 时，只需让对应的 Adapter 产出不同的 `LaunchSpec`

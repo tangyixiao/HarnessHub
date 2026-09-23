@@ -314,7 +314,8 @@ describe('normalizeSessionRecord', () => {
       'lost',
     ]) {
       expect(
-        normalizeSessionRecord({ ...SESSION_PAYLOAD, terminationReason: reason })?.terminationReason,
+        normalizeSessionRecord({ ...SESSION_PAYLOAD, terminationReason: reason })
+          ?.terminationReason,
       ).toBe(reason);
     }
   });

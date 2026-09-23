@@ -32,9 +32,9 @@
 
   1. **拆表**（migration 0002）：
 
-     | 表 | 职责 |
-     | --- | --- |
-     | `harnesses` | Harness 定义 / 注册表身份（`id`、`display_name`、时间戳） |
+     | 表                      | 职责                                                                                                                                           |
+     | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+     | `harnesses`             | Harness 定义 / 注册表身份（`id`、`display_name`、时间戳）                                                                                      |
      | `harness_installations` | 某个 `runtime_target` 上检测到的真实安装（`binary_path`、`version`、`capabilities_json`、`availability`、`first_detected_at`、`last_seen_at`） |
 
      `installation.id` 使用复合稳定键 `<harness_id>@<runtime_target_id>`：

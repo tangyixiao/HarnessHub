@@ -4,7 +4,10 @@ import { PageHeader } from '@/components/ui/page-header';
 export function SettingsPage() {
   return (
     <div>
-      <PageHeader title="Settings" description="本地优先设置：数据目录、网络开关、Secret 句柄与审计。" />
+      <PageHeader
+        title="Settings"
+        description="本地优先设置：数据目录、网络开关、Secret 句柄与审计。"
+      />
       <Card>
         <CardTitle>尚未接入</CardTitle>
         <CardDescription>

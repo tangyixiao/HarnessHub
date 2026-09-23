@@ -19,15 +19,15 @@ Project → Session → Harness → Profile → Identity → Provider → Model 
 
 ## 2. 技术栈（已锁定）
 
-| 层 | 技术 |
-| --- | --- |
-| Desktop shell | Tauri 2 |
-| Frontend | React + TypeScript + Vite + Tailwind CSS + shadcn/ui 风格组件 |
-| Control Plane | Rust（tokio、PTY 抽象、notify 文件监听、Git、SQLite） |
-| 数据库 | SQLite（主索引库，Rust 侧持有） |
-| Usage Engine | ccusage（JSON 输出，MIT） |
+| 层                 | 技术                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Desktop shell      | Tauri 2                                                                                                            |
+| Frontend           | React + TypeScript + Vite + Tailwind CSS + shadcn/ui 风格组件                                                      |
+| Control Plane      | Rust（tokio、PTY 抽象、notify 文件监听、Git、SQLite）                                                              |
+| 数据库             | SQLite（主索引库，Rust 侧持有）                                                                                    |
+| Usage Engine       | ccusage（JSON 输出，MIT）                                                                                          |
 | AI Runtime Sidecar | Python 3.10+ / uv / LiteLLM / 官方 SDK / MCP SDK / HF / tiktoken / tokenizers / transformers；LangChain 仅可选插件 |
-| 首选平台 | Windows、Linux；macOS 后续正式支持 |
+| 首选平台           | Windows、Linux；macOS 后续正式支持                                                                                 |
 
 ## 3. 统一术语
 

@@ -2,13 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
-import {
-  NOT_IN_TAURI,
-  getAppInfo,
-  getDbHealth,
-  type AppInfo,
-  type DbHealth,
-} from '@/lib/ipc';
+import { NOT_IN_TAURI, getAppInfo, getDbHealth, type AppInfo, type DbHealth } from '@/lib/ipc';
 
 /**
  * Dashboard 是 Walking Skeleton 的验收页面：它必须能证明
@@ -76,8 +70,7 @@ export function DashboardPage() {
         <Card>
           <CardTitle>Usage（Phase 1 待接入）</CardTitle>
           <CardDescription>
-            通过 ccusage JSON 归一化 Input / Output / Cache Token 与估算成本，来源标记
-            estimated。
+            通过 ccusage JSON 归一化 Input / Output / Cache Token 与估算成本，来源标记 estimated。
           </CardDescription>
           <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
             <Metric label="Total Token" value="—" />

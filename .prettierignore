@@ -1,0 +1,6 @@
+# 生成物 / 人工维护的源文件，不参与 prettier 格式化。
+# 背景：AGENTS.md 要求 `pnpm format:check` 通过，但这些文件整篇重排会把真正的变更淹没，
+# 或者与生成器（pnpm）的下一次输出冲突。
+
+pnpm-lock.yaml
+HARNESS_HUB_PROJECT_PLAN.md
