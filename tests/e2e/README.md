@@ -544,3 +544,145 @@ xterm 首行: ╭─── Claude Code v2.1.126 ───…
 `container/screen` 宽度与 TUI 里那条横线的长度（136 → 196）同时变化，说明**不只是容器变大，
 Claude 自己也按新宽度重绘了**。至此 `terminal=true` 的验收契约（真实 TUI + 双向交互 + resize）
 全部补齐，7B/7B.1 彻底关账。
+
+---
+
+## Task 7D：Cross-Harness Concurrency（2026-09-23/24）
+
+7D 要证明的不是「Codex / Claude 各自能跑」（7A–7C 已各自取证），而是**同时跑时互不污染**。
+分三层取证，避免一次真机测试承担太多责任：
+
+```text
+7D-A-i  确定性并发隔离矩阵（fake PTY backend，进 CI）
+7D-A-ii 真实 PTY 无头并发（真 codex + 真 claude，两个不同 cwd）
+7D-B    真实 GUI 双会话（真实 WebView2 + CDP；同一 App 实例里同时持有两条会话）
+```
+
+### 7D-A-i 确定性矩阵
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib terminal::concurrency_tests`
+
+```text
+running 7 tests ... test result: ok. 7 passed; 0 failed
+```
+
+断言（全部在**生产的** `TerminalRuntime` 上，fake 只替换 PTY 传输层）：两个 session 同时
+running、session_id / pid / installation / cwd 各自独立且不同、DB 两行；输出/输入/resize
+隔离（fake 精确记录 `(session_id, cols, rows)`）；kill 两个方向都只影响目标会话且另一条
+仍能 write / resize / **继续产出**；两条会话退出码与终态各自落库互不覆盖；两条 running 一次
+收敛（`converge == 2`，不是只处理第一行）且二次收敛为 0。
+
+> 这条矩阵的第一个 RED 值得留档：最初用 fake 的**共享**输出队列起两条会话时，
+> `codex stream` 里出现了 `CLAUDE_ONLY_27182` —— 一个不区分会话的传输层会让「隔离」测试
+> 说谎。修复点在夹具（生产 `PortablePtyBackend` 本来就按 session_id 存），断言自始至终没变。
+
+### 7D-A-ii 真实 PTY 无头并发
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test two_harness_concurrency -- --nocapture --test-threads=1`
+
+```text
+running 3 tests ... test result: ok. 3 passed; 0 failed; finished in 21.56s
+
+codex : installed=true  binary=D:\npm-global\codex.cmd  version=0.152.1
+claude: installed=true  binary=D:\npm-global\claude.cmd version=2.1.126
+[1] 同时运行: codex pid=38560 claude pid=36008        ← 两个真实 child 同时存在
+[2] 首屏 bytes: codex=270 claude=61 （DSR 应答: codex=1 claude=1）
+[3] marker 回显: codex=true claude=false
+[4] resize codex → codex 重绘=true，claude 仍 running 且进程存活
+[5] kill claude → codex 仍 running，继续产出=true（bytes 36801 → 44875）
+[6] 终态: claude exit=Some(1) codex exit=Some(1) running=0
+[反向] kill codex → claude 仍 running（重绘=true，bytes 1127 → 3075，pid 38768 存活）
+[ghost] 两条 running 都收敛为 unknown/lost（converge == 2，二次收敛 == 0）
+```
+
+进程观测刻意**独立于 PTY**：用 `tasklist` 查 PID，而不是只问 portable-pty 的 child 状态。
+marker 隔离的**反向**断言是硬的（对方 stream 一定不含我的 marker）；正向（自己的 marker 回显）
+受被测 TUI 行为影响，只如实记录 —— 这一次 Codex 回显、Claude 没回显（它停在**未信任目录**的
+trust 确认页，headless 不替它做信任决定）。
+
+### 7D-B 真实 GUI 双会话（`RESULT: PASS`）
+
+方法：真实 `pnpm tauri dev`（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`），
+用真实 UI 路径驱动（导航链接 → selector → cwd 输入 → 启动 / 结束会话按钮）：
+不置顶窗口、不动鼠标键盘、不做 hash 注入、不加任何 debug API。
+数据库交叉核对用 **Python 标准库 `sqlite3`**（与 Rust 不同工具链）读应用库快照
+（WAL：必须连 `-wal` / `-shm` 一起复制）。
+
+```text
+# 1) GUI 自己启动的真实会话
+picked    : codex@local  cwd=D:\HarnessHub-E2E\codex-concurrent
+running   : 运行中 · Codex · cwd D:\HarnessHub-E2E\codex-concurrent · pid 23788 · session 6de9354d…
+xterm 屏幕: 「gpt-6-luna max · D:\HarnessHub-E2E\codex-concurrent · Workspace · Context 100% left …」
+            ← Codex 自己的 TUI 把 cwd 显示出来，UI → IPC → LaunchSpec → PTY 全部走通
+DB(Python): status=running pid=23788 cwd=D:\HarnessHub-E2E\codex-concurrent
+
+# 2) 与此同时无头侧也在跑真实的 Codex + Claude（同一生产 TerminalRuntime 类）
+headless  : codex pid=28168  claude pid=44280
+同时存活  : pid 23788 ALIVE / 28168 ALIVE / 44280 ALIVE   ← 三个真实 child 同一时刻都在
+headless  : test result: ok. 3 passed; finished in 24.83s（含两个 kill 方向与两条 ghost 收敛）
+GUI       : 全程仍显示「运行中 · Codex … pid 23788」
+
+# 3) GUI 结束会话（真实按钮）
+after kill: 已结束 · 用户主动结束 · 退出码 1
+            pid 23788 dead；DB: status=exited termination_reason=user_killed exit_code=1 ended_at=…；running=0
+
+# 4) 同一 App 实例里同时持有两个 Harness 的会话
+A=codex  pid 11964 session 73b78cc5… cwd codex-concurrent
+B=claude pid 12480 session 57665d03… cwd claude-terminal
+（Terminal 页只持有一个 current session；导航离开**不会** kill 旧会话 —— 这是既有产品语义）
+DB: running = 2，两行分别是 codex / claude，各自 pid 与 cwd 正确；两个 child 同时存活
+GUI 屏幕: Claude 聊天界面（`╰────…` 边框 + `> ` + `? for shortcuts`）
+
+# 5) 两个方向的 kill 隔离（都在真实 GUI + 真实 App 库上）
+kill Claude(B) → pid 12480 dead；DB: claude exited/user_killed/exit 1；codex(11964) 仍 running 且进程存活
+B2=claude pid 39056 session 89988a0e…（重新启动）；C=codex pid 31656 session 700e27e1…（新页面启动）
+kill Codex(C)  → pid 31656 dead；DB: codex exited/user_killed/exit 1；claude(39056) 与 codex(11964) 仍 running
+
+# 6) 强杀 Harness Hub → 重启（两条 running 都是 ghost）
+before     : running = 2（codex 73b78cc5… + claude 89988a0e…），两个 child 同时存活
+Stop-Process -Name harness-hub -Force
+after kill : 库里仍是 running = 2（真实 ghost 残留）；两个 child 进程随 ConPTY 一起消失
+restart    : 启动收敛：2 条遗留 running 会话被标记为 lost
+             两条旧 running → status=unknown + termination_reason=lost + ended_at 写入，running = 0
+             已 user_killed 的历史行**未被碰**（终态不被收敛覆盖）
+
+# 7) Dashboard（同一个真实应用实例，未点刷新用量）
+Managed Sessions 22 == SQL 侧 sessions 总数 22
+Harness 分布: codex 3,741,061,325 / zcode 899,850,303 / opencode 217,534 / claude 107,380
+```
+
+**本轮开始时还顺手拿到一条真实孤儿证据**：这次应用的第一次启动打印
+`启动收敛：1 条遗留 running 会话被标记为 lost`，被收敛的是**上一个应用实例**遗留的
+claude 会话（`c0811428…`，cwd `claude-terminal`，13:57:49Z 开始）—— 不是构造出来的行。
+
+没有新增持久副作用：headless 用的两个 `*-concurrent` 目录**没有**写进 `~/.claude.json`
+的信任列表（只有 7B 已同意的 `claude-terminal` 那一条）。
+
+### 7D 发现的两个问题（都不在 7D 范围内修，但必须记账）
+
+1. **产品 kill 只终止直接子进程**（harness-agnostic）。
+   证据：无头用例在产品 kill 之后仍然查到 shim 的 `node.exe` 子进程在跑
+   （`[finding] … 12764 的 node 子进程仍存活：[39036]`，Codex / Claude 两侧都出现）。
+   影响：`user_killed` 终态正确，但机器上会留一个 Harness node 进程。
+   测试自己用 `taskkill /F /T` 定点清理（只杀自己记录过的父 PID 的子树，绝不安杀所有 node）。
+   建议后续：用 Job Object（或 Windows 上等价的树终止）保证「会话结束 = 进程树结束」。
+2. **`PortablePtyBackend::write` 持锁写**（`sessions` mutex 覆盖 `write_all` + `flush`）。
+   观测：7D-A-ii 的第一版实现让测试**静默挂死 15+ 分钟**，测试进程 CPU ≈ 0，
+   两个 Harness 的 shim 都还活着（说明 kill / reap 从未拿到锁）。触发条件是测试按
+   「历史上出现过多少个 `ESC[6n`」**无限重放** DSR 应答，把 Claude 的 ConPTY 输入缓冲区灌满，
+   写入阻塞 → 整个 backend 被这把锁冻住 → **连 kill 都进不去**。
+   机制结论来自「观测 + 读代码」，没有拿到线程栈，因此按假设记录。
+   对生产的含义：某条会话的子进程一旦停止读 stdin，整个 runtime（含「结束会话」这个唯一的
+   恢复手段）都可能冻住。7D 未改产品行为；测试侧改为**输入只从独立线程写** + DSR 应答
+   每会话上限 3 次，之后同一场景连续多次通过。
+   建议后续单独起 Task：写入不得持全局会话锁（每会话锁 / 输入队列 / 非阻塞）。
+
+### 7D 明确**未**证明的事
+
+- 无头真实进程下**正向** marker 回显不稳定（Claude 停在 trust 确认页），因此只有反向
+  「对方 marker 不出现」是硬断言；正向由确定性矩阵（7D-A-i）硬断言兜住。
+- 真实 PTY 上**不读精确 cols/rows**（无 readout）：`(session_id, cols, rows)` 的精确断言
+  在 fake backend 那一层。
+- 没有新增 multi-tab / split terminal，因此同一 App 实例里只有**当前**会话可由 UI 操作
+  （第二条会话靠导航离开后仍存活来实现，见 [4]）。
+- `hub_session_id` 与 ccusage 裸 UUID 的关联仍然不可证明，7D 不碰（ADR-0011 决策八）。
