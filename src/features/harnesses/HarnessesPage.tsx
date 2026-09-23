@@ -147,8 +147,9 @@ export function HarnessesPage() {
         <Card>
           <CardTitle>未检测到任何 Harness</CardTitle>
           <CardDescription>
-            当前注册表中只有 Codex。若这里为空，说明没有在 PATH 中找到可执行文件；
-            这不影响其他功能，安装后重新打开本页即可。
+            本页只展示已检测并注册的 AI Coding Harness，不预设系统里应该有哪几个。
+            若这里为空，说明没有在 PATH 中找到可执行文件；这不影响其他功能，
+            安装后重新打开本页即可。
           </CardDescription>
         </Card>
       ) : null}

@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 use crate::db::Database;
+use crate::harness::adapters::claude_code::ClaudeCodeAdapter;
 use crate::harness::adapters::codex::CodexAdapter;
 use crate::harness::inventory::reconcile_harnesses;
 use crate::harness::probe::SystemHostProbe;
@@ -59,13 +60,23 @@ pub const DATABASE_FILE_NAME: &str = "harness-hub.sqlite3";
 
 /// 装配 Harness 注册表。
 ///
-/// v0.1 只注册 Codex：**不为「看起来支持很多」而注册没有真实检测的适配器**
-/// （ADR-0022：能检测到不算支持，可稳定回归才算）。
-fn build_harness_registry() -> HarnessRegistry {
+/// 这是**唯一的组合根**：Core 其它地方不得认识具体 Harness（ADR-0002）。
+/// 注册顺序即 UI 展示顺序（`HarnessRegistry` 用 `Vec` 持有适配器，顺序确定，
+/// 不依赖 HashMap 迭代顺序）。
+///
+/// 只注册**已实现适配器**的 Harness（ADR-0022）：Codex 是完整纵向链路，
+/// Claude Code 在 Task 7A 只有 detection。
+///
+/// `pub` 是为了让集成测试用**生产组合**（而不是测试里重造一份注册表）验证
+/// 「两个 Harness 同时 reconcile」这类事实。
+pub fn build_harness_registry() -> HarnessRegistry {
     let mut registry = HarnessRegistry::new();
     registry.register(Box::new(CodexAdapter::new(
         Arc::new(SystemHostProbe::new()),
     )));
+    registry.register(Box::new(ClaudeCodeAdapter::new(Arc::new(
+        SystemHostProbe::new(),
+    ))));
     registry
 }
 

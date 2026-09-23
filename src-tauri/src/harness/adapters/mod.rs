@@ -10,6 +10,7 @@
 //!
 //! 「能检测到」不算支持，「可稳定回归」才算。
 //!
-//! 当前为占位模块：这里刻意不提供未经验证的实现，避免制造「看起来能用」的假象。
+//! 当前已实现：`codex`（完整纵向链路）、`claude_code`（Task 7A 起，先做 detection）。
 
+pub mod claude_code;
 pub mod codex;

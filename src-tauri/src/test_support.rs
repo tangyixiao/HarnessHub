@@ -12,7 +12,6 @@
 //! - [`seeded_db`]：只给存储层单测用的便捷夹具，禁止用它验证集成路径。
 
 use rusqlite::params;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -108,36 +107,75 @@ pub fn seed_baseline(db: &Database) {
     .expect("插入 harness 安装");
 }
 
-/// 只认识被显式列出的可执行名的假宿主（**不碰真实 PATH**）。
+/// 可编程的假宿主：不碰真实文件系统，也不起真实进程。
+///
+/// `with(names)` 是最简形态（只关心「装没装」）；`with_binary` / `with_dir` 用于
+/// 需要真实版本输出与数据目录的检测测试。
 pub struct FakeHostProbe {
-    available: HashSet<String>,
+    executables: std::collections::HashMap<String, PathBuf>,
+    versions: std::collections::HashMap<PathBuf, String>,
+    dirs: std::collections::HashSet<PathBuf>,
+    home: Option<PathBuf>,
 }
 
 impl FakeHostProbe {
-    pub fn with(names: &[&str]) -> Self {
+    pub fn new() -> Self {
         Self {
-            available: names.iter().map(|name| name.to_string()).collect(),
+            executables: std::collections::HashMap::new(),
+            versions: std::collections::HashMap::new(),
+            dirs: std::collections::HashSet::new(),
+            home: Some(PathBuf::from("/home/dev")),
         }
+    }
+
+    /// 只声明「这个名字在 PATH 上」。
+    pub fn with(names: &[&str]) -> Self {
+        let mut probe = Self::new();
+        for name in names {
+            probe
+                .executables
+                .insert(name.to_string(), PathBuf::from(format!("D:/fake/{name}")));
+        }
+        probe
+    }
+
+    pub fn with_binary(mut self, name: &str, path: &str, version_output: &str) -> Self {
+        let path = PathBuf::from(path);
+        self.executables.insert(name.to_string(), path.clone());
+        self.versions.insert(path, version_output.to_string());
+        self
+    }
+
+    pub fn with_dir(mut self, path: &str) -> Self {
+        self.dirs.insert(PathBuf::from(path));
+        self
+    }
+}
+
+impl Default for FakeHostProbe {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl HostProbe for FakeHostProbe {
     fn find_executable(&self, name: &str) -> Option<PathBuf> {
-        self.available
-            .contains(name)
-            .then(|| PathBuf::from(format!("D:/fake/{name}")))
+        self.executables.get(name).cloned()
     }
 
-    fn read_version(&self, _executable: &Path) -> Result<Option<String>> {
-        Ok(None)
+    fn read_version(&self, executable: &Path) -> Result<Option<String>> {
+        Ok(self
+            .versions
+            .get(executable)
+            .and_then(|raw| crate::harness::probe::parse_version(raw)))
     }
 
-    fn dir_exists(&self, _path: &Path) -> bool {
-        false
+    fn dir_exists(&self, path: &Path) -> bool {
+        self.dirs.contains(path)
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
-        None
+        self.home.clone()
     }
 }
 
