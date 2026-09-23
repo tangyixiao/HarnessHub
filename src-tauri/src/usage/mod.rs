@@ -16,6 +16,7 @@ pub mod cost;
 pub mod importer;
 pub mod key;
 pub mod runner;
+pub mod summary;
 
 use serde::{Deserialize, Serialize};
 

@@ -7,6 +7,7 @@ import {
   getAppInfo,
   getDbHealth,
   getUsageSources,
+  getUsageSummary,
   invokeCommand,
   isTauriRuntime,
   listHarnesses,
@@ -17,6 +18,7 @@ import {
   normalizeUsageImport,
   normalizeUsageReconciliation,
   normalizeUsageSource,
+  normalizeUsageSummary,
   refreshHarnesses,
   refreshUsage,
 } from '@/lib/ipc';
@@ -633,5 +635,143 @@ describe('refreshUsage', () => {
 
   it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
     await expect(refreshUsage()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+describe('normalizeUsageSummary', () => {
+  /** 与 Rust `usage_summary_serializes_with_camel_case_keys` 同形。 */
+  const payload = {
+    range: {
+      kind: 'all',
+      startUtc: null,
+      endUtc: null,
+      timezoneOffsetMinutes: 480,
+      nowUtc: '2026-09-22T23:30:00Z',
+    },
+    totals: {
+      inputTokens: 150,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 150,
+    },
+    costMicrounits: 1000,
+    currency: 'USD',
+    costIsLowerBound: true,
+    missingPricingRecords: 1,
+    timestamplessRecords: 0,
+    excludedTimestampless: 0,
+    eventCount: 2,
+    usageSessions: 2,
+    managedSessions: 0,
+    byHarness: [
+      {
+        key: 'codex',
+        totalTokens: 100,
+        costMicrounits: 1000,
+        costIsLowerBound: false,
+        eventCount: 1,
+      },
+    ],
+    byModel: [],
+    byProject: [],
+    timeline: [
+      {
+        day: '2026-09-23',
+        totalTokens: 150,
+        costMicrounits: 1000,
+        costIsLowerBound: true,
+        eventCount: 2,
+      },
+    ],
+  };
+
+  it('解析 Rust 侧的真实形状', () => {
+    const summary = normalizeUsageSummary(payload);
+
+    expect(summary?.totals.totalTokens).toBe(150);
+    expect(summary?.costMicrounits).toBe(1000);
+    expect(summary?.costIsLowerBound).toBe(true);
+    expect(summary?.usageSessions).toBe(2);
+    expect(summary?.managedSessions).toBe(0);
+    expect(summary?.timeline[0]?.day).toBe('2026-09-23');
+  });
+
+  it('完全不是对象时才返回 null（其余形状都收敛成安全默认值）', () => {
+    expect(normalizeUsageSummary(null)).toBeNull();
+    expect(normalizeUsageSummary('nope')).toBeNull();
+
+    const partial = normalizeUsageSummary({ totals: { totalTokens: 5 } });
+    expect(partial?.totals.totalTokens).toBe(5);
+    expect(partial?.costMicrounits).toBeNull();
+    expect(partial?.costIsLowerBound).toBe(false);
+    expect(partial?.byHarness).toEqual([]);
+    expect(partial?.range.kind).toBe('all');
+  });
+
+  it('丢掉没有 key 的分组，而不是渲染一个空名字的行', () => {
+    const summary = normalizeUsageSummary({
+      byModel: [{ totalTokens: 1 }, { key: 'gpt-5', totalTokens: 2 }],
+    });
+
+    expect(summary?.byModel).toEqual([
+      {
+        key: 'gpt-5',
+        totalTokens: 2,
+        costMicrounits: null,
+        costIsLowerBound: false,
+        eventCount: 0,
+      },
+    ]);
+  });
+
+  it('未知 range 收敛为 all，不带任何时间边界', () => {
+    const summary = normalizeUsageSummary({ range: { kind: 'last-year', startUtc: 'x' } });
+
+    expect(summary?.range.kind).toBe('all');
+    expect(summary?.range.startUtc).toBe('x');
+  });
+});
+
+describe('getUsageSummary', () => {
+  it('把 range 与本地时区偏移一起传给 usage_summary', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({ totals: { totalTokens: 7 } }));
+    stubTauri(invokeSpy);
+
+    const result = await getUsageSummary({ range: '7d', timezoneOffsetMinutes: 480 });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('usage_summary');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      range: '7d',
+      timezoneOffsetMinutes: 480,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('缺省时区偏移时用本机时区（不是 0）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({}));
+    stubTauri(invokeSpy);
+
+    await getUsageSummary({ range: 'today' });
+
+    const args = invokeSpy.mock.calls[0]?.[1] as { timezoneOffsetMinutes: number };
+    expect(args.timezoneOffsetMinutes).toBe(-new Date().getTimezoneOffset());
+  });
+
+  it('形状完全不对时返回明确错误，而不是伪造一份空汇总', async () => {
+    stubTauri(async () => 42);
+
+    await expect(getUsageSummary({ range: 'all' })).resolves.toEqual({
+      ok: false,
+      error: 'invalid-usage-summary-payload',
+    });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(getUsageSummary({ range: 'all' })).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
   });
 });

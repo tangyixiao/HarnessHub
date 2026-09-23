@@ -266,6 +266,29 @@ pub fn kill_terminal(state: State<'_, AppState>, session_id: String) -> Result<(
     state.terminal.kill(&session_id)
 }
 
+/// Dashboard 的聚合查询。**纯读**：只查 SQLite，不起进程、不写库、不碰 ccusage（ADR-0012）。
+///
+/// `range` 是 `today` / `7d` / `30d` / `all`；`timezone_offset_minutes` 是
+/// 「加到 UTC 上得到本地时间的分钟数」（UTC+8 → 480），时间边界由后端据此计算。
+/// 参数不合法必须报错，不得退化成「全部时间」。
+#[tauri::command]
+pub fn usage_summary(
+    state: State<'_, AppState>,
+    range: String,
+    timezone_offset_minutes: i32,
+) -> Result<crate::usage::summary::UsageSummary> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let range = crate::usage::summary::parse_range(&range)?;
+    let window = crate::usage::summary::range_bounds(
+        database.connection(),
+        range,
+        &clock::now_rfc3339(),
+        timezone_offset_minutes,
+    )?;
+
+    crate::usage::summary::summary(database.connection(), &window)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -123,6 +123,7 @@ pub fn run() {
             commands::refresh_usage,
             commands::resize_terminal,
             commands::start_terminal,
+            commands::usage_summary,
             commands::write_terminal
         ])
         .build(tauri::generate_context!())

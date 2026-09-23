@@ -698,3 +698,218 @@ export async function refreshUsage(): Promise<IpcResult<UsageRefreshReport>> {
     },
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * Usage 汇总（Dashboard，ADR-0012）
+ * ------------------------------------------------------------------ */
+
+export type UsageRangeKind = 'today' | '7d' | '30d' | 'all';
+
+/** 与 Rust `UsageRangeWindow` 同形。[startUtc, endUtc) 左闭右开。 */
+export type UsageRangeWindow = {
+  kind: UsageRangeKind;
+  startUtc: string | null;
+  endUtc: string | null;
+  timezoneOffsetMinutes: number;
+  nowUtc: string;
+};
+
+export type UsageTotals = {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  /** 只在单模型会话行上有值，因此这是**下界**（ADR-0011 决策十二）。 */
+  reasoningTokens: number;
+  totalTokens: number;
+};
+
+export type UsageBucket = {
+  key: string;
+  totalTokens: number;
+  costMicrounits: number | null;
+  costIsLowerBound: boolean;
+  eventCount: number;
+};
+
+export type UsageDayBucket = {
+  /** **本地**日（由后端按 timezoneOffsetMinutes 换算）。 */
+  day: string;
+  totalTokens: number;
+  costMicrounits: number | null;
+  costIsLowerBound: boolean;
+  eventCount: number;
+};
+
+/**
+ * 与 Rust `UsageSummary` 同形。**判定逻辑全在后端**：
+ *
+ * - `costIsLowerBound` 为 true 时前端只能显示 `≥ 金额`，并提示「实际成本可能更高」；
+ * - `costMicrounits` 为 `null` 表示「一条有价格的记录都没有」（不是 0 元）；
+ * - `usageSessions`（外部历史里的会话）与 `managedSessions`（Harness Hub 管理的会话）
+ *   是两个不同的数字，UI 不得合并。
+ */
+export type UsageSummary = {
+  range: UsageRangeWindow;
+  totals: UsageTotals;
+  costMicrounits: number | null;
+  currency: string | null;
+  costIsLowerBound: boolean;
+  missingPricingRecords: number;
+  timestamplessRecords: number;
+  excludedTimestampless: number;
+  eventCount: number;
+  usageSessions: number;
+  managedSessions: number;
+  byHarness: UsageBucket[];
+  byModel: UsageBucket[];
+  byProject: UsageBucket[];
+  timeline: UsageDayBucket[];
+};
+
+const USAGE_RANGES: readonly UsageRangeKind[] = ['today', '7d', '30d', 'all'];
+
+function normalizeBucketArray(raw: unknown): UsageBucket[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): UsageBucket[] => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const key = typeof source.key === 'string' ? source.key : '';
+    if (key.length === 0) {
+      return [];
+    }
+    return [
+      {
+        key,
+        totalTokens: asNumber(source.totalTokens),
+        costMicrounits: typeof source.costMicrounits === 'number' ? source.costMicrounits : null,
+        costIsLowerBound: source.costIsLowerBound === true,
+        eventCount: asNumber(source.eventCount),
+      },
+    ];
+  });
+}
+
+function normalizeDayBucketArray(raw: unknown): UsageDayBucket[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): UsageDayBucket[] => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const day = typeof source.day === 'string' ? source.day : '';
+    if (day.length === 0) {
+      return [];
+    }
+    return [
+      {
+        day,
+        totalTokens: asNumber(source.totalTokens),
+        costMicrounits: typeof source.costMicrounits === 'number' ? source.costMicrounits : null,
+        costIsLowerBound: source.costIsLowerBound === true,
+        eventCount: asNumber(source.eventCount),
+      },
+    ];
+  });
+}
+
+function normalizeRangeWindow(raw: unknown, fallbackOffset: number): UsageRangeWindow {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    kind: USAGE_RANGES.includes(source.kind as UsageRangeKind)
+      ? (source.kind as UsageRangeKind)
+      : 'all',
+    startUtc: asStringOrNull(source.startUtc),
+    endUtc: asStringOrNull(source.endUtc),
+    timezoneOffsetMinutes:
+      typeof source.timezoneOffsetMinutes === 'number'
+        ? source.timezoneOffsetMinutes
+        : fallbackOffset,
+    nowUtc: typeof source.nowUtc === 'string' ? source.nowUtc : '',
+  };
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `UsageSummary`。
+ *
+ * 只有「完全不是对象」才返回 `null`：Dashboard 宁可显示 0 与空列表，
+ * 也不要因为后端多/少一个字段就白屏。
+ */
+export function normalizeUsageSummary(
+  raw: unknown,
+  fallbackOffsetMinutes = 0,
+): UsageSummary | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const totals = (
+    typeof source.totals === 'object' && source.totals !== null ? source.totals : {}
+  ) as Record<string, unknown>;
+
+  return {
+    range: normalizeRangeWindow(source.range, fallbackOffsetMinutes),
+    totals: {
+      inputTokens: asNumber(totals.inputTokens),
+      outputTokens: asNumber(totals.outputTokens),
+      cachedInputTokens: asNumber(totals.cachedInputTokens),
+      cacheCreationTokens: asNumber(totals.cacheCreationTokens),
+      reasoningTokens: asNumber(totals.reasoningTokens),
+      totalTokens: asNumber(totals.totalTokens),
+    },
+    costMicrounits: typeof source.costMicrounits === 'number' ? source.costMicrounits : null,
+    currency: asStringOrNull(source.currency),
+    costIsLowerBound: source.costIsLowerBound === true,
+    missingPricingRecords: asNumber(source.missingPricingRecords),
+    timestamplessRecords: asNumber(source.timestamplessRecords),
+    excludedTimestampless: asNumber(source.excludedTimestampless),
+    eventCount: asNumber(source.eventCount),
+    usageSessions: asNumber(source.usageSessions),
+    managedSessions: asNumber(source.managedSessions),
+    byHarness: normalizeBucketArray(source.byHarness),
+    byModel: normalizeBucketArray(source.byModel),
+    byProject: normalizeBucketArray(source.byProject),
+    timeline: normalizeDayBucketArray(source.timeline),
+  };
+}
+
+/** 本机时区偏移：加到 UTC 上得到本地时间的分钟数（UTC+8 → 480）。 */
+export function localTimezoneOffsetMinutes(now: Date = new Date()): number {
+  return -now.getTimezoneOffset();
+}
+
+/**
+ * Dashboard 的**只读**聚合查询。
+ *
+ * 这是 Dashboard 唯一的数据来源：不起任何外部进程、不写数据库。
+ * 需要更新数据时先调用 `refreshUsage()`（用户显式动作），成功后再调用本函数。
+ */
+export async function getUsageSummary(options: {
+  range: UsageRangeKind;
+  timezoneOffsetMinutes?: number;
+}): Promise<IpcResult<UsageSummary>> {
+  const timezoneOffsetMinutes = options.timezoneOffsetMinutes ?? localTimezoneOffsetMinutes();
+  const result = await invokeCommand<unknown>('usage_summary', {
+    range: options.range,
+    timezoneOffsetMinutes,
+  });
+  if (!result.ok) {
+    return result;
+  }
+
+  const summary = normalizeUsageSummary(result.data, timezoneOffsetMinutes);
+  if (summary === null) {
+    return { ok: false, error: 'invalid-usage-summary-payload' };
+  }
+
+  return { ok: true, data: summary };
+}

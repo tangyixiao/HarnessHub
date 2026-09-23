@@ -309,3 +309,45 @@ test real_ccusage_import_reconciles_against_its_own_totals ... ok
   使用量面板属于 Task 6，因此本轮的 E2E 全部是 Rust 侧的。
 - `npx` 首次调用会下载包（本机已缓存），因此耗时约 28s；UI 侧必须有「进行中」状态，
   这件事属于 Task 6。
+
+---
+
+## Task 6：Dashboard 只读投影（真机数据链 E2E，2026-09-23）
+
+### 自动化证据
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test real_dashboard_summary -- --nocapture`
+
+实际输出（真机导入 Task 5 的数据之后）：
+
+```text
+Dashboard 对账通过：事件 243 / tokens 4757843285 / 已知成本 Some(288824073) 微单位 / 下界 true /
+  usage sessions 222 / managed sessions 0 / 今天 0 条（30 天 204 条）
+```
+
+| 断言                                    | 结果                                                          |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `summary()` 与**独立手写 SQL** 逐项一致 | token / 已知成本 / 事件数 / usage sessions 全等               |
+| 各维度之和 == 全局                      | harness、model 分组之和都等于全局 token                       |
+| `timeline 之和 + 无时间戳事件 == 全局`  | 无时间戳的事件进不了任何一天，因此必须单独计数                |
+| 关库重开                                | `summary` 全字段相等（数字完全由 SQLite 恢复）                |
+| 时间窗随偏移变化                        | UTC+8 与 UTC 的「今天」不是同一个 UTC 窗口                    |
+| `usage_sessions` ≠ `managed_sessions`   | 222 vs 0 —— 外部历史有 222 个会话，Harness Hub 一个都没启动过 |
+| `cost_is_lower_bound`                   | 8 条 `missingPricing` 记录 → true，金额因此是下界             |
+
+### 「渲染路径不起进程」怎么证明的
+
+两层证据，都不是靠嘴说：
+
+1. **结构上**：`summary(&Connection)` 的签名里没有 runner / executor / adapter，
+   编译期就不可能启动外部命令；
+2. **行为上**：`DashboardPage.test.tsx` 的桩**按命令名分派、遇到未预期命令直接抛错**，
+   并断言 mount 与切换范围期间只出现 `usage_summary`（外加 `app_info` / `db_health`），
+   `refresh_usage` 只在用户点「刷新用量」之后才出现。
+
+### 仍未验收
+
+- **没有做 GUI 截图级验收**：本轮证据全部来自 Rust 真机 E2E 与前端组件测试
+  （jsdom + 真实 IPC 契约形状）。没有像 Task 4 那样启动 `pnpm tauri dev` 并抓取真实窗口，
+  因此「应用里看到的数字」这一点尚未在真实 WebView 中复核。
+- 固定时区偏移不建模 DST（ADR-0012 决策五已记录该局限）。
