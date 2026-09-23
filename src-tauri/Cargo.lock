@@ -1235,10 +1235,12 @@ dependencies = [
 name = "harness-hub"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "portable-pty",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "thiserror 2.0.20",

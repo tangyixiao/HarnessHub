@@ -3,6 +3,8 @@
 //! 这里放**纯函数**（可独立测试），IO 与数据库写入由 `UsageAdapter` 实现者负责。
 
 pub mod adapter;
+pub mod cost;
+pub mod key;
 
 use serde::{Deserialize, Serialize};
 
