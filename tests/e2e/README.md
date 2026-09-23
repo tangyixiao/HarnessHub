@@ -501,3 +501,28 @@ running(claude)=0   running(all)=0   pid 45684 存活=false   claude 残留进�
 
 据此（且仅据此）翻转 `Claude: launch=true, terminal=true`；`resume` 等仍为 false，并由
 `the_capability_matrix_is_exactly_what_has_been_accepted` 锁死。
+
+---
+
+## Task 7B.1：Claude 剩余 lifecycle 取证（2026-09-23，headless 真机）
+
+每个场景**新开一个 Session**，因此 DB 链互不污染；S3/S4 调用的是**生产收敛函数**
+`SessionService::reconcile_orphans`（启动时与 `RunEvent::Exit` 走的就是它）。
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test claude_lifecycle -- --nocapture --test-threads=1`
+
+```text
+S1 user_killed : exit_code=Some(1)                     ← 非零退出码按约定只记事实
+S2 natural_exit: exit_code=Some(0)                     ← 发 /exit，未调用 kill_terminal
+S3 host_shutdown: status=Unknown + host_shutdown + running=0
+S4 lost        : status=Unknown + lost + running=0，pid=45860（PID 是否存活不影响状态）
+                 且二次收敛为 0（幂等）
+4 passed
+```
+
+### 仍未取证的 7B.1 项
+
+**真实 GUI resize/reflow**：`terminal=true` 的验收契约里包含这一条，目前只在 Codex 侧
+观察过（Task 4：窗口 maximize/restore → viewport 1280↔1707、xterm screen 972↔1401），
+Claude 侧尚未做同样的观察。下一轮补：窗口尺寸变化 → WebView viewport → xterm layout →
+Claude TUI reflow（不新增 debug API）。
