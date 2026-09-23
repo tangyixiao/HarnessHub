@@ -263,3 +263,49 @@ Sessions 页（老数据）→ 「已结束」/「退出码 0」/「安装：cod
 - 上述 `running` 路径（`mark_running`）在真机上还没有触发点 —— 它属于 Task 4，
   目前只有单元测试覆盖 `created → running → exited` 全链路。
 - 多 runtime target（WSL / SSH）只有单元测试，没有真实环境。
+
+---
+
+## Task 5：ccusage 使用量导入（真机 E2E，2026-09-22）
+
+### 自动化证据
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test real_ccusage_import -- --nocapture`
+
+实际输出（真机、真实调用 `npx --yes ccusage@20.0.24 session --sections daily --by-agent --json`）：
+
+```text
+runner：ManagedNpx → D:\nodejs\npx.cmd --yes ccusage@20.0.24
+金额：Σ事件 - 来源 = 4 微单位（235 个计价事件，上界 118）
+daily - session = 1247529；逐 agent 归因：["claude: daily 1709428 vs session 461899（差 1247529）"]
+对账通过：事件 243 条 / total 4757843285 / 无法归因 910 / 金额残差 4 微单位 / 未定价 8 条
+test real_ccusage_import_reconciles_against_its_own_totals ... ok
+（28.11s）
+```
+
+### 这些数字说明了什么
+
+| 断言                                     | 结果                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------- |
+| `Σ(事件 total) + 无法归因 == totals`     | 4,757,843,285 + 910 == 4,757,844,195（精确，不是近似）                          |
+| 四类 token 逐项等于 `totals`             | input / output / cacheCreation / cacheRead 全等                                 |
+| 金额残差 ≤ ⌈计价事件/2⌉ 微单位           | 实测 +4 微单位（0.000004 USD），上界 118 —— 来自每个事件独立舍入                |
+| `daily` 与 `session` 的差异逐 agent 归因 | 1,247,529 全部落在 `claude`；`codex` 两个口径**逐 token 相等**                  |
+| 幂等                                     | 第二次 `inserted = 0`、`skipped = 243`，库内汇总一分不变                        |
+| 重启持久化                               | 关掉 SQLite 再打开，汇总一字不差；两次导入留下两条 `succeeded` 审计行           |
+| 不伪造 hub session                       | 冷启动库里 `hub_session_id IS NOT NULL` 计数为 0                                |
+| natural key 无碰撞                       | 243 条事件的 `stable_source_key` 两两不同                                       |
+| `missingPricing` 的 0 元                 | 落成 `cost_microunits = NULL` + `cost_source = ccusage_missing_pricing`（8 条） |
+
+### E2E 抓到的真实缺陷（已修）
+
+`resolve_runner` 早期把 managed runner 的命令写成裸名字 `npx`：Windows 上实际是
+`npx.cmd`，`Command::new("npx")` 直接 `Io(NotFound)`。现在执行**探测到的绝对路径**，
+并补了一条单测锁住这一点（`managed_runner_executes_the_resolved_absolute_path`）。
+
+### 仍未验收（本轮范围内）
+
+- **没有 GUI 验收**：Task 5 只到 IPC（`get_usage_sources` / `refresh_usage`），
+  使用量面板属于 Task 6，因此本轮的 E2E 全部是 Rust 侧的。
+- `npx` 首次调用会下载包（本机已缓存），因此耗时约 28s；UI 侧必须有「进行中」状态，
+  这件事属于 Task 6。

@@ -91,7 +91,9 @@ impl HarnessAdapter for CodexAdapter {
     /// 双向交互（GUI 输入 → Codex 回显并开始工作）、resize（窗口 resize →
     /// 视口变化 → xterm 重新布局；参数透传由前端单测锁定）、
     /// kill（user_killed + 真实退出码）、DSR（TUI 能画出来即闭环）全部验收通过。
-    /// `usage` / `replay` 等仍未实现。
+    ///
+    /// `usage` 已翻为 `true`：ccusage 的 session 报告能导入，并通过**同快照对账**
+    /// （`tests/real_ccusage_import.rs`，见 ADR-0011）。其余能力仍未实现。
     ///
     /// 语义提醒（docs/adr/0005）：capability 回答「Adapter 实现了没有」，
     /// 不因某台机器上 binary 缺失或 auth 过期而回退。
@@ -99,6 +101,7 @@ impl HarnessAdapter for CodexAdapter {
         HarnessCapabilities {
             launch: true,
             terminal: true,
+            usage: true,
             ..HarnessCapabilities::default()
         }
     }
@@ -268,9 +271,12 @@ mod tests {
         let capabilities = adapter(FakeHostProbe::new()).capabilities();
 
         assert!(capabilities.launch, "launch 已通过真机端到端验收");
+        assert!(capabilities.terminal, "terminal 已通过真机端到端验收");
+        // Task 5 的真机 E2E：`src-tauri/tests/real_ccusage_import.rs`
+        // 同快照对账通过（243 条事件 / Σ事件 + 910 == totals / 金额残差 4 微单位）。
+        assert!(capabilities.usage, "usage 已通过 ccusage 真机对账验收");
         for (name, value) in [
             ("resume", capabilities.resume),
-            ("usage", capabilities.usage),
             ("replay", capabilities.replay),
             ("tool_calls", capabilities.tool_calls),
             ("subagents", capabilities.subagents),

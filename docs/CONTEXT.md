@@ -78,6 +78,8 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
 ## 6. 当前阶段
 
 - Phase 0（Research / Grill）：进行中。ADR-0001 ~ ADR-0011 已落。
-- Phase 1（Walking Skeleton）：框架已就位（Tauri + React + SQLite migrations + 模块骨架），
-  业务链路（Codex detect / PTY / ccusage 导入 / Dashboard 数字）尚未实现。
+- Phase 1（Walking Skeleton）：框架已就位（Tauri + React + SQLite migrations + 模块骨架）。
+  已实现：Codex detect、PTY 会话（created → running → 终态）、内置 Terminal、
+  ccusage 使用量导入（幂等 + 同快照对账，见 ADR-0011）。
+  尚未实现：Dashboard 数字（Task 6）、Claude / Gemini / OpenCode 适配器、Project Registry。
 - 实施计划见 `docs/plans/`。

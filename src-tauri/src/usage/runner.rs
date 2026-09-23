@@ -105,11 +105,11 @@ pub fn resolve_runner(
         });
     }
 
-    if probe.find_executable(MANAGED_BINARY).is_some() {
+    if let Some(path) = probe.find_executable(MANAGED_BINARY) {
         return Some(ResolvedRunner {
             kind: RunnerKind::ManagedNpx,
             command: CommandSpec::new(
-                MANAGED_BINARY,
+                display_path(path),
                 vec!["--yes".to_string(), MANAGED_PACKAGE.to_string()],
             ),
         });
@@ -251,10 +251,23 @@ mod tests {
         let runner = resolve_runner(&probe, None).expect("npx 在就必须能用托管 runner");
 
         assert_eq!(runner.kind, RunnerKind::ManagedNpx);
-        assert_eq!(runner.command.program, MANAGED_BINARY);
         assert_eq!(
             runner.command.args,
             vec!["--yes".to_string(), "ccusage@20.0.24".to_string()]
+        );
+    }
+
+    /// Windows 上 `npx` 实际是 `npx.cmd`，只给名字会 `NotFound`：
+    /// 必须执行**探测到的绝对路径**。真机 E2E 抓到过这个 bug。
+    #[test]
+    fn managed_runner_executes_the_resolved_absolute_path() {
+        let probe = FakeHostProbe::with(&["npx"]);
+
+        let runner = resolve_runner(&probe, None).expect("托管 runner");
+
+        assert_eq!(
+            runner.command.program, "D:/fake/npx",
+            "必须执行探测到的路径，而不是裸名字"
         );
     }
 
@@ -299,7 +312,7 @@ mod tests {
 
         let command = runner.with_arguments(&session_report_arguments());
 
-        assert_eq!(command.program, "npx");
+        assert!(command.program.contains("npx"), "{:?}", command.program);
         assert_eq!(&command.args[..2], &["--yes", "ccusage@20.0.24"]);
         assert_eq!(command.args.len(), 2 + session_report_arguments().len());
     }
