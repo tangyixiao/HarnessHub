@@ -55,6 +55,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0005_session_pid.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 6,
+        name: "0006_usage_imports_and_events",
+        sql: include_str!("migrations/0006_usage_imports_and_events.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -206,7 +212,7 @@ mod tests {
         "messages",
         "models",
         "source_files",
-        "imports",
+        "usage_imports",
         "usage_events",
         "tool_calls",
         "file_events",
@@ -301,20 +307,225 @@ mod tests {
         assert_eq!(violations, 0, "迁移结束后不得有外键违规");
     }
 
-    #[test]
-    fn usage_events_reject_duplicate_dedupe_key() {
-        let db = crate::test_support::seeded_db();
+    /// 迁移 0006 之后 `usage_events` 的合法插入语句。
+    ///
+    /// 刻意用 `occurred_at = NULL` + `occurred_at_source = 'unavailable'`：
+    /// 这是「发生时间无法推导」唯一被允许的形态（ADR-0011 决策九）。
+    const INSERT_USAGE_EVENT: &str = "INSERT INTO usage_events
+        (id, stable_source_key, key_version, source, report_kind, harness, source_session_id,
+         model, total_tokens, token_source, occurred_at_source, imported_at)
+        VALUES (?1, ?2, 1, 'ccusage', 'session', 'codex', 'rollout-1', 'gpt-5.6-sol', 10,
+                'ccusage_source_log', 'unavailable', '2026-01-01T00:00:00Z')";
 
-        let insert = "INSERT INTO usage_events
-             (id, dedupe_key, harness_id, source, occurred_at, day, total_tokens, created_at)
-             VALUES (?1, 'dup', 'codex', 'ccusage', '2026-01-01T00:00:00Z', '2026-01-01', 10, '2026-01-01T00:00:00Z')";
+    /// 迁移 0006 把 ADR-0011 之前的 usage 表重建为新契约。
+    ///
+    /// 为什么必须重建：0001 的 `usage_events` 是 `dedupe_key` + `cost_usd REAL` + `model_id` FK，
+    /// 与「versioned key + 整数微单位 + 模型是自由文本」正面冲突，而已提交的迁移不得修改。
+    #[test]
+    fn migration_0006_rebuilds_the_usage_tables() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 5).expect("建到 v5");
+        let legacy_columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('usage_events')
+                 WHERE name IN ('dedupe_key', 'cost_usd', 'model_id')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v5 列检查");
+        assert_eq!(legacy_columns, 3, "v5 的 usage_events 还是旧形状");
+
+        let applied = apply_until(&mut conn, 6).expect("升到 v6");
+        assert_eq!(applied, vec!["0006_usage_imports_and_events".to_string()]);
+
+        let legacy_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'imports'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("旧表");
+        assert_eq!(legacy_table, 0, "旧的 imports 必须被 usage_imports 取代");
+
+        let event_columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('usage_events') WHERE name IN
+                 ('stable_source_key','key_version','report_kind','cost_microunits','currency',
+                  'currency_source','token_source','cost_source','pricing_mode','occurred_at',
+                  'occurred_at_source','cached_input_tokens','cache_creation_tokens',
+                  'reasoning_tokens','import_id','raw_payload','provider')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("新列检查");
+        assert_eq!(event_columns, 17, "ADR-0011 的列必须齐全");
+
+        let import_columns: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('usage_imports') WHERE name IN
+                 ('source','source_version','runner','report_kind','status','records_seen',
+                  'records_inserted','records_updated','records_skipped','records_timestampless',
+                  'started_at','completed_at','error')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("usage_imports 列检查");
+        assert_eq!(import_columns, 13, "UsageImport 的列必须齐全");
+
+        let enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys");
+        let violations: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("外键检查");
+        assert_eq!(enabled, 1);
+        assert_eq!(violations, 0);
+    }
+
+    /// 0006 是**破坏性重建**：旧表一旦真的有行，迁移必须拒绝执行，而不是静默丢数据。
+    ///
+    /// 守卫写在 SQL 里（`CHECK (legacy_rows = 0)` + TEMP 表），因此失败会随迁移事务一起回滚。
+    #[test]
+    fn migration_0006_refuses_to_run_when_the_legacy_usage_table_has_rows() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 5).expect("建到 v5");
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness");
+        conn.execute(
+            "INSERT INTO usage_events
+                (id, dedupe_key, harness_id, source, occurred_at, day, total_tokens, created_at)
+             VALUES ('legacy-1', 'legacy-key', 'codex', 'ccusage', '2026-01-01T00:00:00Z',
+                     '2026-01-01', 10, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("旧 usage 行");
+
+        let error = apply_until(&mut conn, 6).expect_err("旧表非空时迁移必须失败");
+
+        assert!(
+            error.to_string().contains("0006_usage_imports_and_events"),
+            "错误必须指出是哪条迁移失败，实际：{error}"
+        );
+        assert_eq!(
+            current_version(&conn).expect("版本"),
+            5,
+            "失败的迁移不得推进版本"
+        );
+        let survivors: i64 = conn
+            .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
+            .expect("计数");
+        assert_eq!(survivors, 1, "拒绝执行时不得丢数据");
+    }
+
+    #[test]
+    fn usage_events_reject_duplicate_stable_source_key() {
+        let db = crate::test_support::empty_db();
 
         db.connection()
-            .execute(insert, params!["a"])
+            .execute(INSERT_USAGE_EVENT, params!["a", "key-1"])
             .expect("首次导入");
-        let duplicate = db.connection().execute(insert, params!["b"]);
+        let duplicate = db
+            .connection()
+            .execute(INSERT_USAGE_EVENT, params!["b", "key-1"]);
 
-        assert!(duplicate.is_err(), "重复 dedupe_key 必须被数据库拒绝");
+        assert!(
+            duplicate.is_err(),
+            "重复 stable_source_key 必须被数据库拒绝"
+        );
+    }
+
+    #[test]
+    fn usage_events_reject_unknown_token_source() {
+        let db = crate::test_support::empty_db();
+
+        // 正向对照：合法值必须能写入（否则「拒绝」可能只是因为表/列根本不存在）
+        db.connection()
+            .execute(INSERT_USAGE_EVENT, params!["ok", "key-ok"])
+            .expect("合法 token_source 必须接受");
+
+        let invalid = db.connection().execute(
+            "INSERT INTO usage_events
+                (id, stable_source_key, key_version, source, report_kind, harness, source_session_id,
+                 model, total_tokens, token_source, occurred_at_source, imported_at)
+             VALUES ('x', 'key-x', 1, 'ccusage', 'session', 'codex', 'r', 'm', 1,
+                     'made-up-source', 'unavailable', '2026-01-01T00:00:00Z')",
+            [],
+        );
+
+        assert!(invalid.is_err(), "非法 token_source 必须被 CHECK 拒绝");
+    }
+
+    /// ADR-0011 决策四：外部聚合器读来的 token **不得**冒充 provider 直接上报。
+    #[test]
+    fn usage_events_refuse_provider_reported_tokens_from_ccusage() {
+        let db = crate::test_support::empty_db();
+
+        db.connection()
+            .execute(INSERT_USAGE_EVENT, params!["ok", "key-ok"])
+            .expect("合法 token_source 必须接受");
+
+        let masquerading = db.connection().execute(
+            "INSERT INTO usage_events
+                (id, stable_source_key, key_version, source, report_kind, harness, source_session_id,
+                 model, total_tokens, token_source, occurred_at_source, imported_at)
+             VALUES ('x', 'key-x', 1, 'ccusage', 'session', 'codex', 'r', 'm', 1,
+                     'provider_reported', 'unavailable', '2026-01-01T00:00:00Z')",
+            [],
+        );
+
+        assert!(
+            masquerading.is_err(),
+            "ccusage 来的 token 不得标成 provider_reported"
+        );
+    }
+
+    /// `occurred_at` 与 `occurred_at_source` 必须一致：不允许「有 source 没时间」或反过来。
+    #[test]
+    fn usage_events_pair_occurred_at_with_its_source() {
+        let db = crate::test_support::empty_db();
+
+        db.connection()
+            .execute(INSERT_USAGE_EVENT, params!["ok", "key-ok"])
+            .expect("unavailable + NULL 是合法组合");
+
+        let claimed_but_missing = db.connection().execute(
+            "INSERT INTO usage_events
+                (id, stable_source_key, key_version, source, report_kind, harness, source_session_id,
+                 model, total_tokens, token_source, occurred_at, occurred_at_source, imported_at)
+             VALUES ('x', 'key-x', 1, 'ccusage', 'session', 'codex', 'r', 'm', 1,
+                     'ccusage_source_log', NULL, 'source_record', '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(
+            claimed_but_missing.is_err(),
+            "声称来自源记录却没有时间戳，必须拒绝"
+        );
+
+        let undated_but_claimed = db.connection().execute(
+            "INSERT INTO usage_events
+                (id, stable_source_key, key_version, source, report_kind, harness, source_session_id,
+                 model, total_tokens, token_source, occurred_at, occurred_at_source, day, imported_at)
+             VALUES ('y', 'key-y', 1, 'ccusage', 'session', 'codex', 'r', 'm', 1,
+                     'ccusage_source_log', '2026-01-01T00:00:00Z', 'unavailable', NULL,
+                     '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(
+            undated_but_claimed.is_err(),
+            "有时间戳却标成不可推导，必须拒绝"
+        );
     }
 
     #[test]
