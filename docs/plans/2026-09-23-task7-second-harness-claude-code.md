@@ -158,3 +158,47 @@ Cross-Harness concurrent sessions ✓
 pnpm verify / format:check / python:test 全绿
 真机 GUI 验收：两个 Harness 同时可用、Dashboard 同时显示两者
 ```
+
+## 7B spike 实测结果（`tests/claude_pty_spike.rs`，2026-09-23）
+
+真机 `D:\npm-global\claude.cmd` 进 `portable-pty`，两段观察：
+
+```text
+[1] 不应答任何查询：bytes=4   dsr=1  → 输出只有 ESC[6n，然后**一直等**
+[2] 应答 ESC[1;1R  ：bytes=1067 dsr=1 bracketed_paste=1 hide_cursor=1 mouse=0 alt_screen=0
+    printable head: ESC[6n ESC[?9001h ESC[?1004h ESC[m ]0;C:\Windows\system32\cmd.exe
+                    ESC[?25h ]0;claude ESC[?25l ESC[?2004h ESC[?1004h ESC[?2031h
+                    ──────────────…（box drawing，真 TUI 画出来了）
+```
+
+由此得到的事实（全部是实测，不是从 Codex 推断）：
+
+| 问题                          | 实测结论                                                              |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `.cmd` 能否直接作为 `program` | **能**（不包命令解释器；与 Codex 相同结论）                           |
+| 是否要求真实 TTY              | **是**：不应答 DSR 时它只发一个 `ESC[6n` 就不再输出                   |
+| 是否发送 DSR                  | **是**（`ESC[6n`），必须由终端侧应答，否则永久等待                    |
+| alternate screen              | **否**（无 `?1049h`）                                                 |
+| bracketed paste               | **是**（`?2004h`）                                                    |
+| mouse mode                    | **否**（无 `?1000/1002/1003/1006h`）                                  |
+| 其他模式                      | 出现 `?9001h`、`?1004h`（focus reporting）、`?2031h`、窗口标题 `]0;…` |
+| PATH / node 依赖              | 正常（TUI 真的画出来了，说明 node 起来了）                            |
+
+**PTY 层仍然一个字节都不解析**：`?9001h / ?1004h / ?2031h` 这类模式交给 xterm.js
+（认识就处理、不认识就忽略），Rust 侧只做 raw 透传（ADR-0009）。
+
+### 一个必须诚实标注的未知
+
+第一次跑 spike 时测试**挂住**了（读取线程 join 不返回）。我的 spike 代码本身有缺陷
+（只要 `pair.master` 还活着，读取就不会 EOF），所以**不能**据此断言「Claude 的 `.cmd`
+shim 被杀后子进程仍持有 PTY」。7B 的 kill 验收必须把这件事**单独测出来**，
+而不是拿这次的现象当结论。清理用 `taskkill /F /T /PID`（定向树杀，绝不安杀所有 node）。
+
+### 7B 仍然欠的验收（尚未完成）
+
+```text
+claude@local → ClaudeCodeAdapter.build_launch_spec → 现有 TerminalRuntime
+  → created → running + pid → 真实 TUI → GUI 输入 → 后续输出 → resize → kill/natural exit
+  → orphan recovery 对 Claude 同样成立
+能力翻转：launch / terminal 仍需上述真机证据后才置 true（当前仍为 false）
+```
