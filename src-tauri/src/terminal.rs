@@ -335,32 +335,15 @@ mod concurrency_tests;
 mod tests {
     use super::*;
     use crate::harness::adapters::codex::CodexAdapter;
-    use crate::harness::probe::HostProbe;
     use crate::pty::manager::fake::FakePtyBackend;
     use crate::session::SessionStatus;
-    use crate::test_support::{detected_codex_summary, RUNTIME_TARGET_ID};
-
-    use std::path::{Path, PathBuf};
+    use crate::test_support::{detected_codex_summary, FakeHostProbe, RUNTIME_TARGET_ID};
 
     /// 假宿主：让 Codex 适配器「已安装」，从而能产出 LaunchSpec。
-    struct InstalledProbe;
-
-    impl HostProbe for InstalledProbe {
-        fn find_executable(&self, _name: &str) -> Option<PathBuf> {
-            Some(PathBuf::from("D:/npm-global/codex.cmd"))
-        }
-
-        fn read_version(&self, _executable: &Path) -> Result<Option<String>> {
-            Ok(Some("0.152.1".to_string()))
-        }
-
-        fn dir_exists(&self, _path: &Path) -> bool {
-            false
-        }
-
-        fn home_dir(&self) -> Option<PathBuf> {
-            None
-        }
+    ///
+    /// 用 `test_support::FakeHostProbe`（唯一一份假宿主），不在本文件里重造第三个替身。
+    fn installed_host() -> FakeHostProbe {
+        FakeHostProbe::new().with_binary("codex", "D:/npm-global/codex.cmd", "codex-cli 0.152.1")
     }
 
     fn runtime(backend: Arc<FakePtyBackend>) -> (TerminalRuntime, String) {
@@ -375,7 +358,7 @@ mod tests {
         .expect("同步清单");
 
         let mut registry = HarnessRegistry::new();
-        registry.register(Box::new(CodexAdapter::new(Arc::new(InstalledProbe))));
+        registry.register(Box::new(CodexAdapter::new(Arc::new(installed_host()))));
 
         let installation = crate::harness::inventory::installation_id("codex", RUNTIME_TARGET_ID);
         (

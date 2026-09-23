@@ -135,61 +135,10 @@ impl HarnessAdapter for CodexAdapter {
 mod tests {
     use super::*;
     use crate::harness::adapter::HarnessAdapter;
-    use crate::harness::probe::parse_version;
-    use std::collections::{HashMap, HashSet};
-    use std::path::{Path, PathBuf};
-
-    /// 可编程的假宿主：不碰真实文件系统，也不起真实进程。
-    struct FakeHostProbe {
-        executables: HashMap<String, PathBuf>,
-        versions: HashMap<PathBuf, String>,
-        dirs: HashSet<PathBuf>,
-        home: Option<PathBuf>,
-    }
-
-    impl FakeHostProbe {
-        fn new() -> Self {
-            Self {
-                executables: HashMap::new(),
-                versions: HashMap::new(),
-                dirs: HashSet::new(),
-                home: Some(PathBuf::from("/home/dev")),
-            }
-        }
-
-        fn with_binary(mut self, name: &str, path: &str, version_output: &str) -> Self {
-            let path = PathBuf::from(path);
-            self.executables.insert(name.to_string(), path.clone());
-            self.versions.insert(path, version_output.to_string());
-            self
-        }
-
-        fn with_dir(mut self, path: &str) -> Self {
-            self.dirs.insert(PathBuf::from(path));
-            self
-        }
-    }
-
-    impl HostProbe for FakeHostProbe {
-        fn find_executable(&self, name: &str) -> Option<PathBuf> {
-            self.executables.get(name).cloned()
-        }
-
-        fn read_version(&self, executable: &Path) -> Result<Option<String>> {
-            Ok(self
-                .versions
-                .get(executable)
-                .and_then(|raw| parse_version(raw)))
-        }
-
-        fn dir_exists(&self, path: &Path) -> bool {
-            self.dirs.contains(path)
-        }
-
-        fn home_dir(&self) -> Option<PathBuf> {
-            self.home.clone()
-        }
-    }
+    // 假宿主只有一份（`test_support`），不再在本文件里重造：
+    // 两个 `HostProbe` 测试替身一旦漂移，真机检测的回归锁就会失真。
+    use crate::test_support::FakeHostProbe;
+    use std::path::PathBuf;
 
     fn adapter(probe: FakeHostProbe) -> CodexAdapter {
         CodexAdapter::new(std::sync::Arc::new(probe))

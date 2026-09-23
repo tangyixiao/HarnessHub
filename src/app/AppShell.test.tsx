@@ -71,9 +71,13 @@ describe('AppShell', () => {
     expect(screen.getByText('尚未接入')).toBeInTheDocument();
   });
 
-  it('Harnesses 页不再显示占位文案', () => {
+  it('Harnesses 页不再显示占位文案', async () => {
     renderAt('/harnesses');
 
+    expect(screen.queryByText('尚未接入')).not.toBeInTheDocument();
+    // 这页的 IPC 探测是异步的：等它落地再结束用例，否则 React 会在测试之后 setState，
+    // 打出 "not wrapped in act(...)" 警告（测试仍会通过，但输出被污染）。
+    expect(await screen.findByText(/IPC 不可用（浏览器模式）/)).toBeInTheDocument();
     expect(screen.queryByText('尚未接入')).not.toBeInTheDocument();
   });
 });

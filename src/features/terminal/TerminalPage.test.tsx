@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -190,7 +190,9 @@ describe('TerminalPage', () => {
 
     const onEvent = startTerminal.mock.calls[0][0].onEvent;
     calls.length = 0;
-    onEvent({ kind: 'output', sessionId: 'hub-1', seq: 0, data: [0x1b, 0x5b, 0x36, 0x6e] });
+    await act(async () => {
+      onEvent({ kind: 'output', sessionId: 'hub-1', seq: 0, data: [0x1b, 0x5b, 0x36, 0x6e] });
+    });
 
     expect(calls).toContain('terminal.write');
   });
@@ -216,7 +218,7 @@ describe('TerminalPage', () => {
     await clickLaunch();
     const button = await screen.findByRole('button', { name: '结束会话' });
 
-    button.click();
+    await click(button);
 
     await waitFor(() => expect(killTerminal).toHaveBeenCalledWith('hub-1'));
   });
@@ -254,7 +256,9 @@ describe('TerminalPage', () => {
     terminal.rows = 43;
 
     expect(observerCallback).not.toBeNull();
-    observerCallback?.();
+    await act(async () => {
+      observerCallback?.();
+    });
 
     await waitFor(() => expect(resizeTerminal).toHaveBeenCalled());
     expect(resizeTerminal).toHaveBeenCalledWith('hub-1', 132, 43);
@@ -269,7 +273,9 @@ describe('TerminalPage', () => {
     render(<TerminalPage />);
 
     expect(observerCallback).not.toBeNull();
-    observerCallback?.();
+    await act(async () => {
+      observerCallback?.();
+    });
 
     expect(resizeTerminal).not.toHaveBeenCalled();
   });
@@ -279,7 +285,7 @@ describe('TerminalPage', () => {
 async function clickLaunch() {
   await settle();
   const button = screen.getByRole('button', { name: '启动' }) as HTMLButtonElement;
-  button.click();
+  await click(button);
   await settle();
 }
 
@@ -303,8 +309,46 @@ const CLAUDE_SESSION = {
   installationId: 'claude@local',
 };
 
-/** 等一小段真实时间，让 effect 里的异步启动流程落地（不引入额外导入）。 */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+/**
+ * 等一小段真实时间，让 effect 里的异步启动流程落地。
+ *
+ * **必须包在 `act` 里**：mount 的 `listHarnesses()` 与启动时的 `startTerminal()` 都是
+ * promise 落定后 setState；不包会打出 "not wrapped in act(...)" 警告 —— 测试仍会通过，
+ * 但警告会污染输出，也会掩盖真正的 act 违规。
+ */
+const settle = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  });
+
+/** 点击同样会同步 setState，因此一律走这个 act 包装的 helper。 */
+const click = (element: HTMLElement) =>
+  act(async () => {
+    element.click();
+  });
+
+/**
+ * 受控 `<select>` 的切换。
+ *
+ * 不能直接 `select.value = x`：React 的 value tracker 会认为「没变」。走原型上的原生
+ * value setter 再抛 change 事件（RTL 内部的做法），并包在 `act` 里。
+ */
+const pickHarness = (installationId: string) =>
+  act(async () => {
+    const select = screen.getByLabelText('启动的 Harness') as HTMLSelectElement;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+    nativeSetter?.call(select, installationId);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+/** 受控 cwd `<input>`：与 `pickHarness` 同理，直接赋值会被 value tracker 忽略。 */
+const setCwdInput = (value: string) =>
+  act(async () => {
+    const input = screen.getByLabelText('工作目录（可选）') as HTMLInputElement;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    nativeSetter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 
 describe('TerminalPage multi-harness 启动语义', () => {
   it('0 个已安装 → 不调用 start_terminal，并如实报错', async () => {
@@ -356,12 +400,10 @@ describe('TerminalPage multi-harness 启动语义', () => {
     render(<TerminalPage />);
     await settle();
 
-    const select = screen.getByLabelText('启动的 Harness') as HTMLSelectElement;
-    select.value = 'claude@local';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await pickHarness('claude@local');
     await settle();
 
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(1);
@@ -375,8 +417,8 @@ describe('TerminalPage multi-harness 启动语义', () => {
     await settle();
 
     const start = screen.getByRole('button', { name: '启动' }) as HTMLButtonElement;
-    start.click();
-    start.click();
+    await click(start);
+    await click(start);
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(1);
@@ -388,7 +430,7 @@ describe('TerminalPage multi-harness 启动语义', () => {
     render(<TerminalPage />);
     await settle();
 
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect((screen.getByLabelText('启动的 Harness') as HTMLSelectElement).disabled).toBe(true);
@@ -402,10 +444,8 @@ describe('TerminalPage multi-harness 启动语义', () => {
     render(<TerminalPage />);
     await settle();
 
-    const select = screen.getByLabelText('启动的 Harness') as HTMLSelectElement;
-    select.value = 'claude@local';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await pickHarness('claude@local');
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect(screen.getByText('启动进程失败')).toBeInTheDocument();
@@ -414,7 +454,7 @@ describe('TerminalPage multi-harness 启动语义', () => {
     );
 
     startTerminal.mockResolvedValue({ ok: true, data: CLAUDE_SESSION });
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(2);
@@ -427,18 +467,20 @@ describe('TerminalPage multi-harness 启动语义', () => {
 
     render(<TerminalPage />);
     await settle();
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     // 让后端推一个 exited 事件（真实 reaper 的等价物）
     const onEvent = startTerminal.mock.calls[0]?.[0]?.onEvent as (event: unknown) => void;
-    onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    await act(async () => {
+      onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    });
     await settle();
 
     expect(screen.getByRole('button', { name: '重新启动' })).toBeInTheDocument();
 
     startTerminal.mockResolvedValue({ ok: true, data: { ...SESSION, hubSessionId: 'hub-2' } });
-    (screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement);
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(2);
@@ -451,22 +493,13 @@ describe('TerminalPage multi-harness 启动语义', () => {
  * 语义：空白 → 不传 cwd（后端收到 None、sessions.cwd 记 NULL）；非空 → trim 后原样传。
  */
 describe('TerminalPage launch options（cwd）', () => {
-  // 缺口（下一轮补）：非空 cwd 的透传与「running 时禁用」还没有测试覆盖。
-  // 修法已确定：受控 input 必须用 HTMLInputElement.prototype 上的原生 value setter
-  // 再抛 input 事件，否则 React 的 value tracker 会认为「没变」。
-  const setCwd = (value: string) => {
-    const input = screen.getByLabelText('工作目录（可选）') as HTMLInputElement;
-    input.value = value;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-
   it('1 个已安装时 mount 也不再自动启动', async () => {
     render(<TerminalPage />);
     await settle();
 
     expect(startTerminal).not.toHaveBeenCalled();
 
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(1);
@@ -476,8 +509,8 @@ describe('TerminalPage launch options（cwd）', () => {
     render(<TerminalPage />);
     await settle();
 
-    setCwd('   ');
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await setCwdInput('   ');
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     const input = startTerminal.mock.calls[0]?.[0] as { cwd?: string };
@@ -486,25 +519,16 @@ describe('TerminalPage launch options（cwd）', () => {
 });
 
 /*
- * 补上上一轮标注的 cwd 缺口。
- *
- * 受控 input 不能直接 `input.value = x`（React 的 value tracker 会当成「没变」），
- * 正确写法是走原型上的原生 value setter 再抛 input 事件 —— 这也是 RTL 内部的做法。
+ * 补上上一轮标注的 cwd 缺口。两个 describe 共用模块级的 `setCwdInput`
+ * （原生 value setter，见文件上方），不再各自维护一份。
  */
 describe('TerminalPage cwd 透传', () => {
-  const setCwdInput = (value: string) => {
-    const input = screen.getByLabelText('工作目录（可选）') as HTMLInputElement;
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    nativeSetter?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-
   it('非空 cwd（含反斜杠）→ trim 后精确透传', async () => {
     render(<TerminalPage />);
     await settle();
 
-    setCwdInput('   D:\\HarnessHub-E2E\\claude-terminal   ');
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await setCwdInput('   D:\\HarnessHub-E2E\\claude-terminal   ');
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     const input = startTerminal.mock.calls[0]?.[0] as { cwd?: string };
@@ -515,8 +539,8 @@ describe('TerminalPage cwd 透传', () => {
     render(<TerminalPage />);
     await settle();
 
-    setCwdInput('D:\\first');
-    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await setCwdInput('D:\\first');
+    await click(screen.getByRole('button', { name: '启动' }) as HTMLButtonElement);
     await settle();
 
     expect((screen.getByLabelText('工作目录（可选）') as HTMLInputElement).disabled).toBe(true);
@@ -525,13 +549,15 @@ describe('TerminalPage cwd 透传', () => {
     expect(screen.getByText(/cwd D:\\first/)).toBeInTheDocument();
 
     const onEvent = startTerminal.mock.calls[0]?.[0]?.onEvent as (event: unknown) => void;
-    onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    await act(async () => {
+      onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    });
     await settle();
 
     expect((screen.getByLabelText('工作目录（可选）') as HTMLInputElement).disabled).toBe(false);
-    setCwdInput('D:\\second');
+    await setCwdInput('D:\\second');
     startTerminal.mockResolvedValue({ ok: true, data: { ...SESSION, hubSessionId: 'hub-2' } });
-    (screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement).click();
+    await click(screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement);
     await settle();
 
     expect((startTerminal.mock.calls[1]?.[0] as { cwd?: string }).cwd).toBe('D:\\second');
