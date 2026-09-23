@@ -67,7 +67,9 @@ Rust Control Plane 的模块边界与规格第 8 节仓库结构一致，见 `do
 - `harness::HarnessCapabilities` —— 能力矩阵结构体。
 - `harness::HarnessAdapter` —— Harness 生命周期 trait。
 - `harness::HarnessRegistry` —— 适配器注册表。
-- `usage::UsageAdapter` —— Usage 数据源 trait。
+- `usage::UsageSourceAdapter` —— Usage 数据源 trait（`detect` / `version` / `capabilities` / `import`），
+  取代旧脚手架 `usage::UsageAdapter`。
+- `usage::{UsageSource, UsageImport, UsageEvent}` —— 跨 IPC 的 Usage DTO（契约见 ADR-0011）。
 - `session::SessionRecord` —— Session 持久化模型（含 `hub_session_id` / `source_session_id` / `runtime_target_id`）。
 - `db::Database` —— SQLite 连接 + 迁移执行器。
 
@@ -75,7 +77,7 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
 
 ## 6. 当前阶段
 
-- Phase 0（Research / Grill）：进行中。ADR-0001 ~ ADR-0004 已落。
+- Phase 0（Research / Grill）：进行中。ADR-0001 ~ ADR-0011 已落。
 - Phase 1（Walking Skeleton）：框架已就位（Tauri + React + SQLite migrations + 模块骨架），
   业务链路（Codex detect / PTY / ccusage 导入 / Dashboard 数字）尚未实现。
 - 实施计划见 `docs/plans/`。

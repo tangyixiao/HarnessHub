@@ -1,0 +1,11 @@
+{
+  "session": [],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "totalTokens": 0,
+    "totalCost": 0
+  }
+}

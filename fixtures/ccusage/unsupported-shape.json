@@ -1,0 +1,15 @@
+{
+  "session": [
+    {
+      "agent": "codex",
+      "sessionId": "0f8d7c1e-1111-4222-8333-444455556666",
+      "inputTokens": 1200,
+      "outputTokens": 340,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "totalTokens": 1540,
+      "totalCost": 0.0042,
+      "modelsUsed": ["gpt-5.6-sol"]
+    }
+  ]
+}

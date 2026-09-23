@@ -1,0 +1,152 @@
+{
+  "session": [
+    {
+      "agent": "codex",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 43223808,
+      "inputTokens": 1082448,
+      "metadata": {
+        "lastActivity": "2026-08-20T15:19:16.537Z",
+        "reasoningOutputTokens": 46564
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 18133760,
+          "cost": 10.55186,
+          "inputTokens": 423364,
+          "modelName": "gpt-5.6-sol",
+          "outputTokens": 80245
+        },
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 25090048,
+          "cost": 7.3686336,
+          "inputTokens": 659084,
+          "modelName": "gpt-5.6-terra",
+          "outputTokens": 86038
+        }
+      ],
+      "modelsUsed": ["gpt-5.6-sol", "gpt-5.6-terra"],
+      "outputTokens": 166283,
+      "period": "2026/08/20/rollout-2026-08-20T18-56-37-00000000-0000-4000-8000-000000000001",
+      "totalCost": 17.9204936,
+      "totalTokens": 44472539
+    },
+    {
+      "agent": "codex",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 817184768,
+      "inputTokens": 11867786,
+      "metadata": {
+        "lastActivity": "2026-09-02T11:26:42.287Z",
+        "reasoningOutputTokens": 540968
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 817184768,
+          "cost": 21.120615000000004,
+          "inputTokens": 11867786,
+          "modelName": "gpt-5.6-luna",
+          "outputTokens": 1675327
+        }
+      ],
+      "modelsUsed": ["gpt-5.6-luna"],
+      "outputTokens": 1675327,
+      "period": "2026/08/30/rollout-2026-08-30T13-30-39-00000000-0000-4000-8000-000000000002",
+      "totalCost": 21.120615000000004,
+      "totalTokens": 830727881
+    },
+    {
+      "agent": "claude",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 24155,
+      "metadata": {
+        "lastActivity": "2026-08-27T12:05:10.919Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.01622346,
+          "inputTokens": 24155,
+          "modelName": "deepseek-v4-pro",
+          "outputTokens": 142
+        }
+      ],
+      "modelsUsed": ["deepseek-v4-pro"],
+      "outputTokens": 142,
+      "period": "00000000-0000-4000-8000-000000000003",
+      "totalCost": 0.01622346,
+      "totalTokens": 24297
+    },
+    {
+      "agent": "zcode",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 10104832,
+      "inputTokens": 194543,
+      "metadata": {
+        "lastActivity": "2026-09-12T12:32:22.028Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 10104832,
+          "cost": 0,
+          "inputTokens": 194543,
+          "missingPricing": true,
+          "modelName": "GLM-5.3-Flash",
+          "outputTokens": 34880
+        }
+      ],
+      "modelsUsed": ["GLM-5.3-Flash"],
+      "outputTokens": 34880,
+      "period": "sess_00000000-0000-4000-8000-000000000004",
+      "totalCost": 0,
+      "totalTokens": 10334255
+    },
+    {
+      "agent": "opencode",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 67200,
+      "inputTokens": 135061,
+      "metadata": {
+        "lastActivity": "2026-09-20T14:01:45.220Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 34560,
+          "cost": 0.01928,
+          "inputTokens": 103790,
+          "modelName": "nemotron-3-ultra-free",
+          "outputTokens": 1498
+        },
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 32640,
+          "cost": 0.0029288,
+          "inputTokens": 31271,
+          "modelName": "nemotron-3.5-lightning-free",
+          "outputTokens": 237
+        }
+      ],
+      "modelsUsed": ["nemotron-3.5-lightning-free", "nemotron-3-ultra-free"],
+      "outputTokens": 1735,
+      "period": "ses_00000000000000000000000005",
+      "totalCost": 0.0222088,
+      "totalTokens": 204906
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 870580608,
+    "inputTokens": 13303993,
+    "outputTokens": 1878367,
+    "totalCost": 39.07954086,
+    "totalTokens": 885763878,
+    "unpricedModels": ["GLM-5.3-Flash"]
+  }
+}

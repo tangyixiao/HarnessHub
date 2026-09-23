@@ -1,0 +1,70 @@
+{
+  "session": [
+    {
+      "agent": "codex",
+      "period": "2026/09/01/rollout-2026-09-01T00-00-00-00000000-0000-4000-8000-000000000009",
+      "inputTokens": 1,
+      "outputTokens": 1,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "totalTokens": 2,
+      "totalCost": 0.03258976559999999,
+      "modelsUsed": ["gpt-5.6-sol"],
+      "metadata": {
+        "lastActivity": "2026-09-01T00:00:00.000Z",
+        "reasoningOutputTokens": 1
+      },
+      "modelBreakdowns": [
+        {
+          "modelName": "gpt-5.6-sol",
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.03258976559999999
+        },
+        {
+          "modelName": "gpt-5.6-terra",
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 21.120615000000004
+        },
+        {
+          "modelName": "gpt-5.6-luna",
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.0000015
+        },
+        {
+          "modelName": "gpt-5.6-nova",
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.0000025
+        },
+        {
+          "modelName": "gpt-5.6-iris",
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0,
+          "missingPricing": true
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 5,
+    "outputTokens": 5,
+    "totalTokens": 10,
+    "totalCost": 21.1532074756
+  }
+}
