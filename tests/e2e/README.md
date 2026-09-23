@@ -425,3 +425,47 @@ GUI: Schema 版本 7 / Managed Sessions 13 / Tokens 0 / Known Cost —
 **临时库 E2E**（全新空库，Harness Hub 一个会话都没启动过）；应用数据库里有 Task 3/4 真实启动过的
 13 条会话。两个数字都正确，恰好说明 `usage_sessions`（222，来自外部历史）与
 `managed_sessions`（13，Harness Hub 自己管理的）确实是两个不同的事实。
+
+---
+
+## Task 7B GUI 取证轮（2026-09-23，真实 WebView2 + CDP）
+
+方法：真实 `pnpm tauri dev`，用真实 UI 路径驱动（导航链接 → selector → 启动按钮 → xterm 输入 →
+结束会话按钮），不做 hash 注入、不加任何 debug API。证据形式是**提交前/提交后分界**
+（答案 `585987` 从未被输入过，因此它的出现只能来自 Claude 输出）。
+
+### 已经拿到的（真机输出）
+
+```text
+selector options: [{value:"codex@local",label:"Codex"},{value:"claude@local",label:"Claude Code"}]
+picked        : claude@local          ← 真实选中第二个 Harness
+start         : 真实点击「启动」按钮
+after start   : 屏幕 545 字符，selector disabled=true（运行中禁止切换）
+before submit : answerPresent=false   promptPresent=false   ← 基线干净
+after kill    : 「已结束 · 用户主动结束 · 退出码 1」
+DB            : status=exited  termination_reason=user_killed  exit_code=1  pid=40780
+running(claude)=0   running(all)=0    claude 残留进程=0
+```
+
+**GUI kill 的终态语义完全正确**（`user_killed` + reaper 观察到的真实退出码 1；非零退出码按约定
+不算失败，只记录事实），且**零 ghost running、无孤儿进程**。
+
+### 未完成：算术往返（因此 `terminal` 仍不能翻 true）
+
+Claude 首屏**不是聊天界面**，而是目录信任确认：
+
+```text
+Accessing workspace: C:\Users\tangy
+Quick safety check: Is this a project you created or one you trust? …
+```
+
+因此我发去的 prompt 没有进入输入行（`promptPresent=false`）；回车把这个确认界面关掉之后
+才出现聊天界面（`> ` 加 `? for shortcuts`），但那段文字已被对话吃掉。
+
+按约定这**不写成测试绕过真实行为**，而是如实记录该 TUI 状态，下一轮用正常 GUI 交互
+（在确认界面选择「信任并继续」）进入可输入状态后再提交 `314159 + 271828` 并只检查
+基线之后的新输出。
+
+需要用户确认的副作用：选择「信任」会**持久写入 Claude 的用户配置**（`~/.claude.json` 的
+信任列表），且本次 cwd 是用户主目录 `C:\Users\tangy`。这是真实产品行为，但属于对用户机器
+的持久配置改动，因此先停下确认，而不是替用户点下去。
