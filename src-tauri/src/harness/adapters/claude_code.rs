@@ -95,9 +95,18 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         }
     }
 
-    /// **全部为 `false`**：detection 阶段不宣称任何东西（见本文件头部说明）。
+    /// `launch` / `terminal` 已翻为 `true`：真机 GUI 验收通过（证据见 `tests/e2e/README.md`）——
+    /// Terminal Launcher 选 Claude Code 且 cwd 指向窄范围 E2E 目录 → 真实 TUI 首屏显示该
+    /// workspace → 真实按键通过 trust 确认 → 进入聊天界面 → 算术 prompt 往返（提交后的
+    /// **新输出**里出现 585987）→ GUI kill 得到 `user_killed` + 真实退出码。
+    ///
+    /// 其余能力未实现，保持 `false`（含 `resume`，见 ADR-0005 的零宣称原则）。
     fn capabilities(&self) -> HarnessCapabilities {
-        HarnessCapabilities::default()
+        HarnessCapabilities {
+            launch: true,
+            terminal: true,
+            ..HarnessCapabilities::default()
+        }
     }
 
     fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
@@ -240,18 +249,20 @@ mod tests {
     }
 
     /// 7A 的核心断言：detection 阶段**一个能力都不宣称**。
+    /// 能力矩阵只包含**已经拿到真机证据**的能力（ADR-0005 零宣称）。
+    ///
+    /// 7B 起 `launch` / `terminal` 为 true：真机 GUI 往返（Terminal Launcher → Claude Code
+    /// → 窄范围 cwd → trust 确认 → 聊天界面 → 算术 prompt 的**新输出** → user_killed 终态）。
     #[test]
-    fn capabilities_claim_nothing_at_the_detection_stage() {
+    fn capabilities_claim_only_what_has_real_evidence() {
         let capabilities = adapter(installed()).capabilities();
 
-        assert_eq!(
-            capabilities,
-            HarnessCapabilities::default(),
-            "7A 只做检测；launch/terminal 等要等各自的真机证据"
+        assert!(capabilities.launch, "Claude 已通过真机 spawn + lifecycle");
+        assert!(
+            capabilities.terminal,
+            "Claude 已通过真机 GUI 双向交互 + resize"
         );
         for (name, value) in [
-            ("launch", capabilities.launch),
-            ("terminal", capabilities.terminal),
             ("resume", capabilities.resume),
             ("usage", capabilities.usage),
             ("replay", capabilities.replay),
@@ -260,13 +271,14 @@ mod tests {
             ("live_state", capabilities.live_state),
             ("worktree", capabilities.worktree),
         ] {
-            assert!(!value, "{name} 在 7A 阶段不得为 true");
+            assert!(!value, "{name} 尚未验收，不得为 true");
         }
     }
 
     /// 能生成 spec ≠ 宣称 launch：两者必须分开断言，防止「顺手打个勾」。
+    /// 能生成 spec 与能力声明是**两件事**：生成 spec 不得带动别的能力。
     #[test]
-    fn building_a_launch_spec_does_not_turn_launch_on() {
+    fn building_a_launch_spec_does_not_claim_extra_capabilities() {
         let adapter = adapter(installed());
 
         let spec = adapter
@@ -277,10 +289,8 @@ mod tests {
         assert_eq!(spec.args, vec!["--help".to_string()]);
         assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
         assert_eq!(spec.runtime_target_id, "local");
-        assert!(
-            !adapter.capabilities().launch,
-            "spec 能生成不代表 launch 已验收"
-        );
+        assert!(!adapter.capabilities().resume, "spec 与 resume 无关");
+        assert!(!adapter.capabilities().usage, "spec 与 usage 无关");
     }
 
     /// `.ps1` shim 走通用地基（pwsh 宿主），Claude 不新增平台专用分支。

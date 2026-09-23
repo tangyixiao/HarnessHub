@@ -240,10 +240,50 @@ fn the_real_machine_detects_both_harnesses() {
         "本机 ~/.claude 存在时必须被发现：{:?}",
         claude.data_paths
     );
-    assert_eq!(
-        claude.capabilities,
-        harness_hub_lib::harness::adapter::HarnessCapabilities::default(),
-        "7A 阶段 Claude 不得宣称任何能力"
-    );
+    // 7A 阶段 Claude 只做 detection（当时这里断言全 false）。7B 通过真机 GUI 往返后
+    // 才能宣称 launch/terminal，权威断言在下面的矩阵回归测试里。
+    assert!(!claude.capabilities.resume, "resume 仍未实现，不得为 true");
     let _ = clock::now_rfc3339();
+}
+
+/// 能力矩阵回归：只允许出现**已经拿到真机证据**的能力（ADR-0005 零宣称）。
+///
+/// 目的是防止以后 `Default` / 结构扩展 / 重构把没验收的能力顺手打开。
+#[test]
+fn the_capability_matrix_is_exactly_what_has_been_accepted() {
+    let registry = build_harness_registry();
+    let capabilities = |id: &str| {
+        registry
+            .capabilities(&harness_hub_lib::harness::adapter::HarnessId::from(id))
+            .expect("必须已注册")
+    };
+
+    // Codex：完整纵向链路（Task 4 终端 + Task 5 同快照对账）
+    let codex = capabilities("codex");
+    assert!(codex.launch, "codex launch 已有真机证据");
+    assert!(codex.terminal, "codex terminal 已有真机证据");
+    assert!(codex.usage, "codex usage 已有同快照对账证据");
+
+    // Claude Code：Task 7B 真机 GUI 往返 + user_killed 终态
+    let claude = capabilities("claude");
+    assert!(claude.launch, "claude launch 已有真机证据");
+    assert!(claude.terminal, "claude terminal 已有真机 GUI 往返证据");
+
+    for (name, value) in [
+        ("codex.resume", codex.resume),
+        ("codex.replay", codex.replay),
+        ("codex.tool_calls", codex.tool_calls),
+        ("codex.subagents", codex.subagents),
+        ("codex.live_state", codex.live_state),
+        ("codex.worktree", codex.worktree),
+        ("claude.usage", claude.usage),
+        ("claude.resume", claude.resume),
+        ("claude.replay", claude.replay),
+        ("claude.tool_calls", claude.tool_calls),
+        ("claude.subagents", claude.subagents),
+        ("claude.live_state", claude.live_state),
+        ("claude.worktree", claude.worktree),
+    ] {
+        assert!(!value, "{name} 尚未验收，不得为 true");
+    }
 }

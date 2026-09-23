@@ -469,3 +469,35 @@ Quick safety check: Is this a project you created or one you trust? …
 需要用户确认的副作用：选择「信任」会**持久写入 Claude 的用户配置**（`~/.claude.json` 的
 信任列表），且本次 cwd 是用户主目录 `C:\Users\tangy`。这是真实产品行为，但属于对用户机器
 的持久配置改动，因此先停下确认，而不是替用户点下去。
+
+---
+
+## Task 7B 最终 GUI 验收（2026-09-23，纯 UI 路径，`RESULT: PASS`）
+
+启动参数：Terminal Launcher → `Claude Code` → cwd = `D:\HarnessHub-E2E\claude-terminal`（仓库外专用目录）。
+唯一允许的持久副作用：`~/.claude.json` 记录**该窄目录**的 trust（未信任用户主目录）。
+
+```text
+form          : picked=claude@local  cwd=D:\HarnessHub-E2E\claude-terminal
+firstScreen   : workspaceShown=true  homeShown=false
+                运行中 · Claude Code · cwd D:\HarnessHub-E2E\claude-terminal · pid 45684 · session d0646772…
+                "Accessing workspace: D:\HarnessHub-E2E\claude-terminal"
+                "Quick safety check: Is this a project you created or one you trust? … > 1. Yes, I tru…"
+chatReady     : sawShortcuts=true（真实按键通过 trust 后进入聊天界面）
+baseline      : answerPresent=false（干净边界）
+typed         : promptPresent=true
+afterSubmit   : answerPresent=true  grewBy=435   ← 585987 只出现在提交之后的新输出里
+afterKill     : 已结束 · 用户主动结束 · 退出码 1
+DB            : status=exited  termination_reason=user_killed  exit_code=1  pid=45684
+running(claude)=0   running(all)=0   pid 45684 存活=false   claude 残留进程=0
+```
+
+这条证据同时覆盖了：
+
+1. **cwd 的完整链路**：UI → IPC → `LaunchSpec` → PTY，由 Claude 自己的 TUI 显示出来验证（不是我们自说自话）；
+2. **多阶段交互式 TUI**：trust 确认页 → 真实键盘选择 → TUI 状态转换 → 聊天界面；
+3. **真正的双向 Terminal**：xterm 输入 → PTY → Claude → 原始输出 → Channel → xterm，且答案 `585987` 从未被输入过，因此「提交前没有 / 提交后有」排除了输入回显假阳性；
+4. **GUI kill** 的终态语义与零孤儿。
+
+据此（且仅据此）翻转 `Claude: launch=true, terminal=true`；`resume` 等仍为 false，并由
+`the_capability_matrix_is_exactly_what_has_been_accepted` 锁死。
