@@ -28,16 +28,19 @@ const TERMINATION_LABEL: Record<TerminationReason, string> = {
 };
 
 /**
- * Terminal 页状态机。
+ * Terminal 页状态机（**Session Launcher**，不是「打开页面就开 shell」）。
  *
- * `loading`（正在探测本机有哪些 Harness）
- *   → `idle`（**多个**已安装：等用户显式启动，mount 不 spawn）
- *   → `starting`（启动中：禁止再次启动，防双击）
- *   → `running`（有 session）
- *   → `ended`（终态，可重新启动 → 新的 session id）
+ * ```text
+ * loading → idle → starting → running → ended
+ * ```
  *
- * 没有 `running`（也就是 ≥2 installed 的场景）时 mount **不**自动启动：
- * 否则「第一个 installation」会变成隐式的默认目标，用户根本没机会选别的。
+ * - `installed = 0` → `error`（没有可启动的 Harness）
+ * - `installed >= 1` → `idle`：**不再自动 spawn**
+ *
+ * 为什么取消「单 Harness 自动启动」：启动其实有多个启动期参数
+ * （`installationId`、`cwd`，以后还会 env / profile / runtime target 之类），
+ * mount 即 spawn 会让用户**没有机会**设置它们 —— 而且单 Harness 机器上尤其明显。
+ * 形态因此从 `mount → spawn` 变成 `configure → explicit launch`。
  */
 type Phase =
   | { kind: 'loading' }
@@ -48,6 +51,12 @@ type Phase =
   | { kind: 'unavailable' }
   | { kind: 'error'; message: string };
 
+/** 空白（含纯空格）视为「未指定」，后端因此收到 `None`、`sessions.cwd` 记 NULL。 */
+function normalizeCwd(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
 /**
  * Terminal 页面。
  *
@@ -55,27 +64,29 @@ type Phase =
  * `new Terminal → open → Channel 回调 → onData/onBinary → resize → start_terminal`
  * 的顺序初始化。顺序错了，交互式 TUI 首屏的 DSR 就会早于 responder 就绪而永久卡住。
  *
- * **三个 id 各司其职，绝不混用**：
- * - `selectedInstallationId`：下一次准备启动谁（用户可选）；
- * - `activeInstallationId`：当前 session **实际**由谁启动（只读事实）；
+ * **启动期参数与运行期句柄严格分离**：
+ * - `selectedInstallationId` / `selectedCwd`：**下一次**启动要用什么（用户可改）；
+ * - `activeInstallationId` / `activeCwd`：当前 session **实际**用的是什么（只读事实）；
  * - `sessionIdRef`：write / resize / kill 的**唯一**控制句柄。
  *
- * 运行中禁止切换目标：切换只影响下一次启动，绝不会把当前会话的控制对象换掉。
+ * 运行中三个输入都禁用，因此改「下一次」的参数绝不会污染当前会话。
  *
  * **卸载 ≠ kill**：组件卸载只释放浏览器侧资源（订阅、xterm、observer）。
  */
 export function TerminalPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  /** 唯一的 spawn 路径（单 Harness 自动启动与多 Harness 手动启动都走它）。 */
-  const startRef = useRef<(installationId: string) => void>(() => {});
-  /** 防止 mount 自动启动被重复触发 / 双击启动产生两个 session。 */
+  /** 唯一的 spawn 路径。 */
+  const startRef = useRef<(installationId: string, cwd?: string) => void>(() => {});
+  /** 防止双击 / 重入产生两个 session。 */
   const startingRef = useRef(false);
 
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
   const [installedHarnesses, setInstalledHarnesses] = useState<HarnessSummary[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
+  const [selectedCwd, setSelectedCwd] = useState('');
   const [activeInstallationId, setActiveInstallationId] = useState<string | null>(null);
+  const [activeCwd, setActiveCwd] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -132,17 +143,19 @@ export function TerminalPage() {
     }
 
     // ④ 唯一的启动路径
-    const start = (installationId: string) => {
+    const start = (installationId: string, cwd?: string) => {
       if (startingRef.current || sessionIdRef.current !== null) {
         return; // 已在启动 / 已有会话：忽略，避免双击产生两个 session
       }
       startingRef.current = true;
       setPhase({ kind: 'starting' });
       setActiveInstallationId(installationId);
+      setActiveCwd(cwd);
 
       void (async () => {
         const started = await startTerminal({
           installationId,
+          cwd,
           cols: terminal.cols,
           rows: terminal.rows,
           onEvent: (event) => {
@@ -173,10 +186,11 @@ export function TerminalPage() {
 
         if (!started.ok) {
           setActiveInstallationId(null);
+          setActiveCwd(undefined);
           setPhase(
             started.error === NOT_IN_TAURI
               ? { kind: 'unavailable' }
-              : // 启动失败：保留选择，用户可以重试
+              : // 启动失败：保留 installation 与 cwd 选择，用户可以重试
                 { kind: 'error', message: started.error },
           );
           return;
@@ -188,7 +202,7 @@ export function TerminalPage() {
     };
     startRef.current = start;
 
-    // ⑤ 最后才决定要不要 spawn
+    // ⑤ 只探测可选项，**不自动启动**
     let cancelled = false;
     void (async () => {
       const listed = await listHarnesses();
@@ -212,20 +226,8 @@ export function TerminalPage() {
         return;
       }
 
-      const first = choices[0];
-      if (!first || first.installationId === null) {
-        setPhase({ kind: 'error', message: '没有可用于启动终端的已安装 Harness' });
-        return;
-      }
-      setSelectedInstallationId(first.installationId);
-
-      if (choices.length === 1) {
-        // 唯一选择：自动启动**恰好一次**
-        start(first.installationId);
-      } else {
-        // 多个选择：交给用户，mount 不 spawn
-        setPhase({ kind: 'idle' });
-      }
+      setSelectedInstallationId(choices[0]?.installationId ?? null);
+      setPhase({ kind: 'idle' });
     })();
 
     return () => {
@@ -251,12 +253,19 @@ export function TerminalPage() {
     (item) => item.installationId === activeInstallationId,
   );
   const busy = phase.kind === 'starting' || phase.kind === 'running';
+  const canLaunch =
+    selectedInstallationId !== null &&
+    (phase.kind === 'idle' || phase.kind === 'ended' || phase.kind === 'error');
+  const launch = () => {
+    if (selectedInstallationId === null) return;
+    startRef.current(selectedInstallationId, normalizeCwd(selectedCwd));
+  };
 
   return (
     <div>
       <PageHeader
         title="Terminal"
-        description="在 Harness Hub 内直接运行 Harness 的 PTY 会话：原始字节流、可交互、可调整尺寸。"
+        description="选择一个已安装的 Harness 并显式启动 PTY 会话：原始字节流、可交互、可调整尺寸。"
         actions={
           phase.kind === 'running' ? (
             <Button variant="secondary" onClick={() => void kill()}>
@@ -266,59 +275,68 @@ export function TerminalPage() {
         }
       />
 
-      {installedHarnesses.length > 1 ? (
-        <label className="mb-2 flex items-center gap-2 text-[11px] text-content-muted">
-          启动的 Harness
-          <select
-            aria-label="启动的 Harness"
-            className="rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
-            value={selectedInstallationId ?? ''}
-            disabled={busy}
-            onChange={(event) => setSelectedInstallationId(event.target.value)}
-          >
-            {installedHarnesses.map((item) => (
-              <option key={item.installationId} value={item.installationId ?? ''}>
-                {item.displayName}
-              </option>
-            ))}
-          </select>
-          {phase.kind === 'running' ? '（会话运行中，切换只影响下一次启动）' : ''}
-        </label>
-      ) : null}
+      {/*
+        启动选项：**只认 DTO**（installationId 是 value、displayName 是 label），
+        没有任何 codex / claude 之类的名字分支，因此加第三个 Harness 不需要改这里。
+        运行中全部禁用：改「下一次」的启动参数绝不污染当前会话。
+      */}
+      {phase.kind !== 'unavailable' && installedHarnesses.length > 0 ? (
+        <div className="mb-2 flex flex-wrap items-end gap-3 text-[11px] text-content-muted">
+          <label className="flex flex-col gap-1">
+            启动的 Harness
+            <select
+              aria-label="启动的 Harness"
+              className="rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
+              value={selectedInstallationId ?? ''}
+              disabled={busy}
+              onChange={(event) => setSelectedInstallationId(event.target.value)}
+            >
+              {installedHarnesses.map((item) => (
+                <option key={item.installationId} value={item.installationId ?? ''}>
+                  {item.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
 
-      {phase.kind === 'idle' || (phase.kind === 'error' && installedHarnesses.length > 0) ? (
-        <div className="mb-2 flex items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => {
-              if (selectedInstallationId !== null) startRef.current(selectedInstallationId);
-            }}
-          >
-            启动
-          </Button>
-          <span className="text-[11px] text-content-muted">
-            本机有多个已安装 Harness，先选择再启动（不会自动替你选）。
-          </span>
-        </div>
-      ) : null}
+          <label className="flex flex-col gap-1">
+            工作目录（可选）
+            <input
+              aria-label="工作目录（可选）"
+              className="w-80 rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
+              placeholder="留空 = 不指定（sessions.cwd 记为 NULL）"
+              value={selectedCwd}
+              disabled={busy}
+              onChange={(event) => setSelectedCwd(event.target.value)}
+            />
+          </label>
 
-      {phase.kind === 'ended' ? (
-        <div className="mb-2 flex items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => {
-              if (selectedInstallationId !== null) startRef.current(selectedInstallationId);
-            }}
-          >
-            重新启动
+          <Button variant="primary" onClick={launch} disabled={!canLaunch}>
+            {phase.kind === 'ended' ? '重新启动' : '启动'}
           </Button>
-          <span className="text-[11px] text-content-muted">已结束 · {phase.status}</span>
+
+          {phase.kind === 'running' ? (
+            <span>
+              运行中 · {activeHarness?.displayName ?? ''}
+              {activeCwd ? ` · cwd ${activeCwd}` : ''}
+              {phase.session.pid !== null ? ` · pid ${phase.session.pid}` : ''}
+              {` · session ${phase.session.hubSessionId}`}
+            </span>
+          ) : null}
+          {phase.kind === 'ended' ? <span>已结束 · {phase.status}</span> : null}
         </div>
       ) : null}
 
       {phase.kind === 'loading' ? (
         <p className="pb-2 text-[11px] text-content-muted">
-          正在探测本机已安装的 Harness（准备 xterm、挂好输入与 resize，然后才 spawn）…
+          正在探测本机已安装的 Harness（准备 xterm、挂好输入与 resize）…
+        </p>
+      ) : null}
+
+      {phase.kind === 'idle' ? (
+        <p className="pb-2 text-[11px] text-content-muted">
+          选择 Harness（可选填工作目录）后点「启动」。页面不会自动替你启动 —— 启动参数必须在 spawn
+          之前确定。
         </p>
       ) : null}
 
@@ -342,13 +360,6 @@ export function TerminalPage() {
           <CardTitle>终端启动失败</CardTitle>
           <CardDescription>{phase.message}</CardDescription>
         </Card>
-      ) : null}
-
-      {phase.kind === 'running' ? (
-        <p className="pb-2 text-[11px] text-content-muted">
-          {`运行中 · ${activeHarness?.displayName ?? ''} · session ${phase.session.hubSessionId}`}
-          {phase.session.pid !== null ? ` · pid ${phase.session.pid}` : ''}
-        </p>
       ) : null}
 
       {/*

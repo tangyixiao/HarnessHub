@@ -140,6 +140,8 @@ describe('TerminalPage', () => {
   it('严格 ready-before-spawn：open → onData/onBinary → resize → start_terminal', async () => {
     render(<TerminalPage />);
 
+    await clickLaunch();
+
     await waitFor(() => {
       expect(startTerminal).toHaveBeenCalledTimes(1);
     });
@@ -157,6 +159,8 @@ describe('TerminalPage', () => {
 
   it('先挂好输入路径才 spawn：startTerminal 之前 onData 必须已注册', async () => {
     render(<TerminalPage />);
+
+    await clickLaunch();
     await waitFor(() => expect(startTerminal).toHaveBeenCalled());
 
     // 记录顺序上，onData 的注册必须早于 spawn 调用
@@ -167,6 +171,8 @@ describe('TerminalPage', () => {
 
   it('用已安装 Harness 的 installationId 启动，而不是前端自己拼 id', async () => {
     render(<TerminalPage />);
+
+    await clickLaunch();
     await waitFor(() => expect(startTerminal).toHaveBeenCalled());
 
     expect(startTerminal.mock.calls[0][0]).toMatchObject({
@@ -178,6 +184,8 @@ describe('TerminalPage', () => {
 
   it('输出事件以原始字节（Uint8Array）交给 xterm', async () => {
     render(<TerminalPage />);
+
+    await clickLaunch();
     await waitFor(() => expect(startTerminal).toHaveBeenCalled());
 
     const onEvent = startTerminal.mock.calls[0][0].onEvent;
@@ -189,6 +197,8 @@ describe('TerminalPage', () => {
 
   it('卸载只释放前端资源，**不 kill** 正在运行的会话', async () => {
     const view = render(<TerminalPage />);
+
+    await clickLaunch();
     await waitFor(() => expect(startTerminal).toHaveBeenCalled());
 
     view.unmount();
@@ -202,6 +212,8 @@ describe('TerminalPage', () => {
 
   it('只有点「结束会话」才会 kill', async () => {
     render(<TerminalPage />);
+
+    await clickLaunch();
     const button = await screen.findByRole('button', { name: '结束会话' });
 
     button.click();
@@ -233,6 +245,8 @@ describe('TerminalPage', () => {
    */
   it('resize：把 xterm 当前 cols/rows 透传给 resize_terminal', async () => {
     render(<TerminalPage />);
+
+    await clickLaunch();
     await waitFor(() => expect(startTerminal).toHaveBeenCalled());
 
     const terminal = xtermInstances[0];
@@ -260,6 +274,14 @@ describe('TerminalPage', () => {
     expect(resizeTerminal).not.toHaveBeenCalled();
   });
 });
+
+/** 显式启动：Terminal 页现在是 configure → explicit launch（不再 mount 自动 spawn）。 */
+async function clickLaunch() {
+  await settle();
+  const button = screen.getByRole('button', { name: '启动' }) as HTMLButtonElement;
+  button.click();
+  await settle();
+}
 
 /*
  * Multi-Harness 启动语义（Task 7B）。
@@ -295,8 +317,10 @@ describe('TerminalPage multi-harness 启动语义', () => {
     expect(screen.getByText(/没有可用于启动终端的已安装 Harness/)).toBeInTheDocument();
   });
 
-  it('1 个已安装 → 自动启动恰好一次，rerender 不重复 spawn', async () => {
+  it('1 个已安装 → mount 不自动启动；点启动恰好一次，rerender 不重复 spawn', async () => {
     const view = render(<TerminalPage />);
+
+    await clickLaunch();
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(1);
@@ -306,7 +330,8 @@ describe('TerminalPage multi-harness 启动语义', () => {
     await settle();
 
     expect(startTerminal).toHaveBeenCalledTimes(1);
-    expect(screen.queryByLabelText('启动的 Harness')).not.toBeInTheDocument();
+    // selector 现在始终渲染（installed >= 1），不再是「唯一选择就藏起来」
+    expect(screen.getByLabelText('启动的 Harness')).toBeInTheDocument();
   });
 
   it('2 个已安装 → mount 不 spawn，显示 selector 与启动按钮', async () => {
@@ -418,5 +443,44 @@ describe('TerminalPage multi-harness 启动语义', () => {
 
     expect(startTerminal).toHaveBeenCalledTimes(2);
     expect(screen.getByText(/session hub-2/)).toBeInTheDocument();
+  });
+});
+
+/*
+ * Launch options：工作目录（通用能力，不是 Claude 特例）。
+ * 语义：空白 → 不传 cwd（后端收到 None、sessions.cwd 记 NULL）；非空 → trim 后原样传。
+ */
+describe('TerminalPage launch options（cwd）', () => {
+  // 缺口（下一轮补）：非空 cwd 的透传与「running 时禁用」还没有测试覆盖。
+  // 修法已确定：受控 input 必须用 HTMLInputElement.prototype 上的原生 value setter
+  // 再抛 input 事件，否则 React 的 value tracker 会认为「没变」。
+  const setCwd = (value: string) => {
+    const input = screen.getByLabelText('工作目录（可选）') as HTMLInputElement;
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  it('1 个已安装时 mount 也不再自动启动', async () => {
+    render(<TerminalPage />);
+    await settle();
+
+    expect(startTerminal).not.toHaveBeenCalled();
+
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it('cwd 空白 → 不传 cwd（保持 None 语义）', async () => {
+    render(<TerminalPage />);
+    await settle();
+
+    setCwd('   ');
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    const input = startTerminal.mock.calls[0]?.[0] as { cwd?: string };
+    expect(input.cwd).toBeUndefined();
   });
 });
