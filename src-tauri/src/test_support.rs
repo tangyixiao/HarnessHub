@@ -12,10 +12,16 @@
 //! - [`seeded_db`]：只给存储层单测用的便捷夹具，禁止用它验证集成路径。
 
 use rusqlite::params;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::db::Database;
+use crate::error::Result;
 use crate::harness::adapter::HarnessCapabilities;
+use crate::harness::probe::HostProbe;
 use crate::harness::registry::HarnessSummary;
+use crate::usage::runner::{CommandOutput, CommandRunner, CommandSpec};
 
 /// 测试用 Harness id，与 `harnesses.id` 对应。
 pub const HARNESS_ID: &str = "codex";
@@ -100,4 +106,106 @@ pub fn seed_baseline(db: &Database) {
         ],
     )
     .expect("插入 harness 安装");
+}
+
+/// 只认识被显式列出的可执行名的假宿主（**不碰真实 PATH**）。
+pub struct FakeHostProbe {
+    available: HashSet<String>,
+}
+
+impl FakeHostProbe {
+    pub fn with(names: &[&str]) -> Self {
+        Self {
+            available: names.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+}
+
+impl HostProbe for FakeHostProbe {
+    fn find_executable(&self, name: &str) -> Option<PathBuf> {
+        self.available
+            .contains(name)
+            .then(|| PathBuf::from(format!("D:/fake/{name}")))
+    }
+
+    fn read_version(&self, _executable: &Path) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn dir_exists(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn home_dir(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// 可编程的执行器：按**命令文本子串**匹配预设输出，并记录每次调用。
+///
+/// 匹配用子串（`--version` / `--sections`）而不是 program，这样能表达
+/// 「版本探测成功、报告调用失败」这类真实场景。
+/// `calls()` 是关键：用它证明「只读路径没有起进程」。
+pub struct ScriptedCommandRunner {
+    outputs: Vec<(String, CommandOutput)>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl ScriptedCommandRunner {
+    pub fn new() -> Self {
+        Self {
+            outputs: Vec::new(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 按 program 名匹配（简写，等价于 `with_output(program, …)`）。
+    pub fn returning(program: &str, exit_code: i32, stdout: &str, stderr: &str) -> Self {
+        Self::new().with_output(program, exit_code, stdout, stderr)
+    }
+
+    pub fn with_output(
+        mut self,
+        matcher: &str,
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> Self {
+        self.outputs.push((
+            matcher.to_string(),
+            CommandOutput {
+                exit_code,
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+            },
+        ));
+        self
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("调用记录").clone()
+    }
+}
+
+impl Default for ScriptedCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandRunner for ScriptedCommandRunner {
+    fn run(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let described = command.describe();
+        self.calls.lock().expect("调用记录").push(described.clone());
+
+        self.outputs
+            .iter()
+            .find(|(matcher, _)| described.contains(matcher.as_str()))
+            .map(|(_, output)| output.clone())
+            .ok_or_else(|| {
+                crate::error::Error::UsageUnavailable(format!(
+                    "假执行器没有为 {described} 配置输出"
+                ))
+            })
+    }
 }

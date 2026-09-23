@@ -214,76 +214,7 @@ pub fn probe_version(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-    use std::path::Path;
-
-    /// 只认识被显式列出的可执行名的假宿主。
-    struct FakeProbe {
-        available: HashSet<String>,
-    }
-
-    impl FakeProbe {
-        fn with(names: &[&str]) -> Self {
-            Self {
-                available: names.iter().map(|name| name.to_string()).collect(),
-            }
-        }
-    }
-
-    impl HostProbe for FakeProbe {
-        fn find_executable(&self, name: &str) -> Option<PathBuf> {
-            self.available
-                .contains(name)
-                .then(|| PathBuf::from(format!("D:/fake/{name}")))
-        }
-
-        fn read_version(&self, _executable: &Path) -> Result<Option<String>> {
-            Ok(None)
-        }
-
-        fn dir_exists(&self, _path: &Path) -> bool {
-            false
-        }
-
-        fn home_dir(&self) -> Option<PathBuf> {
-            None
-        }
-    }
-
-    /// 可编程的执行器：按命令记录调用并返回预设输出。
-    struct FakeRunner {
-        outputs: Vec<(String, CommandOutput)>,
-    }
-
-    impl FakeRunner {
-        fn returning(program: &str, exit_code: i32, stdout: &str, stderr: &str) -> Self {
-            Self {
-                outputs: vec![(
-                    program.to_string(),
-                    CommandOutput {
-                        exit_code,
-                        stdout: stdout.to_string(),
-                        stderr: stderr.to_string(),
-                    },
-                )],
-            }
-        }
-    }
-
-    impl CommandRunner for FakeRunner {
-        fn run(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.outputs
-                .iter()
-                .find(|(program, _)| command.program.contains(program.as_str()))
-                .map(|(_, output)| output.clone())
-                .ok_or_else(|| {
-                    Error::UsageUnavailable(format!(
-                        "假执行器没有为 {} 配置输出",
-                        command.describe()
-                    ))
-                })
-        }
-    }
+    use crate::test_support::{FakeHostProbe, ScriptedCommandRunner};
 
     fn configured() -> CommandSpec {
         CommandSpec::new(
@@ -294,7 +225,7 @@ mod tests {
 
     #[test]
     fn prefers_the_path_binary_over_everything_else() {
-        let probe = FakeProbe::with(&["ccusage", "npx"]);
+        let probe = FakeHostProbe::with(&["ccusage", "npx"]);
 
         let runner = resolve_runner(&probe, Some(configured())).expect("必须解析出来");
 
@@ -305,7 +236,7 @@ mod tests {
 
     #[test]
     fn uses_the_configured_command_before_the_managed_runner() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
 
         let runner = resolve_runner(&probe, Some(configured())).expect("必须解析出来");
 
@@ -315,7 +246,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_pinned_managed_runner() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
 
         let runner = resolve_runner(&probe, None).expect("npx 在就必须能用托管 runner");
 
@@ -330,7 +261,7 @@ mod tests {
     /// 生产路径**永远**不得出现 `latest`：那会让 schema 无声漂移。
     #[test]
     fn never_builds_an_invocation_with_latest() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
 
         let full = runner
@@ -346,7 +277,7 @@ mod tests {
 
     #[test]
     fn reports_unavailable_instead_of_failing_when_nothing_is_installed() {
-        let probe = FakeProbe::with(&[]);
+        let probe = FakeHostProbe::with(&[]);
 
         assert!(resolve_runner(&probe, None).is_none());
     }
@@ -363,7 +294,7 @@ mod tests {
 
     #[test]
     fn appending_arguments_keeps_the_runner_prefix() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
 
         let command = runner.with_arguments(&session_report_arguments());
@@ -375,9 +306,9 @@ mod tests {
 
     #[test]
     fn probe_version_parses_the_real_ccusage_output() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
-        let executor = FakeRunner::returning("npx", 0, "ccusage 20.0.24\n", "");
+        let executor = ScriptedCommandRunner::returning("npx", 0, "ccusage 20.0.24\n", "");
 
         let (version, command) = probe_version(&runner, &executor)
             .expect("探测")
@@ -389,9 +320,9 @@ mod tests {
 
     #[test]
     fn probe_version_reads_stderr_too() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
-        let executor = FakeRunner::returning("npx", 0, "", "ccusage 20.0.24\n");
+        let executor = ScriptedCommandRunner::returning("npx", 0, "", "ccusage 20.0.24\n");
 
         let version = probe_version(&runner, &executor)
             .expect("探测")
@@ -403,9 +334,10 @@ mod tests {
 
     #[test]
     fn probe_version_reports_a_non_zero_exit_instead_of_guessing() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
-        let executor = FakeRunner::returning("npx", 2, "", "Unknown option '--version'\n");
+        let executor =
+            ScriptedCommandRunner::returning("npx", 2, "", "Unknown option '--version'\n");
 
         let error = probe_version(&runner, &executor).expect_err("非零退出必须报错");
 
@@ -420,9 +352,9 @@ mod tests {
 
     #[test]
     fn probe_version_returns_none_when_output_has_no_version() {
-        let probe = FakeProbe::with(&["npx"]);
+        let probe = FakeHostProbe::with(&["npx"]);
         let runner = resolve_runner(&probe, None).expect("托管 runner");
-        let executor = FakeRunner::returning("npx", 0, "no version here\n", "");
+        let executor = ScriptedCommandRunner::returning("npx", 0, "no version here\n", "");
 
         assert!(probe_version(&runner, &executor).expect("探测").is_none());
     }

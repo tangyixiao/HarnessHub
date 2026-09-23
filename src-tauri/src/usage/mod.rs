@@ -10,6 +10,7 @@
 //! 唯一性由数据库的 `usage_events.stable_source_key UNIQUE` 兜底，
 //! 应用层不做「先查再插」的判断（ADR-0004 第 4 条的思路）。
 
+pub mod adapter;
 pub mod ccusage;
 pub mod cost;
 pub mod importer;
