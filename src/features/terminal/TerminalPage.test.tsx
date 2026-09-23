@@ -260,3 +260,163 @@ describe('TerminalPage', () => {
     expect(resizeTerminal).not.toHaveBeenCalled();
   });
 });
+
+/*
+ * Multi-Harness 启动语义（Task 7B）。
+ *
+ * 锁死的是**竞态与选择语义**，不是 Harness 名字：组件里不得出现 codex / claude 分支。
+ * 只用 render / screen + 原生 DOM 事件，避免为本组用例引入新的测试依赖。
+ */
+const CLAUDE_INSTALLED = {
+  ...INSTALLED,
+  id: 'claude',
+  displayName: 'Claude Code',
+  installationId: 'claude@local',
+};
+
+const CLAUDE_SESSION = {
+  ...SESSION,
+  hubSessionId: 'hub-claude',
+  harnessId: 'claude',
+  installationId: 'claude@local',
+};
+
+/** 等一小段真实时间，让 effect 里的异步启动流程落地（不引入额外导入）。 */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+
+describe('TerminalPage multi-harness 启动语义', () => {
+  it('0 个已安装 → 不调用 start_terminal，并如实报错', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [] });
+
+    render(<TerminalPage />);
+    await settle();
+
+    expect(startTerminal).not.toHaveBeenCalled();
+    expect(screen.getByText(/没有可用于启动终端的已安装 Harness/)).toBeInTheDocument();
+  });
+
+  it('1 个已安装 → 自动启动恰好一次，rerender 不重复 spawn', async () => {
+    const view = render(<TerminalPage />);
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(1);
+    expect(startTerminal.mock.calls[0]?.[0]).toMatchObject({ installationId: 'codex@local' });
+
+    view.rerender(<TerminalPage />);
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText('启动的 Harness')).not.toBeInTheDocument();
+  });
+
+  it('2 个已安装 → mount 不 spawn，显示 selector 与启动按钮', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+
+    render(<TerminalPage />);
+    await settle();
+
+    expect(startTerminal).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('启动的 Harness')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动' })).toBeInTheDocument();
+    // 默认选中列表里第一个（注册顺序，确定）
+    expect((screen.getByLabelText('启动的 Harness') as HTMLSelectElement).value).toBe(
+      'codex@local',
+    );
+  });
+
+  it('用户选 claude@local → start_terminal 收到的正是 claude@local', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+    startTerminal.mockResolvedValue({ ok: true, data: CLAUDE_SESSION });
+
+    render(<TerminalPage />);
+    await settle();
+
+    const select = screen.getByLabelText('启动的 Harness') as HTMLSelectElement;
+    select.value = 'claude@local';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(1);
+    expect(startTerminal.mock.calls[0]?.[0]).toMatchObject({ installationId: 'claude@local' });
+  });
+
+  it('双击启动只产生一个 session', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+
+    render(<TerminalPage />);
+    await settle();
+
+    const start = screen.getByRole('button', { name: '启动' }) as HTMLButtonElement;
+    start.click();
+    start.click();
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it('running 时 selector 被禁用（切换只影响下一次启动）', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+
+    render(<TerminalPage />);
+    await settle();
+
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect((screen.getByLabelText('启动的 Harness') as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByText(/session hub-1/)).toBeInTheDocument();
+  });
+
+  it('启动失败保留选择，并且可以重试', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+    startTerminal.mockResolvedValueOnce({ ok: false, error: '启动进程失败' });
+
+    render(<TerminalPage />);
+    await settle();
+
+    const select = screen.getByLabelText('启动的 Harness') as HTMLSelectElement;
+    select.value = 'claude@local';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect(screen.getByText('启动进程失败')).toBeInTheDocument();
+    expect((screen.getByLabelText('启动的 Harness') as HTMLSelectElement).value).toBe(
+      'claude@local',
+    );
+
+    startTerminal.mockResolvedValue({ ok: true, data: CLAUDE_SESSION });
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/session hub-claude/)).toBeInTheDocument();
+  });
+
+  it('ended 之后重新启动会创建新的 session', async () => {
+    listHarnesses.mockResolvedValue({ ok: true, data: [INSTALLED, CLAUDE_INSTALLED] });
+    startTerminal.mockResolvedValue({ ok: true, data: SESSION });
+
+    render(<TerminalPage />);
+    await settle();
+    (screen.getByRole('button', { name: '启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    // 让后端推一个 exited 事件（真实 reaper 的等价物）
+    const onEvent = startTerminal.mock.calls[0]?.[0]?.onEvent as (event: unknown) => void;
+    onEvent({ kind: 'exited', reason: 'natural_exit', exitCode: 0 });
+    await settle();
+
+    expect(screen.getByRole('button', { name: '重新启动' })).toBeInTheDocument();
+
+    startTerminal.mockResolvedValue({ ok: true, data: { ...SESSION, hubSessionId: 'hub-2' } });
+    (screen.getByRole('button', { name: '重新启动' }) as HTMLButtonElement).click();
+    await settle();
+
+    expect(startTerminal).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/session hub-2/)).toBeInTheDocument();
+  });
+});

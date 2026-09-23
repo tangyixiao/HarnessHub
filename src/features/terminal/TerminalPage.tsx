@@ -1,7 +1,7 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
@@ -27,10 +27,24 @@ const TERMINATION_LABEL: Record<TerminationReason, string> = {
   lost: '失去联系',
 };
 
+/**
+ * Terminal 页状态机。
+ *
+ * `loading`（正在探测本机有哪些 Harness）
+ *   → `idle`（**多个**已安装：等用户显式启动，mount 不 spawn）
+ *   → `starting`（启动中：禁止再次启动，防双击）
+ *   → `running`（有 session）
+ *   → `ended`（终态，可重新启动 → 新的 session id）
+ *
+ * 没有 `running`（也就是 ≥2 installed 的场景）时 mount **不**自动启动：
+ * 否则「第一个 installation」会变成隐式的默认目标，用户根本没机会选别的。
+ */
 type Phase =
-  | { kind: 'connecting' }
+  | { kind: 'loading' }
+  | { kind: 'idle' }
+  | { kind: 'starting' }
   | { kind: 'running'; session: SessionRecord }
-  | { kind: 'finished'; status: string }
+  | { kind: 'ended'; status: string }
   | { kind: 'unavailable' }
   | { kind: 'error'; message: string };
 
@@ -39,17 +53,29 @@ type Phase =
  *
  * **ready-before-spawn**（ADR-0009）：严格按
  * `new Terminal → open → Channel 回调 → onData/onBinary → resize → start_terminal`
- * 的顺序初始化。顺序错了，Codex 首屏的 DSR 就会早于 responder 就绪而永久卡住。
+ * 的顺序初始化。顺序错了，交互式 TUI 首屏的 DSR 就会早于 responder 就绪而永久卡住。
+ *
+ * **三个 id 各司其职，绝不混用**：
+ * - `selectedInstallationId`：下一次准备启动谁（用户可选）；
+ * - `activeInstallationId`：当前 session **实际**由谁启动（只读事实）；
+ * - `sessionIdRef`：write / resize / kill 的**唯一**控制句柄。
+ *
+ * 运行中禁止切换目标：切换只影响下一次启动，绝不会把当前会话的控制对象换掉。
  *
  * **卸载 ≠ kill**：组件卸载只释放浏览器侧资源（订阅、xterm、observer）。
- * 正在运行的 Codex 不会被杀 —— 切页面不是结束 Session 的意思。
- * 结束会话只能通过显式的「结束会话」按钮。
  */
 export function TerminalPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  const [phase, setPhase] = useState<Phase>({ kind: 'connecting' });
-  const [harness, setHarness] = useState<HarnessSummary | null>(null);
+  /** 唯一的 spawn 路径（单 Harness 自动启动与多 Harness 手动启动都走它）。 */
+  const startRef = useRef<(installationId: string) => void>(() => {});
+  /** 防止 mount 自动启动被重复触发 / 双击启动产生两个 session。 */
+  const startingRef = useRef(false);
+
+  const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
+  const [installedHarnesses, setInstalledHarnesses] = useState<HarnessSummary[]>([]);
+  const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
+  const [activeInstallationId, setActiveInstallationId] = useState<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -105,7 +131,64 @@ export function TerminalPage() {
       observer.observe(container);
     }
 
-    // ④ 最后才 spawn
+    // ④ 唯一的启动路径
+    const start = (installationId: string) => {
+      if (startingRef.current || sessionIdRef.current !== null) {
+        return; // 已在启动 / 已有会话：忽略，避免双击产生两个 session
+      }
+      startingRef.current = true;
+      setPhase({ kind: 'starting' });
+      setActiveInstallationId(installationId);
+
+      void (async () => {
+        const started = await startTerminal({
+          installationId,
+          cols: terminal.cols,
+          rows: terminal.rows,
+          onEvent: (event) => {
+            switch (event.kind) {
+              case 'output':
+                // 原始字节直接交给 xterm：它的解码器是跨 chunk 有状态的
+                terminal.write(new Uint8Array(event.data));
+                break;
+              case 'started':
+                break;
+              case 'exited':
+                sessionIdRef.current = null;
+                setPhase({
+                  kind: 'ended',
+                  status: `${TERMINATION_LABEL[event.reason]}${
+                    event.exitCode === null ? '' : ` · 退出码 ${event.exitCode}`
+                  }`,
+                });
+                break;
+              case 'error':
+                terminal.write(`\r\n[Harness Hub] ${event.message}\r\n`);
+                break;
+            }
+          },
+        });
+
+        startingRef.current = false;
+
+        if (!started.ok) {
+          setActiveInstallationId(null);
+          setPhase(
+            started.error === NOT_IN_TAURI
+              ? { kind: 'unavailable' }
+              : // 启动失败：保留选择，用户可以重试
+                { kind: 'error', message: started.error },
+          );
+          return;
+        }
+
+        sessionIdRef.current = started.data.hubSessionId;
+        setPhase({ kind: 'running', session: started.data });
+      })();
+    };
+    startRef.current = start;
+
+    // ⑤ 最后才决定要不要 spawn
     let cancelled = false;
     void (async () => {
       const listed = await listHarnesses();
@@ -120,53 +203,29 @@ export function TerminalPage() {
         return;
       }
 
-      const target = listed.data.find((item) => item.installed && item.installationId !== null);
-      if (!target || target.installationId === null) {
+      // **不得按 Harness 名字分支**：只认 DTO（installed / installationId / displayName）。
+      const choices = listed.data.filter((item) => item.installed && item.installationId !== null);
+      setInstalledHarnesses(choices);
+
+      if (choices.length === 0) {
         setPhase({ kind: 'error', message: '没有可用于启动终端的已安装 Harness' });
         return;
       }
-      setHarness(target);
 
-      const started = await startTerminal({
-        installationId: target.installationId,
-        cols: terminal.cols,
-        rows: terminal.rows,
-        onEvent: (event) => {
-          switch (event.kind) {
-            case 'output':
-              // 原始字节直接交给 xterm：它的解码器是跨 chunk 有状态的
-              terminal.write(new Uint8Array(event.data));
-              break;
-            case 'started':
-              break;
-            case 'exited':
-              setPhase({
-                kind: 'finished',
-                status: `${TERMINATION_LABEL[event.reason]}${
-                  event.exitCode === null ? '' : ` · 退出码 ${event.exitCode}`
-                }`,
-              });
-              break;
-            case 'error':
-              terminal.write(`\r\n[Harness Hub] ${event.message}\r\n`);
-              break;
-          }
-        },
-      });
-
-      if (cancelled) return;
-
-      if (!started.ok) {
-        setPhase(
-          started.error === NOT_IN_TAURI
-            ? { kind: 'unavailable' }
-            : { kind: 'error', message: started.error },
-        );
+      const first = choices[0];
+      if (!first || first.installationId === null) {
+        setPhase({ kind: 'error', message: '没有可用于启动终端的已安装 Harness' });
         return;
       }
+      setSelectedInstallationId(first.installationId);
 
-      sessionIdRef.current = started.data.hubSessionId;
-      setPhase({ kind: 'running', session: started.data });
+      if (choices.length === 1) {
+        // 唯一选择：自动启动**恰好一次**
+        start(first.installationId);
+      } else {
+        // 多个选择：交给用户，mount 不 spawn
+        setPhase({ kind: 'idle' });
+      }
     })();
 
     return () => {
@@ -179,14 +238,19 @@ export function TerminalPage() {
     };
   }, []);
 
-  const kill = async () => {
+  const kill = useCallback(async () => {
     const sessionId = sessionIdRef.current;
     if (!sessionId) return;
     const result = await killTerminal(sessionId);
     if (!result.ok) {
       setPhase({ kind: 'error', message: result.error });
     }
-  };
+  }, []);
+
+  const activeHarness = installedHarnesses.find(
+    (item) => item.installationId === activeInstallationId,
+  );
+  const busy = phase.kind === 'starting' || phase.kind === 'running';
 
   return (
     <div>
@@ -202,9 +266,65 @@ export function TerminalPage() {
         }
       />
 
-      {phase.kind === 'connecting' ? (
+      {installedHarnesses.length > 1 ? (
+        <label className="mb-2 flex items-center gap-2 text-[11px] text-content-muted">
+          启动的 Harness
+          <select
+            aria-label="启动的 Harness"
+            className="rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
+            value={selectedInstallationId ?? ''}
+            disabled={busy}
+            onChange={(event) => setSelectedInstallationId(event.target.value)}
+          >
+            {installedHarnesses.map((item) => (
+              <option key={item.installationId} value={item.installationId ?? ''}>
+                {item.displayName}
+              </option>
+            ))}
+          </select>
+          {phase.kind === 'running' ? '（会话运行中，切换只影响下一次启动）' : ''}
+        </label>
+      ) : null}
+
+      {phase.kind === 'idle' || (phase.kind === 'error' && installedHarnesses.length > 0) ? (
+        <div className="mb-2 flex items-center gap-2">
+          <Button
+            variant="primary"
+            onClick={() => {
+              if (selectedInstallationId !== null) startRef.current(selectedInstallationId);
+            }}
+          >
+            启动
+          </Button>
+          <span className="text-[11px] text-content-muted">
+            本机有多个已安装 Harness，先选择再启动（不会自动替你选）。
+          </span>
+        </div>
+      ) : null}
+
+      {phase.kind === 'ended' ? (
+        <div className="mb-2 flex items-center gap-2">
+          <Button
+            variant="primary"
+            onClick={() => {
+              if (selectedInstallationId !== null) startRef.current(selectedInstallationId);
+            }}
+          >
+            重新启动
+          </Button>
+          <span className="text-[11px] text-content-muted">已结束 · {phase.status}</span>
+        </div>
+      ) : null}
+
+      {phase.kind === 'loading' ? (
         <p className="pb-2 text-[11px] text-content-muted">
-          正在启动终端（准备 xterm、挂好输入与 resize，然后才 spawn Harness）…
+          正在探测本机已安装的 Harness（准备 xterm、挂好输入与 resize，然后才 spawn）…
+        </p>
+      ) : null}
+
+      {phase.kind === 'starting' ? (
+        <p className="pb-2 text-[11px] text-content-muted">
+          正在启动 {activeHarness?.displayName ?? ''}…
         </p>
       ) : null}
 
@@ -224,14 +344,10 @@ export function TerminalPage() {
         </Card>
       ) : null}
 
-      {phase.kind === 'running' || phase.kind === 'finished' ? (
+      {phase.kind === 'running' ? (
         <p className="pb-2 text-[11px] text-content-muted">
-          {phase.kind === 'running'
-            ? `运行中 · ${harness?.displayName ?? ''} · session ${phase.session.hubSessionId}`
-            : `已结束 · ${phase.status}`}
-          {phase.kind === 'running' && phase.session.pid !== null
-            ? ` · pid ${phase.session.pid}`
-            : ''}
+          {`运行中 · ${activeHarness?.displayName ?? ''} · session ${phase.session.hubSessionId}`}
+          {phase.session.pid !== null ? ` · pid ${phase.session.pid}` : ''}
         </p>
       ) : null}
 
