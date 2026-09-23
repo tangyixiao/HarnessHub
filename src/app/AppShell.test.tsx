@@ -43,7 +43,6 @@ describe('AppShell', () => {
       ['/harnesses', 'Harnesses'],
       ['/projects', 'Projects'],
       ['/sessions', 'Sessions'],
-      ['/terminal', 'Terminal'],
       ['/activity', 'Activity'],
       ['/settings', 'Settings'],
       ['/', 'Dashboard'],
@@ -54,6 +53,16 @@ describe('AppShell', () => {
       expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
       unmount();
     }
+  });
+
+  /**
+   * Terminal 是懒加载路由：首屏只出 fallback，chunk 到达后才渲染真实页面。
+   * 这条测试同时锁住「切分生效」与「行为不变」两件事。
+   */
+  it('Terminal 路由懒加载：chunk 到达后渲染真实页面', async () => {
+    renderAt('/terminal');
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Terminal' })).toBeInTheDocument();
   });
 
   it('未接入的功能页面如实说明尚未接入，不展示假数据', () => {
