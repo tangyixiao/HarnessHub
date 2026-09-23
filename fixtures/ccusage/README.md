@@ -105,9 +105,17 @@ PATH 上没有 ccusage 这件事本身就是 `unavailable` 分支的真实素材
 - 一个 session 行可以有多个 `modelBreakdowns`（实测 20 行如此）。
 - 所有 token 字段都是整数；`modelBreakdowns[]` 的键是
   `cacheCreationTokens / cacheReadTokens / cost / inputTokens / modelName / outputTokens`
-  （**没有** `totalTokens`）。
-- 算术恒等式实测成立：`inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens == totalTokens`，
-  且 `Σ(modelBreakdowns) == row aggregate`（222/222 行）。
+  （**没有** `totalTokens`；另有只在缺价格时出现的 `missingPricing`）。
+- 算术恒等式（**修正过一次**：第一版写「Σbreakdown == 行汇总，222/222 成立」，
+  那是没测全就下的结论，实测后不成立）：
+  - 四类 token 的 `Σ(modelBreakdowns) == 行值`：**222/222 行成立**；
+  - `四类之和 == totalTokens`：**221/222 行成立**，唯一例外是 opencode 的
+    `ses_f40ea5cdbffeienAXgo4uTUBsL`（行 `totalTokens` 204906，四类之和 203996，多 **910**）。
+    该行的模型明细之间是一致的，矛盾只在上游的行汇总里 —— 我们以四类为准落库，
+    把 910 记进 `usage_imports.unattributed_tokens`（ADR-0011 决策十一）。
+- 金额舍入残差：每个事件独立舍入到微单位再求和，与把 `totals.totalCost` 整体舍入相比，
+  实测在 235 个计价 breakdown 上相差 **+4 微单位**（0.000004 USD）。上限是 ⌈n/2⌉ 微单位，
+  可证明；对账时必须打印具体数值，不允许含糊过去。
 
 ## 第二轮取证：`--sections` 单次调用（20.0.24 支持）
 
@@ -181,7 +189,7 @@ ccusage session --nope --json   →  exit 2,  stdout/stderr 有 "Unknown session
 2. 主导入源 = `session`，写入粒度 = `session.modelBreakdowns`（一行一个模型）；
    session aggregate 只做校验，`daily` 只做对账 —— 避免双计数。
 3. `stable_source_key` = `sha256("ccusage\0v1\0" + report_kind + "\0" + agent + "\0" + period + "\0" + modelName)`，
-   versioned；真实 222 行 × 全部 breakdown 上无碰撞。
+   versioned；真实 222 行 × 243 个 breakdown 上 **243/243 个键互不相同（0 碰撞）**。
 4. `token_source` / `cost_source` / `pricing_mode` 分离；ccusage 的 token **不得**标成 `provider_reported`。
 5. `currency = 'USD'` + `currency_source = 'ccusage_contract'`；
    JSON 缺 currency 字段 ≠ 币种未知。

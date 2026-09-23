@@ -35,8 +35,13 @@ session row (agent=codex, period=2026/08/20/rollout-…)
 └─ modelBreakdowns[1] modelName=gpt-5.6-terra → UsageEvent #2
 ```
 
-session 行的 aggregate（`inputTokens` / `totalTokens` / `totalCost`）**不导入**，只用于
-校验：`Σ breakdown == row aggregate`（222/222 行实测成立，多模型行包含在内）。
+session 行的 aggregate（`inputTokens` / `totalTokens` / `totalCost`）**不导入**，只用于校验。
+校验分两级，依据是**实测**而不是直觉（真实 222 行 / 243 个 breakdown）：
+
+```text
+四类 token：Σ(breakdown) == 行值     222/222 行成立 → 不成立直接报错（说明我们读错了 ccusage）
+行 totalTokens == 四类之和           221/222 行成立 → 唯一例外见决策十一
+```
 
 `daily` 分段**永不导入**：它和 `session` 是同一批数据的不同聚合口径，两者都导入必然双计数。
 `daily` 只作为 reconciliation 的第二个视角。
@@ -53,8 +58,9 @@ stable_source_key = sha256( "ccusage\0v1\0" + report_kind + "\0" + agent + "\0" 
 与 `report_kind`。以后 ccusage 增加新的身份维度时**升 version 并新增一列语义**，
 不允许悄悄改算法（那会让历史行的 key 全部漂移）。
 
-实测：真实 222 条 session × 其全部 modelBreakdowns 上**无碰撞**；
-`codex/gpt-5.6-sol` 与 `codex/gpt-5.6-terra` 必须落在不同的 key 上。
+实测：真实 222 条 session × 243 个 modelBreakdown 上 **243/243 个键互不相同，0 碰撞**
+（该断言已固化成真机 E2E 的一部分，可重复验证）；
+`codex/gpt-5.6-sol` 与 `codex/gpt-5.6-terra` 必须落在不同的键上。
 
 ## 决策四：`token_source` 与 `cost_source` / `pricing_mode` 分离
 
@@ -131,13 +137,17 @@ daily  != session                  差值 100% 落在 agent=claude 一个 agent 
                                    codex / opencode / zcode 逐 token 相等
                                    claude: daily 1,709,428 vs session 461,899（差 1,247,529 totalTokens）
 totals.unpricedModels = ["GLM-5.3-Flash"]  → cost 总数是下界，不是全量
+行 totalTokens vs 四类之和          221/222 相等；唯一例外是 opencode 的 +910（决策十一）
+金额：独立舍入 + 求和 vs 整体舍入   实测 235 个计价 breakdown 上相差 +4 微单位（0.000004 USD）
 ```
 
 所以 Harness Hub 的对账断言是**可证伪的**而不是「差不多」：
 
-1. `Σ(本次导入的 usage_events) == totals`（同快照、同口径，逐项相等）；
-2. 时间戳无法推导的事件必须**被单独计数并解释**，不允许混进差值里蒙过去；
-3. 与 `daily` 的差异必须**归因到具体 agent**（当前版本：仅 claude），
+1. `Σ(事件 total) + 明示差额 == totals.totalTokens`（精确，不是近似）；
+2. `Σ(事件 cost) - totals.cost` 的残差必须 ≤ ⌈计价 breakdown 数 / 2⌉ 微单位，
+   并且**具体数值要打印出来**（每个事件独立舍入，量级上限是可证明的）；
+3. 时间戳无法推导的事件必须**被单独计数并解释**，不允许混进差值里蒙过去；
+4. 与 `daily` 的差异必须**归因到具体 agent**（当前版本：仅 claude），
    不允许出现「未知来源的差异」。
 
 ## 决策八：绝不伪造 hub session
@@ -172,6 +182,38 @@ ccusage 同时存在 focused 文档里展示的 `sessionId` 语义，因此 adap
 
 不允许出现「`sessionId` 被当空气、数字静默变少」这种失败方式。
 
+## 决策十一：上游自己矛盾时，差额被**计数**而不是被摊派
+
+实测（222 行里唯一的一处）：opencode 的 `ses_f40ea5cdbffeienAXgo4uTUBsL` 行
+`totalTokens = 204906`，而它自己的四类之和是 `203996` —— 多出 **910**，
+并且这两者的差**只**出现在行汇总上，模型明细之间是一致的。
+
+处理规则：
+
+```text
+四类 token 与行不一致        → 报错（说明我们读错了）
+行 totalTokens > 四类之和    → 以四类为准落库，差额记进 usage_imports.unattributed_tokens
+行 totalTokens < 四类之和    → 报错（明细不可能比汇总多）
+```
+
+差额**绝不分摊给模型**（分摊就是编造），也**绝不静默丢弃**（那样对账会出现无法解释的差额）。
+于是恒等式精确成立：`Σ(事件 total) + unattributed_tokens == 来源 totals.totalTokens`。
+
+`unattributed_tokens` 由迁移 0007 加进 `usage_imports`（ADD COLUMN，老行补 0）。
+
+## 决策十二：无法按模型拆分的信息不落库，也不分摊
+
+`metadata.reasoningOutputTokens` 是 **session 级**、ccusage 不提供按模型拆分
+（实测 243 个 breakdown 里没有任何逐模型推理 token 字段）。因此：
+
+```text
+行内只有一个模型  → reasoning_tokens = metadata.reasoningOutputTokens
+行内有多个模型    → reasoning_tokens = NULL（没有依据分摊，宁可缺也不要编）
+```
+
+同理，`raw_payload` 列先留着但**不写**：需要的字段都已显式建模，
+等到真有来源带我们没建模的字段时再写原文，而不是把整份报告复制进每一行。
+
 ## Alternatives
 
 - **直接导入 session aggregate**：少一层循环，但一个 session 用多个模型时就丢失了模型维度，
@@ -191,13 +233,14 @@ ccusage 同时存在 focused 文档里展示的 `sessionId` 语义，因此 adap
 - ccusage 不再是「Usage 的唯一真值」而是「一个来源 + 一份可对账的快照」；
   Dashboard（Task 6）只读 Harness Hub SQLite，**不得**在渲染时调用 ccusage。
 - 新增 `serde_json` 的 `raw_value` feature 与 `sha2` / `hex` 直接依赖（均已在依赖图中）。
+- `usage_imports` 多了 `unattributed_tokens`（迁移 0007），用于精确对账。
 
 ## Evidence
 
 - `fixtures/ccusage/README.md`：两轮真实取证（单模式 + `--sections` 单次调用）的原始结构。
 - `src-tauri/tests/real_ccusage_import.rs`：真实机器上跑 `--sections` 单次调用 → 导入 →
-  与同快照 `totals` 逐项对账 → 打印每一条差异的归因。
-- 迁移 0006 的裸 `Connection` 迁移测试；`usage::key` 的碰撞测试。
+  与同快照 `totals` 逐项对账 → 打印每一条差异的归因（含 910 与金额残差）。
+- 迁移 0006 / 0007 的裸 `Connection` 迁移测试；`usage::key` 的碰撞测试。
 
 ## Revisit Conditions
 

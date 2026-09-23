@@ -3,13 +3,19 @@
     {
       "agent": "codex",
       "period": "2026/09/01/rollout-2026-09-01T00-00-00-00000000-0000-4000-8000-000000000009",
-      "inputTokens": 1,
-      "outputTokens": 1,
+      "inputTokens": 5,
+      "outputTokens": 5,
       "cacheCreationTokens": 0,
       "cacheReadTokens": 0,
-      "totalTokens": 2,
-      "totalCost": 0.03258976559999999,
-      "modelsUsed": ["gpt-5.6-sol"],
+      "totalTokens": 10,
+      "totalCost": 21.153208765600006,
+      "modelsUsed": [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.6-nova",
+        "gpt-5.6-iris"
+      ],
       "metadata": {
         "lastActivity": "2026-09-01T00:00:00.000Z",
         "reasoningOutputTokens": 1
@@ -65,6 +71,7 @@
     "inputTokens": 5,
     "outputTokens": 5,
     "totalTokens": 10,
-    "totalCost": 21.1532074756
+    "totalCost": 21.153208765600006,
+    "unpricedModels": ["gpt-5.6-iris"]
   }
 }

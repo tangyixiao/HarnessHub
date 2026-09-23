@@ -61,6 +61,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0006_usage_imports_and_events.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 7,
+        name: "0007_usage_import_unattributed_tokens",
+        sql: include_str!("migrations/0007_usage_import_unattributed_tokens.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -305,6 +311,46 @@ mod tests {
 
         assert_eq!(enabled, 1, "迁移结束后外键必须重新打开");
         assert_eq!(violations, 0, "迁移结束后不得有外键违规");
+    }
+
+    /// 0007：`usage_imports` 必须能记录「上游汇总里无法归因到任何模型的 token」。
+    ///
+    /// 实测依据（ADR-0011 决策十一）：222 行 session 里有 1 行（opencode）行 `totalTokens`
+    /// 比它自己的模型明细多 910。这部分不能塞给任何模型，但必须被计数。
+    #[test]
+    fn migration_0007_adds_the_unattributed_token_counter_with_a_zero_backfill() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 6).expect("建到 v6");
+        conn.execute(
+            "INSERT INTO usage_imports (id, source, status, started_at)
+             VALUES ('v6-import', 'ccusage', 'succeeded', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("v6 的导入行");
+
+        let applied = apply_until(&mut conn, 7).expect("升到 v7");
+        assert_eq!(
+            applied,
+            vec!["0007_usage_import_unattributed_tokens".to_string()]
+        );
+
+        let backfilled: i64 = conn
+            .query_row(
+                "SELECT unattributed_tokens FROM usage_imports WHERE id = 'v6-import'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("老行必须被补成 0 而不是 NULL");
+        assert_eq!(backfilled, 0);
+
+        let negative = conn.execute(
+            "UPDATE usage_imports SET unattributed_tokens = -1 WHERE id = 'v6-import'",
+            [],
+        );
+        assert!(negative.is_err(), "负数必须被 CHECK 拒绝");
     }
 
     /// 迁移 0006 之后 `usage_events` 的合法插入语句。
