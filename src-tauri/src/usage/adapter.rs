@@ -11,7 +11,7 @@
 //! 只读路径不起进程是刻意的：`npx` 一次要一两秒，放在会被反复调用的只读接口里
 //! 既慢又会把「读」变成「干活」。
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::clock;
 use crate::error::{Error, Result};
@@ -180,6 +180,34 @@ impl UsageSourceAdapter for CcusageAdapter<'_> {
             &started_at,
         ))
     }
+}
+
+/// 把「上一次导入实际看到的版本」合并进只读视图。
+///
+/// 为什么需要：`detect()` 不起进程（那是刻意的），所以它不知道版本；
+/// 但 UI 又不能对用户说「版本未知」——数据库里明明记着上次导入用的是哪个版本。
+/// 这里只读 `usage_imports`，不触发任何外部调用。
+pub fn merge_known_version(
+    connection: &Connection,
+    mut source: UsageSource,
+) -> Result<UsageSource> {
+    if source.version.is_some() {
+        return Ok(source);
+    }
+
+    let known: Option<String> = connection
+        .query_row(
+            "SELECT source_version FROM usage_imports
+             WHERE source = ?1 AND source_version IS NOT NULL
+             ORDER BY started_at DESC, rowid DESC
+             LIMIT 1",
+            rusqlite::params![source.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    source.version = known;
+    Ok(source)
 }
 
 impl CcusageAdapter<'_> {
@@ -427,5 +455,39 @@ mod tests {
             Vec::<String>::new(),
             "没有 runner 就不该起进程"
         );
+    }
+
+    /// 只读视图要能说出「上次导入看到的版本」，但不能为此起进程。
+    #[test]
+    fn known_version_comes_from_the_last_import_that_recorded_one() {
+        let db = empty_db();
+        let probe = FakeHostProbe::with(&["npx"]);
+        let executor = executor_with_report(0, SESSION_FIXTURE, "");
+        let adapter = adapter(&probe, &executor);
+        adapter.import(db.connection()).expect("导入");
+        let calls_after_import = executor.calls().len();
+
+        let source = merge_known_version(db.connection(), adapter.detect()).expect("合并");
+
+        assert_eq!(source.version.as_deref(), Some("ccusage 20.0.24"));
+        assert_eq!(
+            executor.calls().len(),
+            calls_after_import,
+            "合并版本是纯读操作，不得再起进程"
+        );
+    }
+
+    #[test]
+    fn known_version_stays_none_without_a_successful_import() {
+        let db = empty_db();
+        let probe = FakeHostProbe::with(&["npx"]);
+        // 只有失败导入（source_version 为 NULL）时不得硬编一个版本出来。
+        let executor = executor_with_report(2, "", "Unknown session option\n");
+        let adapter = adapter(&probe, &executor);
+        adapter.import(db.connection()).expect_err("失败");
+
+        let source = merge_known_version(db.connection(), adapter.detect()).expect("合并");
+
+        assert_eq!(source.version, None);
     }
 }

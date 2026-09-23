@@ -13,9 +13,13 @@ use crate::clock;
 use crate::db::DbHealth;
 use crate::error::{Error, Result};
 use crate::harness::inventory::{installation_id, reconcile_harnesses, ReconcileReport};
+use crate::harness::probe::SystemHostProbe;
 use crate::harness::registry::HarnessSummary;
 use crate::session::{service::SessionService, SessionRecord, TerminationReason};
 use crate::terminal::{Emitter, PtyEvent};
+use crate::usage::adapter::{merge_known_version, CcusageAdapter, UsageSourceAdapter};
+use crate::usage::runner::SystemCommandRunner;
+use crate::usage::UsageSource;
 use crate::{runtime, AppState};
 
 /// 前端 Dashboard 顶部展示的应用信息。
@@ -81,6 +85,54 @@ pub fn refresh_harnesses(state: State<'_, AppState>) -> Result<ReconcileReport> 
 
 /// Session 列表的默认条数上限。
 pub const DEFAULT_SESSION_LIMIT: u32 = 50;
+
+/// 一次 Usage 刷新的结果：审计行 + 同快照对账。
+///
+/// 跨 IPC，因此有独立的序列化契约测试。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRefreshReport {
+    pub import: crate::usage::UsageImport,
+    pub reconciliation: crate::usage::importer::Reconciliation,
+}
+
+/// Usage 数据源的只读视图。
+///
+/// **本命令是纯读**：`detect()` 只看 PATH、`merge_known_version()` 只读 SQLite，
+/// 全程**不起任何外部进程**（`npx` 一次要一两秒，放进会被反复调用的只读接口
+/// 既慢又会把「读」变成「干活」）。
+///
+/// `version` 的语义因此是「上一次导入实际看到的版本」，而不是「此刻探测到的版本」；
+/// 要真正探测版本请调用 [`refresh_usage`]（它必然要起进程）。
+#[tauri::command]
+pub fn get_usage_sources(state: State<'_, AppState>) -> Result<Vec<UsageSource>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let probe = SystemHostProbe::new();
+    let executor = SystemCommandRunner::new();
+    let adapter = CcusageAdapter::new(&probe, &executor, None);
+
+    let source = merge_known_version(database.connection(), adapter.detect())?;
+    Ok(vec![source])
+}
+
+/// 显式刷新 Usage：`ccusage` → 归一化 → 幂等落库。
+///
+/// 语义上是「允许修改状态」的操作（会起外部进程、会写 `usage_imports` /
+/// `usage_events`），因此前端必须由用户显式触发，不得在渲染时自动调用。
+/// 失败时数据库里会留下一条 `status = 'failed'` 的审计行，错误同时返回给调用方。
+#[tauri::command]
+pub fn refresh_usage(state: State<'_, AppState>) -> Result<UsageRefreshReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let probe = SystemHostProbe::new();
+    let executor = SystemCommandRunner::new();
+    let adapter = CcusageAdapter::new(&probe, &executor, None);
+
+    let outcome = adapter.import(database.connection())?;
+    Ok(UsageRefreshReport {
+        import: outcome.import,
+        reconciliation: outcome.reconciliation,
+    })
+}
 
 /// 单次查询允许的最大条数，避免前端传入超大 limit 拖垮查询。
 pub const MAX_SESSION_LIMIT: u32 = 500;
@@ -212,4 +264,59 @@ pub fn resize_terminal(
 #[tauri::command]
 pub fn kill_terminal(state: State<'_, AppState>, session_id: String) -> Result<()> {
     state.terminal.kill(&session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::importer::Reconciliation;
+    use crate::usage::{ImportStatus, RunnerKind, UsageImport};
+
+    /// 跨 IPC 契约测试：`refresh_usage` 的返回形状。
+    ///
+    /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageRefreshReport` 依赖这些键，
+    /// 而且它必须能一眼看到「对账是否成立」与「差多少微单位」。
+    #[test]
+    fn usage_refresh_report_serializes_with_camel_case_keys() {
+        let report = UsageRefreshReport {
+            import: UsageImport {
+                id: "import-1".to_string(),
+                source: "ccusage".to_string(),
+                source_version: Some("ccusage 20.0.24".to_string()),
+                runner: Some(RunnerKind::ManagedNpx),
+                report_kind: Some("session".to_string()),
+                status: ImportStatus::Succeeded,
+                started_at: "2026-09-22T10:00:00Z".to_string(),
+                completed_at: Some("2026-09-22T10:00:01Z".to_string()),
+                records_seen: 7,
+                records_inserted: 7,
+                records_updated: 0,
+                records_skipped: 0,
+                records_timestampless: 1,
+                error: None,
+            },
+            reconciliation: Reconciliation {
+                events_total_tokens: 600,
+                report_total_tokens: Some(1_510),
+                row_total_residual: 910,
+                cost_microunits_delta: Some(4),
+                unpriced_events: 1,
+                timestampless: 1,
+                tokens_identity_holds: Some(true),
+            },
+        };
+
+        let json = serde_json::to_value(&report).expect("序列化");
+
+        assert_eq!(json["import"]["recordsInserted"], 7);
+        assert_eq!(json["import"]["recordsTimestampless"], 1);
+        assert_eq!(json["import"]["sourceVersion"], "ccusage 20.0.24");
+        assert_eq!(json["import"]["runner"], "managed-npx");
+        assert_eq!(json["reconciliation"]["eventsTotalTokens"], 600);
+        assert_eq!(json["reconciliation"]["reportTotalTokens"], 1_510);
+        assert_eq!(json["reconciliation"]["rowTotalResidual"], 910);
+        assert_eq!(json["reconciliation"]["costMicrounitsDelta"], 4);
+        assert_eq!(json["reconciliation"]["tokensIdentityHolds"], true);
+        assert!(json.get("import").is_some() && json.get("reconciliation").is_some());
+    }
 }

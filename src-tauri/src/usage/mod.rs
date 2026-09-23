@@ -228,3 +228,93 @@ impl EventTotals {
         totals
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 跨 IPC 契约测试（AGENTS.md：任何跨 Tauri IPC 的 DTO 都必须锁键名）。
+    ///
+    /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageSource` 依赖这些键。
+    #[test]
+    fn usage_source_serializes_with_camel_case_keys() {
+        let source = UsageSource {
+            id: "ccusage".to_string(),
+            display_name: "ccusage".to_string(),
+            version: Some("ccusage 20.0.24".to_string()),
+            status: SourceStatus::Unavailable,
+            capabilities: UsageCapabilities {
+                detect: true,
+                import: true,
+                watch: false,
+                reconcile: true,
+            },
+            runner: Some(RunnerKind::ManagedNpx),
+            reason: Some("没装".to_string()),
+        };
+
+        let json = serde_json::to_value(&source).expect("序列化");
+
+        assert_eq!(json["id"], "ccusage");
+        assert_eq!(json["displayName"], "ccusage");
+        assert_eq!(json["version"], "ccusage 20.0.24");
+        assert_eq!(json["status"], "unavailable");
+        assert_eq!(json["runner"], "managed-npx");
+        assert_eq!(json["reason"], "没装");
+        assert_eq!(json["capabilities"]["detect"], true);
+        assert_eq!(json["capabilities"]["reconcile"], true);
+        assert_eq!(json["capabilities"]["watch"], false);
+        assert!(json.get("display_name").is_none(), "不得两套契约并存");
+        assert!(json.get("runnerKind").is_none());
+    }
+
+    #[test]
+    fn usage_import_serializes_with_camel_case_keys() {
+        let import = UsageImport {
+            id: "import-1".to_string(),
+            source: "ccusage".to_string(),
+            source_version: Some("ccusage 20.0.24".to_string()),
+            runner: Some(RunnerKind::Path),
+            report_kind: Some("session".to_string()),
+            status: ImportStatus::Succeeded,
+            started_at: "2026-09-22T10:00:00Z".to_string(),
+            completed_at: Some("2026-09-22T10:00:01Z".to_string()),
+            records_seen: 7,
+            records_inserted: 7,
+            records_updated: 0,
+            records_skipped: 0,
+            records_timestampless: 1,
+            error: None,
+        };
+
+        let json = serde_json::to_value(&import).expect("序列化");
+
+        assert_eq!(json["id"], "import-1");
+        assert_eq!(json["sourceVersion"], "ccusage 20.0.24");
+        assert_eq!(json["runner"], "path");
+        assert_eq!(json["reportKind"], "session");
+        assert_eq!(json["status"], "succeeded");
+        assert_eq!(json["startedAt"], "2026-09-22T10:00:00Z");
+        assert_eq!(json["completedAt"], "2026-09-22T10:00:01Z");
+        assert_eq!(json["recordsSeen"], 7);
+        assert_eq!(json["recordsInserted"], 7);
+        assert_eq!(json["recordsUpdated"], 0);
+        assert_eq!(json["recordsSkipped"], 0);
+        assert_eq!(json["recordsTimestampless"], 1);
+        assert_eq!(json["error"], serde_json::Value::Null);
+        assert!(json.get("records_seen").is_none(), "不得两套契约并存");
+    }
+
+    /// runner 的字符串是**落库值**，不能只改 JSON 表示。
+    #[test]
+    fn runner_kind_round_trips_through_its_stored_string() {
+        for kind in [
+            RunnerKind::Path,
+            RunnerKind::Configured,
+            RunnerKind::ManagedNpx,
+        ] {
+            assert_eq!(RunnerKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(RunnerKind::parse("latest"), None);
+    }
+}

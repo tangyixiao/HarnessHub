@@ -462,3 +462,239 @@ export async function refreshHarnesses(): Promise<IpcResult<ReconcileReport>> {
     },
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * Usage（ccusage）
+ * ------------------------------------------------------------------ */
+
+/** 与 Rust `SourceStatus` 同形。 */
+export type UsageSourceStatus = 'available' | 'unavailable';
+
+/**
+ * 数据实际是怎么拿到的。**落库值**，不是展示文案：
+ * `managed-npx` 表示用的是托管 runner（固定 `ccusage@20.0.24`，永远不是 `latest`）。
+ */
+export type UsageRunnerKind = 'path' | 'configured' | 'managed-npx';
+
+/** 与 Rust `UsageCapabilities` 同形：能力 = 代码实现了，未实现必须是 false。 */
+export type UsageCapabilities = {
+  detect: boolean;
+  import: boolean;
+  watch: boolean;
+  reconcile: boolean;
+};
+
+/**
+ * 与 Rust `UsageSource` 同形。
+ *
+ * `version` 是**上一次导入实际看到的版本**（只读路径不起进程去探测），
+ * 因此它可能为 `null`（从未成功导入过）；`reason` 在 `unavailable` 时给出人话原因。
+ */
+export type UsageSource = {
+  id: string;
+  displayName: string;
+  version: string | null;
+  status: UsageSourceStatus;
+  capabilities: UsageCapabilities;
+  runner: UsageRunnerKind | null;
+  reason: string | null;
+};
+
+/** 与 Rust `ImportStatus` 同形。 */
+export type UsageImportStatus = 'running' | 'succeeded' | 'failed';
+
+/** 与 Rust `UsageImport` 同形。 */
+export type UsageImport = {
+  id: string;
+  source: string;
+  sourceVersion: string | null;
+  runner: UsageRunnerKind | null;
+  reportKind: string | null;
+  status: UsageImportStatus;
+  startedAt: string;
+  completedAt: string | null;
+  recordsSeen: number;
+  recordsInserted: number;
+  recordsUpdated: number;
+  recordsSkipped: number;
+  recordsTimestampless: number;
+  error: string | null;
+};
+
+/**
+ * 与 Rust `Reconciliation` 同形（同快照对账）。
+ *
+ * `tokensIdentityHolds` 为 `null` 表示**无法对账**（来源没给 totals），
+ * 不是「对上了」—— UI 必须区分这三态：true / false / null。
+ * `costMicrounitsDelta` 是每个事件独立舍入带来的残差，必须如实显示而不是抹掉。
+ */
+export type UsageReconciliation = {
+  eventsTotalTokens: number;
+  reportTotalTokens: number | null;
+  rowTotalResidual: number;
+  costMicrounitsDelta: number | null;
+  unpricedEvents: number;
+  timestampless: number;
+  tokensIdentityHolds: boolean | null;
+};
+
+/** 与 Rust `UsageRefreshReport` 同形。 */
+export type UsageRefreshReport = {
+  import: UsageImport;
+  reconciliation: UsageReconciliation;
+};
+
+const USAGE_SOURCE_STATUSES: readonly UsageSourceStatus[] = ['available', 'unavailable'];
+const USAGE_RUNNERS: readonly UsageRunnerKind[] = ['path', 'configured', 'managed-npx'];
+const USAGE_IMPORT_STATUSES: readonly UsageImportStatus[] = ['running', 'succeeded', 'failed'];
+
+function asNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function asBooleanOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `UsageCapabilities`。
+ *
+ * 未知/缺失一律 `false`：能力矩阵宁可低估，也不能声称一个没实现的能力（ADR-0005）。
+ */
+export function normalizeUsageCapabilities(raw: unknown): UsageCapabilities {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    detect: source.detect === true,
+    import: source.import === true,
+    watch: source.watch === true,
+    reconcile: source.reconcile === true,
+  };
+}
+
+export function normalizeUsageSource(raw: unknown): UsageSource | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  const status = USAGE_SOURCE_STATUSES.includes(source.status as UsageSourceStatus)
+    ? (source.status as UsageSourceStatus)
+    : 'unavailable';
+  const runner = USAGE_RUNNERS.includes(source.runner as UsageRunnerKind)
+    ? (source.runner as UsageRunnerKind)
+    : null;
+
+  return {
+    id,
+    displayName:
+      typeof source.displayName === 'string' && source.displayName.length > 0
+        ? source.displayName
+        : id,
+    version: asStringOrNull(source.version),
+    status,
+    capabilities: normalizeUsageCapabilities(source.capabilities),
+    runner,
+    reason: asStringOrNull(source.reason),
+  };
+}
+
+export function normalizeUsageImport(raw: unknown): UsageImport | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    source: typeof source.source === 'string' ? source.source : '',
+    sourceVersion: asStringOrNull(source.sourceVersion),
+    runner: USAGE_RUNNERS.includes(source.runner as UsageRunnerKind)
+      ? (source.runner as UsageRunnerKind)
+      : null,
+    reportKind: asStringOrNull(source.reportKind),
+    status: USAGE_IMPORT_STATUSES.includes(source.status as UsageImportStatus)
+      ? (source.status as UsageImportStatus)
+      : 'failed',
+    startedAt: typeof source.startedAt === 'string' ? source.startedAt : '',
+    completedAt: asStringOrNull(source.completedAt),
+    recordsSeen: asNumber(source.recordsSeen),
+    recordsInserted: asNumber(source.recordsInserted),
+    recordsUpdated: asNumber(source.recordsUpdated),
+    recordsSkipped: asNumber(source.recordsSkipped),
+    recordsTimestampless: asNumber(source.recordsTimestampless),
+    error: asStringOrNull(source.error),
+  };
+}
+
+export function normalizeUsageReconciliation(raw: unknown): UsageReconciliation {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    eventsTotalTokens: asNumber(source.eventsTotalTokens),
+    reportTotalTokens:
+      typeof source.reportTotalTokens === 'number' ? source.reportTotalTokens : null,
+    rowTotalResidual: asNumber(source.rowTotalResidual),
+    costMicrounitsDelta:
+      typeof source.costMicrounitsDelta === 'number' ? source.costMicrounitsDelta : null,
+    unpricedEvents: asNumber(source.unpricedEvents),
+    timestampless: asNumber(source.timestampless),
+    tokensIdentityHolds: asBooleanOrNull(source.tokensIdentityHolds),
+  };
+}
+
+/**
+ * Usage 数据源的**只读**视图。
+ *
+ * 与 `listHarnesses()` 同一条纪律：纯读、不起外部进程。
+ * 需要真正刷新时请显式调用 `refreshUsage()`。
+ */
+export async function getUsageSources(): Promise<IpcResult<UsageSource[]>> {
+  const result = await invokeCommand<unknown>('get_usage_sources');
+  if (!result.ok) {
+    return result;
+  }
+
+  const sources = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeUsageSource)
+        .filter((source): source is UsageSource => source !== null)
+    : [];
+
+  return { ok: true, data: sources };
+}
+
+/**
+ * 显式刷新 Usage：`ccusage` → 归一化 → 幂等落库。
+ *
+ * 语义上是**写操作**（会起外部进程并写 `usage_imports` / `usage_events`），
+ * 因此只允许由用户动作触发，绝不在渲染时调用。
+ */
+export async function refreshUsage(): Promise<IpcResult<UsageRefreshReport>> {
+  const result = await invokeCommand<unknown>('refresh_usage');
+  if (!result.ok) {
+    return result;
+  }
+
+  const source = (result.data ?? {}) as Record<string, unknown>;
+  const importRecord = normalizeUsageImport(source.import);
+  if (importRecord === null) {
+    return { ok: false, error: 'invalid-usage-import-payload' };
+  }
+
+  return {
+    ok: true,
+    data: {
+      import: importRecord,
+      reconciliation: normalizeUsageReconciliation(source.reconciliation),
+    },
+  };
+}

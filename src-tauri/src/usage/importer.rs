@@ -13,6 +13,7 @@
 //! `status = 'failed'` 的审计行，且不留下任何半成品事件。
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::usage::{
@@ -45,7 +46,10 @@ pub struct FailedImportRequest<'a> {
 }
 
 /// 同快照对账结果。**恒等式**，不是近似值。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 跨 IPC：序列化成 camelCase（前端要能显示「差 4 微单位」这种事实）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Reconciliation {
     pub events_total_tokens: u64,
     /// 来源汇总（缺失时为 `None`，表示这次无法对账）。
@@ -890,6 +894,34 @@ mod tests {
             reconciliation.tokens_identity_holds,
             Some(false),
             "600 + 0 != 1510，必须报告对不上"
+        );
+    }
+
+    /// 跨 IPC 契约：对账对象的键名与形状（前端靠它显示差异）。
+    #[test]
+    fn reconciliation_serializes_with_camel_case_keys() {
+        let db = crate::test_support::empty_db();
+        let events = three_events();
+        let outcome = importer(&db)
+            .import(&request(
+                &events,
+                Some(report_totals(1_510, Some(2_996))),
+                910,
+            ))
+            .expect("导入");
+
+        let json = serde_json::to_value(&outcome.reconciliation).expect("序列化");
+
+        assert_eq!(json["eventsTotalTokens"], 600);
+        assert_eq!(json["reportTotalTokens"], 1_510);
+        assert_eq!(json["rowTotalResidual"], 910);
+        assert_eq!(json["costMicrounitsDelta"], 4);
+        assert_eq!(json["unpricedEvents"], 0);
+        assert_eq!(json["timestampless"], 0);
+        assert_eq!(json["tokensIdentityHolds"], true);
+        assert!(
+            json.get("events_total_tokens").is_none(),
+            "不得两套契约并存"
         );
     }
 }

@@ -6,13 +6,19 @@ import {
   finishSession,
   getAppInfo,
   getDbHealth,
+  getUsageSources,
   invokeCommand,
   isTauriRuntime,
   listHarnesses,
   listSessions,
   normalizeHarnessSummary,
   normalizeSessionRecord,
+  normalizeUsageCapabilities,
+  normalizeUsageImport,
+  normalizeUsageReconciliation,
+  normalizeUsageSource,
   refreshHarnesses,
+  refreshUsage,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -427,5 +433,205 @@ describe('refreshHarnesses', () => {
 
   it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
     await expect(refreshHarnesses()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+/*
+ * 这些 payload 的形状与 Rust 侧的序列化契约测试**一一对应**
+ * （`usage::tests::usage_source_serializes_with_camel_case_keys`、
+ * `commands::tests::usage_refresh_report_serializes_with_camel_case_keys`）。
+ * 两边用同一形状，任何一侧悄悄改名都会被其中一侧抓住。
+ */
+describe('normalizeUsageSource', () => {
+  const available = {
+    id: 'ccusage',
+    displayName: 'ccusage',
+    version: 'ccusage 20.0.24',
+    status: 'available',
+    capabilities: { detect: true, import: true, watch: false, reconcile: true },
+    runner: 'managed-npx',
+    reason: null,
+  };
+
+  it('解析 Rust 侧的真实形状', () => {
+    expect(normalizeUsageSource(available)).toEqual(available);
+  });
+
+  it('缺少 id 时返回 null，由调用方丢弃该条目', () => {
+    expect(normalizeUsageSource({ status: 'available' })).toBeNull();
+    expect(normalizeUsageSource(null)).toBeNull();
+  });
+
+  it('未知 status / runner 收敛为安全默认值', () => {
+    const normalized = normalizeUsageSource({
+      id: 'ccusage',
+      status: 'something-new',
+      runner: 'latest',
+    });
+
+    expect(normalized?.status).toBe('unavailable');
+    expect(normalized?.runner).toBeNull();
+  });
+
+  it('缺失能力一律为 false，不声称没实现的能力', () => {
+    expect(normalizeUsageCapabilities({ detect: true })).toEqual({
+      detect: true,
+      import: false,
+      watch: false,
+      reconcile: false,
+    });
+    expect(normalizeUsageCapabilities(undefined)).toEqual({
+      detect: false,
+      import: false,
+      watch: false,
+      reconcile: false,
+    });
+  });
+});
+
+describe('normalizeUsageImport', () => {
+  const succeeded = {
+    id: 'import-1',
+    source: 'ccusage',
+    sourceVersion: 'ccusage 20.0.24',
+    runner: 'managed-npx',
+    reportKind: 'session',
+    status: 'succeeded',
+    startedAt: '2026-09-22T10:00:00Z',
+    completedAt: '2026-09-22T10:00:01Z',
+    recordsSeen: 7,
+    recordsInserted: 7,
+    recordsUpdated: 0,
+    recordsSkipped: 0,
+    recordsTimestampless: 1,
+    error: null,
+  };
+
+  it('解析 Rust 侧的真实形状', () => {
+    expect(normalizeUsageImport(succeeded)).toEqual(succeeded);
+  });
+
+  it('字段缺失时不抛异常，也不编造计数', () => {
+    const normalized = normalizeUsageImport({ id: 'import-2' });
+
+    expect(normalized).not.toBeNull();
+    expect(normalized?.recordsInserted).toBe(0);
+    expect(normalized?.status).toBe('failed');
+    expect(normalized?.sourceVersion).toBeNull();
+  });
+
+  it('保留失败原因（失败必须能被解释）', () => {
+    const normalized = normalizeUsageImport({
+      id: 'import-3',
+      status: 'failed',
+      error: '外部命令失败（退出码 2）：Unknown session option',
+    });
+
+    expect(normalized?.error).toContain('退出码 2');
+  });
+});
+
+describe('normalizeUsageReconciliation', () => {
+  it('保留三态：true / false / null 含义不同', () => {
+    const identity = normalizeUsageReconciliation({
+      eventsTotalTokens: 600,
+      reportTotalTokens: 1510,
+      rowTotalResidual: 910,
+      costMicrounitsDelta: 4,
+      unpricedEvents: 1,
+      timestampless: 0,
+      tokensIdentityHolds: true,
+    });
+    expect(identity.tokensIdentityHolds).toBe(true);
+    expect(identity.rowTotalResidual).toBe(910);
+    expect(identity.costMicrounitsDelta).toBe(4);
+
+    expect(
+      normalizeUsageReconciliation({ reportTotalTokens: null, tokensIdentityHolds: null })
+        .tokensIdentityHolds,
+    ).toBeNull();
+  });
+
+  it('形状异常时全部收敛为安全的空值，而不是抛错', () => {
+    expect(normalizeUsageReconciliation(undefined)).toEqual({
+      eventsTotalTokens: 0,
+      reportTotalTokens: null,
+      rowTotalResidual: 0,
+      costMicrounitsDelta: null,
+      unpricedEvents: 0,
+      timestampless: 0,
+      tokensIdentityHolds: null,
+    });
+  });
+});
+
+describe('getUsageSources', () => {
+  it('使用 get_usage_sources 命令名并过滤掉无法解析的条目', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      { id: 'ccusage', status: 'available', capabilities: { detect: true } },
+      { nonsense: true },
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await getUsageSources();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('get_usage_sources');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.id).toBe('ccusage');
+    }
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(getUsageSources()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+describe('refreshUsage', () => {
+  it('使用 refresh_usage 命令名并返回审计行 + 对账', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({
+      import: {
+        id: 'import-1',
+        source: 'ccusage',
+        status: 'succeeded',
+        recordsSeen: 7,
+        recordsInserted: 7,
+      },
+      reconciliation: { eventsTotalTokens: 600, reportTotalTokens: 1510, rowTotalResidual: 910 },
+    }));
+    stubTauri(invokeSpy);
+
+    const result = await refreshUsage();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('refresh_usage');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.import.recordsInserted).toBe(7);
+      expect(result.data.reconciliation.rowTotalResidual).toBe(910);
+    }
+  });
+
+  it('缺少 import 时返回明确错误，而不是伪造一次成功', async () => {
+    stubTauri(async () => ({ reconciliation: {} }));
+
+    await expect(refreshUsage()).resolves.toEqual({
+      ok: false,
+      error: 'invalid-usage-import-payload',
+    });
+  });
+
+  it('把后端的失败原样传给调用方', async () => {
+    stubTauri(async () => {
+      throw new Error('外部命令失败（退出码 2）');
+    });
+
+    const result = await refreshUsage();
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(refreshUsage()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

@@ -115,10 +115,12 @@ pub fn run() {
             commands::db_health,
             commands::create_session,
             commands::finish_session,
+            commands::get_usage_sources,
             commands::kill_terminal,
             commands::list_harnesses,
             commands::list_sessions,
             commands::refresh_harnesses,
+            commands::refresh_usage,
             commands::resize_terminal,
             commands::start_terminal,
             commands::write_terminal
