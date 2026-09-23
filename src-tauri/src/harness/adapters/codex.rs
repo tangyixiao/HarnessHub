@@ -87,8 +87,10 @@ impl HarnessAdapter for CodexAdapter {
     /// 已在本机端到端验收通过（真机 Codex 跑出 TUI、正常退出 / 用户 kill /
     /// host_shutdown / lost 都落到正确终态）。
     ///
-    /// `terminal` 仍为 `false`：GUI 侧的 resize 观测还差一次验收，
-    /// 翻它之前不能宣称「交互式终端」这一整项能力。
+    /// `terminal` 已翻为 `true`：raw output（xterm 渲染出 Codex TUI）、
+    /// 双向交互（GUI 输入 → Codex 回显并开始工作）、resize（窗口 resize →
+    /// 视口变化 → xterm 重新布局；参数透传由前端单测锁定）、
+    /// kill（user_killed + 真实退出码）、DSR（TUI 能画出来即闭环）全部验收通过。
     /// `usage` / `replay` 等仍未实现。
     ///
     /// 语义提醒（docs/adr/0005）：capability 回答「Adapter 实现了没有」，
@@ -96,6 +98,7 @@ impl HarnessAdapter for CodexAdapter {
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
             launch: true,
+            terminal: true,
             ..HarnessCapabilities::default()
         }
     }
@@ -266,7 +269,6 @@ mod tests {
 
         assert!(capabilities.launch, "launch 已通过真机端到端验收");
         for (name, value) in [
-            ("terminal", capabilities.terminal),
             ("resume", capabilities.resume),
             ("usage", capabilities.usage),
             ("replay", capabilities.replay),
@@ -299,12 +301,13 @@ mod tests {
         );
     }
 
-    /// `terminal` 要等 GUI 侧 resize 也验收通过才翻。
+    /// `terminal` 的前提是「raw output + 交互输入 + xterm + resize + kill + DSR」，
+    /// 已在本机 GUI 端到端验收通过（resize 的参数透传由前端单测锁定）。
     #[test]
-    fn terminal_capability_waits_for_the_gui_resize_acceptance() {
+    fn terminal_is_claimed_only_after_the_gui_acceptance() {
         assert!(
-            !adapter(FakeHostProbe::new()).capabilities().terminal,
-            "GUI 交互式终端还差 resize 观测，不得提前打勾"
+            adapter(FakeHostProbe::new()).capabilities().terminal,
+            "GUI 交互式终端已验收，terminal 应为 true"
         );
     }
 
