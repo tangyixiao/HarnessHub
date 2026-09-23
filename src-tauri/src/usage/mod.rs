@@ -12,6 +12,7 @@
 
 pub mod ccusage;
 pub mod cost;
+pub mod importer;
 pub mod key;
 pub mod runner;
 
