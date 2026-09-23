@@ -268,6 +268,7 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
     let claude = capabilities("claude");
     assert!(claude.launch, "claude launch 已有真机证据");
     assert!(claude.terminal, "claude terminal 已有真机 GUI 往返证据");
+    assert!(claude.usage, "claude usage 已有真机逐 key 对账证据");
 
     for (name, value) in [
         ("codex.resume", codex.resume),
@@ -276,7 +277,6 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("codex.subagents", codex.subagents),
         ("codex.live_state", codex.live_state),
         ("codex.worktree", codex.worktree),
-        ("claude.usage", claude.usage),
         ("claude.resume", claude.resume),
         ("claude.replay", claude.replay),
         ("claude.tool_calls", claude.tool_calls),

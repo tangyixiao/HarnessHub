@@ -105,6 +105,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         HarnessCapabilities {
             launch: true,
             terminal: true,
+            // 7C：真机 ccusage 里 claude 的新记录经现有 importer **逐 key** 入库
+            // （tests/claude_usage.rs），因此这里可以宣称 usage。
+            usage: true,
             ..HarnessCapabilities::default()
         }
     }
@@ -262,9 +265,9 @@ mod tests {
             capabilities.terminal,
             "Claude 已通过真机 GUI 双向交互 + resize"
         );
+        assert!(capabilities.usage, "Claude 已通过真机 ccusage 逐 key 对账");
         for (name, value) in [
             ("resume", capabilities.resume),
-            ("usage", capabilities.usage),
             ("replay", capabilities.replay),
             ("tool_calls", capabilities.tool_calls),
             ("subagents", capabilities.subagents),
@@ -290,7 +293,6 @@ mod tests {
         assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
         assert_eq!(spec.runtime_target_id, "local");
         assert!(!adapter.capabilities().resume, "spec 与 resume 无关");
-        assert!(!adapter.capabilities().usage, "spec 与 usage 无关");
     }
 
     /// `.ps1` shim 走通用地基（pwsh 宿主），Claude 不新增平台专用分支。
