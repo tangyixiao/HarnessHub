@@ -177,10 +177,16 @@ impl PtyManager {
 #[cfg(test)]
 pub(crate) mod fake {
     //! 可编程的假后端：让 manager / 编排逻辑可以脱离真实进程测试。
+    //!
+    //! **按 `LaunchSpec.program` 分流输出与 pid**（7D 并发隔离矩阵需要同时存在两条会话）。
+    //! 为什么不是按 `session_id`：`hub_session_id` 由 runtime 内部生成，测试在 spawn 之前
+    //! 无法预知它；program 是「这是哪条会话」在 spawn 前唯一可确定的线索。
+    //! 生产侧 `PortablePtyBackend` 本来就是按 `session_id` 存的，这里只是让 fake 也能表达
+    //! 「哪条会话该收到哪些字节」—— 否则隔离断言测不出真话（7D-A 的 RED 就是这么来的）。
 
     use super::*;
     use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex};
 
     use crate::pty::backend::PtySpawnRequest;
 
@@ -219,14 +225,106 @@ pub(crate) mod fake {
         }
     }
 
+    /// 可**实时追加**的输出流。
+    ///
+    /// 为什么需要它：并发矩阵要证明「另一条会话被 kill 之后，这一条**仍能继续产出**」，
+    /// 而一次性预置的块在 spawn 时就被读完了。`LiveStream` 允许测试在任意时刻
+    /// `push_output` / `close_output`，而 reader 仍是**生产代码**在按序转发。
+    struct LiveStream {
+        state: Mutex<LiveState>,
+        ready: Condvar,
+    }
+
+    #[derive(Default)]
+    struct LiveState {
+        queue: VecDeque<Vec<u8>>,
+        closed: bool,
+    }
+
+    impl LiveStream {
+        fn new(blocks: Vec<Vec<u8>>) -> Arc<Self> {
+            let stream = Arc::new(Self {
+                state: Mutex::new(LiveState::default()),
+                ready: Condvar::new(),
+            });
+            for block in blocks {
+                stream.push(block);
+            }
+            stream
+        }
+
+        fn push(&self, block: Vec<u8>) {
+            let mut state = self.state.lock().expect("live stream");
+            state.queue.push_back(block);
+            self.ready.notify_all();
+        }
+
+        /// 关闭流（read 返回 0 = EOF）。**EOF 只表示输出结束，不表示进程退出。**
+        fn close(&self) {
+            let mut state = self.state.lock().expect("live stream");
+            state.closed = true;
+            self.ready.notify_all();
+        }
+
+        fn reader(self: &Arc<Self>) -> Box<dyn Read + Send> {
+            Box::new(LiveReader {
+                stream: Arc::clone(self),
+            })
+        }
+
+        fn poisoned() -> std::io::Error {
+            std::io::Error::other("fake live stream 锁中毒")
+        }
+    }
+
+    struct LiveReader {
+        stream: Arc<LiveStream>,
+    }
+
+    impl Read for LiveReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+
+            let mut state = self
+                .stream
+                .state
+                .lock()
+                .map_err(|_| LiveStream::poisoned())?;
+            loop {
+                if let Some(block) = state.queue.pop_front() {
+                    let read = block.len().min(buf.len());
+                    buf[..read].copy_from_slice(&block[..read]);
+                    if read < block.len() {
+                        state.queue.push_front(block[read..].to_vec());
+                    }
+                    return Ok(read);
+                }
+                if state.closed {
+                    return Ok(0);
+                }
+                state = self
+                    .stream
+                    .ready
+                    .wait(state)
+                    .map_err(|_| LiveStream::poisoned())?;
+            }
+        }
+    }
+
     #[derive(Default)]
     pub struct FakePtyBackend {
         pub spawned: Mutex<Vec<PtySpawnRequest>>,
         pub written: Mutex<Vec<(String, Vec<u8>)>>,
         pub resized: Mutex<Vec<(String, u16, u16)>>,
         pub killed: Mutex<Vec<String>>,
-        /// 读端返回的字节（spawn 时按顺序弹出）。
+        /// 读端返回的字节（spawn 时按顺序弹出）。**共享队列**：只适合单会话测试。
         outputs: Mutex<Vec<Vec<u8>>>,
+        /// 按 program 分流的实时输出流（可并发、可运行期追加）。
+        live_outputs: Mutex<HashMap<String, Arc<LiveStream>>>,
+        /// 按 program 指定的 pid（默认 [`Self::pid`]）：并发矩阵要求两条会话 pid 不同。
+        pids_by_program: Mutex<HashMap<String, u32>>,
         /// try_wait 的返回值；`None` 表示仍在运行。
         exit_codes: Mutex<HashMap<String, Option<i32>>>,
         /// 为真时 spawn 直接失败（模拟 binary 缺失、PTY 创建失败等）。
@@ -249,9 +347,57 @@ pub(crate) mod fake {
         }
 
         /// 预先安排若干块输出。第一块读完即 EOF。
+        ///
+        /// **单会话专用**：多条会话同时读会抢同一个队列（见模块文档）。
         pub fn with_output(self, blocks: Vec<Vec<u8>>) -> Self {
             *self.outputs.lock().expect("outputs") = blocks;
             self
+        }
+
+        /// 为某个 program 预置输出，且流**保持打开**（会话不会因 EOF 结束）。
+        pub fn with_output_for_program(self, program: &str, blocks: Vec<Vec<u8>>) -> Self {
+            self.live_outputs
+                .lock()
+                .expect("live_outputs")
+                .insert(program.to_string(), LiveStream::new(blocks));
+            self
+        }
+
+        /// 指定某个 program 的 pid，让并发矩阵能断言「两条会话 pid 不同」。
+        pub fn with_pid_for_program(self, program: &str, pid: u32) -> Self {
+            self.pids_by_program
+                .lock()
+                .expect("pids_by_program")
+                .insert(program.to_string(), pid);
+            self
+        }
+
+        /// 运行期追加输出：已启动的 reader 会按序读到它。
+        pub fn push_output(&self, program: &str, block: Vec<u8>) {
+            self.live_stream(program).push(block);
+        }
+
+        /// 关闭某个 program 的输出流（EOF）。
+        pub fn close_output(&self, program: &str) {
+            self.live_stream(program).close();
+        }
+
+        fn live_stream(&self, program: &str) -> Arc<LiveStream> {
+            let mut streams = self.live_outputs.lock().expect("live_outputs");
+            Arc::clone(
+                streams
+                    .entry(program.to_string())
+                    .or_insert_with(|| LiveStream::new(Vec::new())),
+            )
+        }
+
+        fn program_of(&self, session_id: &str) -> Option<String> {
+            self.spawned
+                .lock()
+                .expect("spawned")
+                .iter()
+                .find(|request| request.session_id == session_id)
+                .map(|request| request.spec.program.to_string_lossy().into_owned())
         }
 
         /// 立即“已退出”，`try_wait` 返回给定码。
@@ -261,6 +407,17 @@ pub(crate) mod fake {
                 .expect("exit_codes")
                 .insert(session_id.to_string(), code);
             self
+        }
+
+        /// 运行期让某个会话“自己退出”（`try_wait` 从此返回给定码）。
+        ///
+        /// 与 [`Self::kill`] 的区别：这条路径**没有**用户 kill 意图，
+        /// 因此会被记成 `natural_exit` —— 并发矩阵要能分别制造两种终态。
+        pub fn exit_session(&self, session_id: &str, code: Option<i32>) {
+            self.exit_codes
+                .lock()
+                .expect("exit_codes")
+                .insert(session_id.to_string(), code);
         }
 
         /// 让 spawn 失败。
@@ -283,14 +440,36 @@ pub(crate) mod fake {
                 return Err(Error::InvalidInput("fake: spawn 失败".to_string()));
             }
 
+            let program = request.spec.program.to_string_lossy().into_owned();
+            let pid = self
+                .pids_by_program
+                .lock()
+                .expect("pids_by_program")
+                .get(&program)
+                .copied()
+                .or(self.pid);
+
             self.spawned.lock().expect("spawned").push(request.clone());
             Ok(PtyProcessHandle {
                 session_id: request.session_id,
-                pid: self.pid,
+                pid,
             })
         }
 
-        fn take_reader(&self, _session_id: &str) -> Result<Box<dyn Read + Send>> {
+        fn take_reader(&self, session_id: &str) -> Result<Box<dyn Read + Send>> {
+            // 先看有没有针对这个 program 的实时流；没有才回退到共享队列。
+            if let Some(program) = self.program_of(session_id) {
+                let live = self
+                    .live_outputs
+                    .lock()
+                    .expect("live_outputs")
+                    .get(&program)
+                    .cloned();
+                if let Some(stream) = live {
+                    return Ok(stream.reader());
+                }
+            }
+
             Ok(Box::new(BlockReader {
                 blocks: self.outputs.lock().expect("outputs").drain(..).collect(),
                 current: Vec::new(),

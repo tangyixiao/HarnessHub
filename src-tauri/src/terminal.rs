@@ -324,6 +324,13 @@ impl TerminalRuntime {
     }
 }
 
+/// 7D-A：Cross-Harness **并发隔离**矩阵（确定性，fake PTY backend）。
+///
+/// 单独成文件，因为它是到目前为止唯一「同时存在两条会话」的测试面；
+/// `terminal.rs` 其余测试是一条会话一条链。
+#[cfg(test)]
+mod concurrency_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
