@@ -187,7 +187,8 @@ export function DashboardPage() {
         <Card>
           <CardTitle>时间线</CardTitle>
           <CardDescription>
-            按**本地日**（时区 {summary?.range.timezoneOffsetMinutes ?? 0} 分钟）聚合。
+            按<span className="font-medium">本地日</span>（时区{' '}
+            {summary?.range.timezoneOffsetMinutes ?? 0} 分钟）聚合。
           </CardDescription>
           {summary && summary.timeline.length > 0 ? (
             <ul className="mt-4 space-y-2 text-xs">

@@ -351,3 +351,77 @@ Dashboard 对账通过：事件 243 / tokens 4757843285 / 已知成本 Some(2888
   （jsdom + 真实 IPC 契约形状）。没有像 Task 4 那样启动 `pnpm tauri dev` 并抓取真实窗口，
   因此「应用里看到的数字」这一点尚未在真实 WebView 中复核。
 - 固定时区偏移不建模 DST（ADR-0012 决策五已记录该局限）。
+
+---
+
+## Task 6 Release Gate：真实 GUI 验收（2026-09-23）
+
+方法：真实 `pnpm tauri dev`（WebView2 + CDP 9222），用 DevTools Protocol 读取 Dashboard 的
+真实渲染文本、点击真实按钮，并用 Python 的 `sqlite3`（**与 Rust 不同工具链**）独立读同一份
+应用数据库做交叉核对。**没有为验收增加任何生产 debug API。**
+
+### 启动即完成真实迁移（5 → 7）
+
+应用数据库启动前 `schema_version = 5`（`usage_events` 还是旧形状、0 行），启动后：
+
+```text
+migrations: 0001 … 0005, 0006_usage_imports_and_events, 0007_usage_import_unattributed_tokens
+schema_version 7    usage_events 0    sessions 13
+GUI: Schema 版本 7 / Managed Sessions 13 / Tokens 0 / Known Cost —
+```
+
+0006 的「旧表非空则拒绝执行」守卫在真实库上正常通过（旧表确实是空的）。
+
+### GUI 与 SQL 逐项一致（点一次「刷新用量」之后）
+
+点击刷新后 `usage_imports` 恰好 **1 行**（`succeeded`, inserted 243, skipped 0），
+应用数据库：`243` 事件 / `4,757,843,285` tokens / `288,824,073` 微单位 / `8` 条缺价格 /
+`usage_sessions 222` / `managed_sessions 13`。
+
+| 范围  | GUI Tokens        | GUI 成本      | GUI Usage Sessions | GUI Managed | GUI 事件数 | SQL 侧                                 |
+| ----- | ----------------- | ------------- | ------------------ | ----------- | ---------- | -------------------------------------- |
+| 今天  | 0                 | —             | 0                  | 3           | 0          | 空状态，符合预期（E2E 预测 Today = 0） |
+| 7 天  | 126,998,986       | ≥ $14.41      | 24                 | 13          | 27         | 子集                                   |
+| 30 天 | 4,641,236,542     | ≥ $227.59     | 186                | 13          | 204        | 与 Rust E2E 的「30 天 204 条」一致     |
+| 全部  | **4,757,843,285** | **≥ $288.82** | **222**            | 13          | **243**    | **与 SQL 基准逐项相同**                |
+
+要点逐条核对：
+
+1. **成本带 `≥`**：全部范围显示 `≥ $288.82` 与「部分记录缺少价格（8 条），实际成本可能更高」，
+   **没有**显示成精确金额；`288,824,073` 微单位 ≈ $288.824 → `≥ $288.82` 语义一致。
+2. **两个会话 KPI 独立**：`Usage Sessions 222` 与 `Managed Sessions 13` 是两个独立卡片，
+   各自的说明文字也写明了区别，未合并。
+3. **breakdown 正常**：Harness 分布 codex 3,741,061,325 / zcode 899,850,303（无价格显示 `—`）/
+   opencode / claude；Model 分布按明细列出 8 个模型；Project 分布显示「尚未把用量关联到项目
+   （不推断、不伪造归属）」。
+4. **切换范围真实重查**：四个范围的数字如上表，`今天` 正确落入空状态。
+5. **不起进程**：切换 4 个范围期间（轮询 20 次）与刷新页面期间（轮询 12 次），
+   `ccusage@` / `ccusage\src\cli.js` / `ccusage session` 进程命中 **0 次**。
+6. **重启持久化**：强制关闭应用 → 确认无 ccusage/npx 残留、`harness-hub` 进程数 0、
+   数据库仍是 243/…/imports 1 → 重新启动（**未点刷新**）→ 四个范围的数字与关闭前**逐字相同**
+   （30 天 4,641,236,542 / 186 / 204；全部 4,757,843,285 / 222 / 243），
+   期间 ccusage 命中 **0 次**，`usage_imports` 仍是 **1 行**（证明确实没有隐式 import）。
+7. **刷新是唯一写入口**：点击刷新时进程审计抓到
+   `npx.cmd --yes ccusage@20.0.24 --version` 与
+   `npx.cmd --yes ccusage@20.0.24 session --sections daily --by-agent --json`
+   → `…\ccusage\src\cli.js session --sections daily --by-agent --json`（**没有 `latest`**），
+   成功后 UI 显示「已读取 243 条记录（新增 243，更新 0，未变 0）」并重新查询 SQLite。
+
+### 真实 GUI 暴露并修掉的缺陷
+
+`<CardDescription>` 里写了 markdown 风格的 `按**本地日**…`，JSX 不解析 markdown，
+于是用户看到的是字面星号。已改成 `<span className="font-medium">本地日</span>`，
+并**重新启动真实应用确认**渲染为「按本地日（时区 480 分钟）聚合。」且页面不再出现 `**`。
+
+### 验收环境事故（非产品缺陷）
+
+验收过程中在 `pnpm tauri dev` 运行期间执行 `prettier --write`，prettier 在
+`src/features/dashboard/` 下创建临时目录，Vite 文件监听在它上面 `EBUSY` 崩溃（dev server 退出）。
+这是工具链竞争，不是 HarnessHub 的缺陷；但**开发时不要边跑 dev server 边格式化源码**。
+
+### 与基线不一致的一处，必须解释
+
+用户给的基线里 `managed_sessions = 0`，真实应用数据库是 **13**。原因：基线来自 Task 5/6 的
+**临时库 E2E**（全新空库，Harness Hub 一个会话都没启动过）；应用数据库里有 Task 3/4 真实启动过的
+13 条会话。两个数字都正确，恰好说明 `usage_sessions`（222，来自外部历史）与
+`managed_sessions`（13，Harness Hub 自己管理的）确实是两个不同的事实。
