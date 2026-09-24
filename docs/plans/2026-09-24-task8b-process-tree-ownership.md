@@ -1492,8 +1492,25 @@ fn killing_one_session_tree_never_touches_another() {
 
 - [ ] **Step 2: 跑测试（真机，含自证）**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --test process_tree_ownership -- --nocapture --test-threads=1`
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test process_tree_ownership -- --nocapture`
 Expected: 全绿；日志里能看到每棵树的 PID 列表与「terminate 后全 dead」
+
+> **实现时发现（判别性，重要）**：R1–R4 走 `PtyManager::kill`，而 `kill` 之后 reaper 会
+> 观测 root 退出 → 写终态 → `forget`（关 console + 释放 Job 句柄）。实测**变异验证**：
+> 把 `terminate_tree` 退回 direct-child kill 之后 R1–R4 **照样全绿** —— 后代会死在
+> `forget` 那一步。所以 R1–R4 是**产品级**结论（「kill 之后没有残留」），
+> **不是** `terminate_tree` 的判别性证据。
+>
+> 因此追加两条**判别性** Gate，把 `forget` 从等式中拿掉（只用生产 `PortablePtyBackend`，
+> 调完 `terminate_tree` 不做任何 release）：
+>
+> ```text
+> R1/raw  合成三层树 → terminate_tree → 全树消失
+> R4/raw（永久回归）Codex A + Codex B + Claude C → terminate_tree(A) → A 全死、B/C 全活
+> ```
+>
+> 实测变异（direct-child kill）下这两条必失败：R1/raw 报 `仍在跑：[50500, 30040]`，
+> R4/raw 报 `A 的全树必须死……仍在跑：[55388, 49372]`。本机三次连跑 5/5 全绿（约 19s）。
 
 - [ ] **Step 3: 连续两次确认稳定**
 

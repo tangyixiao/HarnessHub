@@ -321,6 +321,21 @@ R7  真实 Harness Hub 宿主内 assign 成功（约束 6 第一条）：断言�
     PortablePtyBackend** 路径上 containment 建立成功；失败时必须暴露具体 Win32 error
 ```
 
+> **判别性分层（实现时用变异验证过，必须原样保留这个区分）**：
+>
+> ```text
+> 产品级（PtyManager::kill → 终态 → forget）：R1/R2/R3/R4
+>   证明「kill 之后没有残留」。退回 direct-child kill 时它们**仍然全绿**，
+>   因为残留后代会死在 forget（关 console + 释放 Job）那一步 —— 所以它们
+>   **不能**证明 terminate_tree 真的终结了整棵树。
+> 机制级（直接用生产 PortablePtyBackend，调完 terminate_tree 不做任何 release）：R1/raw、R4/raw
+>   这才是 terminate_tree 的判别性证据：退回 direct-child kill 时必失败
+>   （实测 R1/raw 报「仍在跑：[50500, 30040]」、R4/raw 报 A 的后代存活）。
+> ```
+>
+> 两条都必须保留：产品级覆盖真实恢复链路（reader/reaper/forget），机制级保证
+> 「Session 拥有进程树」这句话不是空话。真机三次连跑 5/5 全绿（约 19s）。
+
 R5 的观察窗口用硬期限（例如 5s）判定「write 最终返回」，**不得**用 join。
 
 ### 7.3 回归
