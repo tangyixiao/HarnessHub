@@ -99,12 +99,18 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_capacity(64 * 1024)
+    }
+
+    /// 输入队列容量可注入：R5 要一次写 64 MiB，默认 64 KiB 队列会**当场**回
+    /// `InputBackpressure`（8A 的有界队列），根本到不了 backend（plan Task 7 Step 1）。
+    fn with_capacity(bytes: usize) -> Self {
         let streams = Arc::new(Streams::default());
         let manager = Arc::new(PtyManager::with_input_capacity(
             Arc::new(PortablePtyBackend::new()),
             streams.sink(),
             Arc::new(|_session, _code| {}),
-            64 * 1024,
+            bytes,
         ));
         Self {
             manager,
@@ -135,9 +141,26 @@ impl Harness {
             let requested = count_occurrences(&bytes, DSR_REQUEST);
             let answered = self.answered.entry(session.clone()).or_default();
             while *answered < requested && *answered < MAX_DSR_REPLIES_PER_SESSION {
-                self.manager.write(&session, DSR_REPLY).expect("应答 DSR");
+                if self.manager.write(&session, DSR_REPLY).is_err() {
+                    break; // 会话已经被回收：没什么可应答的了
+                }
                 *answered += 1;
             }
+        }
+    }
+
+    /// 等到某个会话的 DSR 握手被应答（有界）。
+    fn wait_handshake(&mut self, session: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.pump();
+            if self.answered.get(session).copied().unwrap_or(0) > 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -563,4 +586,243 @@ fn killing_one_session_tree_never_touches_another() {
     cleanup(&tree_a);
     cleanup(&tree_b);
     cleanup(&tree_c);
+}
+
+// ---------------------------------------------------------------------------
+// R5 / R6 / R7：全链路 + Job 生命周期 + 生产 Runtime 路径
+// ---------------------------------------------------------------------------
+
+/// R5：writer park 在 OS 写里 → kill（树杀）→ 树全死 → reaper 写终态 → `forget`
+/// （关 master + 释放 Job 句柄）→ 会话被完整回收。**有界观察窗口，绝不 join writer。**
+///
+/// 这条把 8A 与 8B 串起来：树杀解决「进程还活着」，`forget` 的 `close_transport` 解决
+/// 「阻塞 writer 还醒不过来」。
+///
+/// **两个容易写错的点**（都靠断言钉住，不靠注释）：
+///
+/// 1. `PtyManager::write` 只是入队（8A 的有界队列），它会**立刻返回** —— 「有没有 park 住」
+///    不能看入队调用，要看 `pending_bytes`：8A 的记账只在 `backend.write` 返回后才结算，
+///    所以 `pending_bytes` 持续停在整批大小 = worker 正卡在 OS 写里。
+/// 2. 容量必须 ≥ 本批大小：默认 64 KiB 队列会让 64 MiB 当场 `InputBackpressure`，
+///    根本到不了 backend。这里显式注入 64 MiB 容量。
+///
+/// 边界（诚实）：`pending_bytes → None` 证明的是「reaper 走完了终态 + forget」，
+/// **看不见** worker 内部是否已经从写里返回。后者由 transport 层的判别性用例
+/// `pty::portable_pty_backend::tests::forget_actively_closes_the_transport_so_a_parked_write_returns`
+/// 覆盖（同一形态，直接断言 parked `backend.write` 返回）。
+#[test]
+fn a_parked_writer_is_released_by_the_reaper_forgetting_the_session() {
+    const PAYLOAD: usize = 64 * 1024 * 1024;
+
+    let _serial = serialize();
+    let mut harness = Harness::with_capacity(PAYLOAD);
+    let root = harness.spawn("hub-parked", "ping", &["-n", "300", "127.0.0.1"], None);
+    assert!(
+        harness.wait_handshake("hub-parked", Duration::from_secs(10)),
+        "前提：conhost 的 DSR 握手必须被应答"
+    );
+    let tree = vec![root];
+
+    // 入队（立刻返回）→ worker 取走并 park 在 backend.write 里
+    let payload = vec![b'x'; PAYLOAD];
+    harness
+        .manager
+        .write("hub-parked", &payload)
+        .expect("入队必须被接受（容量 = 整批大小）");
+    assert_eq!(
+        harness.manager.pending_bytes("hub-parked"),
+        Some(PAYLOAD),
+        "入队后 in-flight 必须等于整批大小"
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        harness.manager.pending_bytes("hub-parked"),
+        Some(PAYLOAD),
+        "前提：worker 必须还 park 在 backend.write 里（否则这条测试没测到目标场景）"
+    );
+
+    // 树杀 → reaper 观测 root 退出 → 终态 → forget（关 master + 释放 Job 句柄）
+    harness.kill("hub-parked");
+    assert!(
+        wait_dead(&tree, Duration::from_secs(15)),
+        "树必须全死，仍在跑：{:?}",
+        survivors(&tree)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.manager.pending_bytes("hub-parked").is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        harness.manager.pending_bytes("hub-parked"),
+        None,
+        "reaper 必须回收 handle（= 终态已写 + backend.forget 已执行）"
+    );
+    cleanup(&tree);
+}
+
+/// R6：会话被 `forget`（不先 kill）之后，残留在 Job 里的后代必须被回收。
+///
+/// **措辞边界**（约束 6 的诚实要求）：这条测的是**产品语义** —— `forget` / 最后一个 Job
+/// 句柄关闭会收敛残留后代；它**不是**「测过宿主 crash」。宿主异常死亡走的是同一个
+/// `KILL_ON_JOB_CLOSE` 机制（spike s6 实测：`taskkill /F` 宿主后它拥有的进程全部被回收），
+/// 但那条证据属于 spike，不属于本文件。
+///
+/// 判别性说明（L6）：`close_transport` 关掉 console 也会带走挂在同一 console 上的后代，
+/// 所以「后代消失」单独不足以区分 Job 路径；Job 句柄**显式取走**这个机制事实由
+/// `pty::portable_pty_backend::tests::forget_releases_the_job_even_while_a_writer_holds_the_arc`
+/// 断言（已用「泄漏句柄」变异验证过它是判别性断言）。
+#[test]
+fn descendants_are_reaped_when_the_session_is_released() {
+    let _serial = serialize();
+    let mut harness = Harness::new();
+    let root = harness.spawn("hub-reap", "cmd", &["/c", "ping -n 300 127.0.0.1"], None);
+    assert!(
+        harness.wait_handshake("hub-reap", Duration::from_secs(10)),
+        "前提：conhost 的 DSR 握手必须被应答"
+    );
+
+    let tree = harness.wait_tree(root, 2, Duration::from_secs(15));
+    eprintln!("[R6] tree = {tree:?}");
+    assert!(tree.len() >= 2, "需要 cmd → ping 两层：{tree:?}");
+
+    // 直接释放（不先 kill）：走 forget 的 containment 收敛路径
+    harness.manager.forget("hub-reap").expect("forget");
+
+    assert!(
+        wait_dead(&tree, Duration::from_secs(15)),
+        "释放之后整棵树必须被回收，仍在跑：{:?}",
+        survivors(&tree)
+    );
+    cleanup(&tree);
+}
+
+/// R7（约束 6 第一条）：**本机测试进程中的**生产 `TerminalRuntime` 路径 assign 必须成功。
+///
+/// 边界说清楚：cargo 测试进程**不等于**打包后的应用宿主（那个宿主可能自己就在别的 job 里、
+/// 或以不同完整性级别运行）。这里证的是「这条生产代码路径在本机这个进程环境下能建立
+/// containment 并覆盖整棵树」，**不是**「任何宿主都必然成功」。
+///
+/// 环境缺失**不算通过**：需要真机 codex + E2E 目录；缺任何一个直接 panic，
+/// 而不是打印「跳过」后返回 Ok（跳过 ≠ 通过）。
+///
+/// 失败路径（containment 建立失败 ⇒ failed/launch_failed + 具体 Win32 error）在
+/// `src-tauri/src/terminal.rs` 的单元测试里覆盖：`#[cfg(test)]` 的 fake backend
+/// 对 integration test 不可见，所以那条纪律测试只能放在 lib 内
+/// （`terminal::tests::start_fails_when_containment_cannot_be_established`，
+/// 已用变异验证过它对 containment 检查敏感）。
+#[test]
+fn containment_is_established_in_this_test_process_on_the_production_runtime_path() {
+    use harness_hub_lib::db::Database;
+    use harness_hub_lib::harness::adapter::HarnessAdapter;
+    use harness_hub_lib::harness::adapters::codex::CodexAdapter;
+    use harness_hub_lib::harness::inventory::{installation_id, reconcile_harnesses};
+    use harness_hub_lib::harness::probe::SystemHostProbe;
+    use harness_hub_lib::harness::registry::HarnessRegistry;
+    use harness_hub_lib::runtime::local::LOCAL_TARGET_ID;
+    use harness_hub_lib::terminal::{Emitter, PtyEvent, TerminalRuntime};
+
+    let _serial = serialize();
+
+    let adapter = CodexAdapter::new(Arc::new(SystemHostProbe::new()));
+    let detected = adapter.detect();
+    assert!(
+        detected.installed,
+        "本 Gate 需要真机 codex（跳过不等于通过）：detect = {detected:?}"
+    );
+    assert!(
+        Path::new(CODEX_CWD).is_dir(),
+        "本 Gate 需要 {CODEX_CWD}（跳过不等于通过）"
+    );
+
+    let db = Database::open_in_memory().expect("内存库");
+    harness_hub_lib::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
+    let mut registry = HarnessRegistry::new();
+    registry.register(Box::new(CodexAdapter::new(
+        Arc::new(SystemHostProbe::new()),
+    )));
+    reconcile_harnesses(
+        db.connection(),
+        &registry.summaries(LOCAL_TARGET_ID),
+        LOCAL_TARGET_ID,
+        "2026-09-24T00:00:00Z",
+    )
+    .expect("同步清单");
+
+    /// 事件汇聚（R7 只看 Output 字节，用来当终端模拟器的输入）。
+    #[derive(Default)]
+    struct Events {
+        events: Vec<PtyEvent>,
+    }
+
+    let events = Arc::new(Mutex::new(Events::default()));
+    let sink = Arc::clone(&events);
+    let emitter: Emitter = Arc::new(move |event| {
+        sink.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .events
+            .push(event);
+    });
+
+    let runtime = TerminalRuntime::new(
+        Arc::new(Mutex::new(db)),
+        Arc::new(registry),
+        Arc::new(PortablePtyBackend::new()),
+    );
+
+    let session = runtime
+        .start(
+            &installation_id("codex", LOCAL_TARGET_ID),
+            Some(CODEX_CWD),
+            100,
+            30,
+            Some(emitter),
+        )
+        .expect("containment 建立失败会让这里返回 Err（错误里带具体 Win32 error）");
+    let root = session.pid.expect("running 会话必须记下 pid") as u32;
+
+    // test-only 终端模拟器：把 Output 事件喂进观察器，看到 ESC[6n 就回 ESC[1;1R。
+    let mut seen = Vec::new();
+    let mut answered = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut tree = vec![root];
+    loop {
+        let drained: Vec<PtyEvent> = std::mem::take(
+            &mut events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .events,
+        );
+        for event in drained {
+            if let PtyEvent::Output { data, .. } = event {
+                seen.extend_from_slice(&data);
+                let requested = count_occurrences(&seen, DSR_REQUEST);
+                while answered < requested && answered < MAX_DSR_REPLIES_PER_SESSION {
+                    runtime
+                        .write(&session.hub_session_id, DSR_REPLY)
+                        .expect("应答 DSR");
+                    answered += 1;
+                }
+            }
+        }
+        tree = std::iter::once(root).chain(descendants(root)).collect();
+        if tree.len() >= 3 || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("[R7] production runtime tree = {tree:?}（DSR 应答 {answered} 次）");
+    assert!(
+        tree.len() >= 3,
+        "生产路径上 containment 必须覆盖整棵树（cmd → node → codex.exe）：{tree:?}"
+    );
+
+    runtime.kill(&session.hub_session_id).expect("kill");
+    assert!(
+        wait_dead(&tree, Duration::from_secs(15)),
+        "生产路径 kill 后全树必须消失，仍在跑：{:?}",
+        survivors(&tree)
+    );
+    cleanup(&tree);
 }
