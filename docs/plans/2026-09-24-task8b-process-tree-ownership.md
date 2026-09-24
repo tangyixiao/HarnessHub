@@ -1089,6 +1089,18 @@ git commit -m "test(pty): a session without containment is launch_failed, never 
 放在 `portable_pty_backend.rs` 的 Windows 测试模块里。**RED 是真实的**：Task 3 的 `forget` 只关
 传输、不取 job 句柄，而 parked writer 持有 `Arc<LivePty>` → `Containment` 不会被 drop → 后代偷活。
 
+> **实现时修正（两处）**：
+>
+> 1. 与 Task 3 同一个夹具前提：headless 测试必须自己当终端（排空输出 + 应答一次 DSR）。
+>    已在同一测试模块里抽成 `attach_test_terminal()` / `TestTerminal`，Task 3 的用例也改用它。
+> 2. **判别性**：实测（变异验证）把 Job 句柄「取走但 `mem::forget` 泄漏」之后，
+>    「后代被回收」这条断言**照样通过** —— 因为 `ClosePseudoConsole` 自己就会带走挂在同一
+>    console 上的后代。所以本 Task 的判别性断言是
+>    **「从句柄被 parked writer 持有的那个 `Arc` 里看，`containment` 已经是 `None`」**；
+>    Job 路径的判别性行为证据在 Task 1 的
+>    `containment::tests::closing_the_last_handle_kills_the_contained_tree`（纯 Job、无 console）
+>    与 spike s6（宿主 `taskkill /F`）。「forget 之后不得留下偷活后代」作为产品级结论保留。
+
 ```rust
     /// T5：`forget` 必须**显式取出并关闭唯一 Job 句柄**，不能依赖 `Arc<LivePty>` drop ——
     /// parked writer 自己就持有那个 Arc（spec §4.5 / 约束 4+5）。
@@ -1132,52 +1144,37 @@ git commit -m "test(pty): a session without containment is launch_failed, never 
         }
         assert!(!descendants.is_empty(), "需要 cmd → ping 两层结构");
 
-        // 制造 parked writer（它持有 Arc<LivePty>）
-        let returned = Arc::new(AtomicBool::new(false));
-        let returned_flag = Arc::clone(&returned);
-        let backend_for_writer = Arc::clone(&backend);
-        std::thread::spawn(move || {
-            let payload = vec![b'x'; 64 * 1024 * 1024];
-            let _ = backend_for_writer.write("hub-park-tree", &payload);
-            returned_flag.store(true, Ordering::SeqCst);
-        });
+        let returned = park_a_write(&backend, "hub-park-tree");
         std::thread::sleep(Duration::from_secs(2));
-        assert!(
-            !returned.load(Ordering::SeqCst),
-            "前提：写必须还 park 着（64 MiB 才稳；4 MiB 会被 ConPTY 缓冲吞掉）"
-        );
+        assert_parked(&returned, "parked writer 必须持有 Arc<LivePty>");
 
+        // forget 之前先拿一份 Arc：forget 之后 map 里没有了，但 parked writer 还持有它。
+        let live = backend.live("hub-park-tree").expect("live");
         backend.forget("hub-park-tree").expect("forget");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !returned.load(Ordering::SeqCst) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(returned.load(Ordering::SeqCst), "forget 之后 parked write 必须返回");
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline
-            && std::iter::once(root)
-                .chain(descendants.clone())
-                .any(|pid| process_alive(pid))
-        {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let survivors: Vec<u32> = std::iter::once(root)
-            .chain(descendants.clone())
-            .filter(|pid| process_alive(*pid))
-            .collect();
+        assert!(wait_for(&returned, Duration::from_secs(10)), "forget 之后 parked write 必须返回");
         assert!(
-            survivors.is_empty(),
-            "forget 必须关掉 Job 句柄、回收残留后代（偷活的：{survivors:?}）"
+            live.process.containment.lock().expect("containment").is_none(),
+            "forget 必须显式取走并关闭唯一 Job 句柄（不能等 Arc<LivePty> drop）"
         );
+        assert!(
+            wait_until_dead(&std::iter::once(root).chain(descendants.clone()).collect::<Vec<u32>>(),
+                            Duration::from_secs(10)),
+            "forget 之后不得留下偷活的后代"
+        );
+        cleanup(&handle);
     }
 ```
 
+（`attach_test_terminal` / `park_a_write` / `wait_for` / `wait_until_dead` / `cleanup` /
+`process_alive` 是本 Task 抽出的测试夹具：终端模拟器在 `portable_pty_backend.rs` 的测试模块里，
+进程存活探针在 `pty::containment::test_support` 里，只留一份。）
+
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::portable_pty_backend::forget_releases`
-Expected: FAIL `forget 必须关掉 Job 句柄、回收残留后代`（Task 3 的 forget 不取 job 句柄）
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::portable_pty_backend`
+Expected: FAIL `forget 必须显式取走并关闭唯一 Job 句柄`（Task 3 的 forget 不取 job 句柄；
+本条与 Step 4 的 reaper 用例实测都停在这一点上）
 
 - [ ] **Step 3: 实现（在 Task 3 的 `LivePty` 上加显式释放）**
 
@@ -1205,7 +1202,7 @@ impl LivePty {
 
 ```rust
     fn forget(&self, session_id: &str) -> Result<()> {
-        let Some(live) = (lock(&self.sessions)?.remove(session_id)) else {
+        let Some(live) = lock(&self.sessions)?.remove(session_id) else {
             return Ok(());
         };
         // 先关传输（让 parked write 返回），再关 job（回收残留后代）；两步都不能省。
@@ -1229,15 +1226,18 @@ impl LivePty {
     /// `start /b` 让 ping 成为 cmd 的后代但 cmd 立刻退出 —— 正是「root 走了、后代偷活」的形状。
     #[test]
     fn release_after_a_natural_root_exit_still_reaps_living_descendants() {
-        // 与上一条同构：spawn `cmd /c start /b ping -n 300 127.0.0.1`
-        // → 等 root 退出（child.try_wait() == Some(_)）且后代仍 alive
+        // spawn `cmd /c start /b ping -n 300 127.0.0.1` + attach_test_terminal + 握手
+        // → 等「后代存在」且「backend.try_wait(session) == Some(_)」（root 已自然退出）
+        // → 断言 root 退出时至少一个后代仍 process_alive
         // → backend.forget(session)
-        // → 断言后代全部消失（job 句柄关闭 → KILL_ON_JOB_CLOSE）
+        // → 断言 containment 已成为 None，且后代全部消失
     }
 ```
 
 > 若本机 `start /b` 的树形状与预期不符，**调整命令**直到「root 已退出 + 后代仍存活」这个前提
 > 由断言证明成立；**不要**放宽「后代必须被回收」这条断言。
+> 实测本机 `cmd /c start /b ping …` 的形状成立（前提断言都过），两条用例 Step 2 的 RED
+> 都停在「containment 必须已被显式取走」这一点上。
 
 - [ ] **Step 5: 跑测试确认通过 + 8A/7D 回归**
 

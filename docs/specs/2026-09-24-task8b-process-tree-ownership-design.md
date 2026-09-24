@@ -258,6 +258,19 @@ L4  补扫依赖 Windows ToolHelp + OpenProcess 权限；无权限的 descendant
     只能记录，不能强行纳入。
 L5  非 Windows 平台本 Task 不实现 containment（保持现状语义），但 trait 形状已按
     「Session 拥有进程树」表达。
+L6  **console 关闭本身也会带走挂在同一 ConPTY 上的后代**：所以「forget 之后没有偷活后代」
+    这条端到端断言**无法区分** Job 路径是否生效（实现时用「取走 Job 句柄但 mem::forget 泄漏」
+    的变异验证过：变异后断言照样通过）。Job 路径的判别性证据是
+    `containment::tests::closing_the_last_handle_kills_the_contained_tree`（纯 Job，无 console）
+    与 spike s6（宿主 `taskkill /F`）；产品测试的判别性断言是
+    「forget 之后从句柄被 parked writer 持有的 `Arc` 里看 containment 已是 `None`」。
+    `terminate_tree`（session-scoped kill）与宿主异常死亡仍然**只有** Job 一条路径能覆盖。
+L7  headless 测试必须自带「终端模拟器」：conhost 因 `PSUEDOCONSOLE_INHERIT_CURSOR` 会发
+    `ESC[6n` 并等应答，**不应答时 pseudoconsole 会卡在初始化**，连 `ClosePseudoConsole`
+    都收不干净（表现为 master 已 drop、reader 却拿不到 EOF、parked 写永不返回）。
+    生产里这一角色由前端 xterm.js 承担；测试夹具在
+    `pty::portable_pty_backend` 的 `attach_test_terminal()`，且只应答一次（7D 教训：
+    无限重放应答会淹掉子进程输入缓冲）。
 ```
 
 ## 7. 测试设计
@@ -267,9 +280,10 @@ L5  非 Windows 平台本 Task 不实现 containment（保持现状语义），�
 fake 需要新增（test-only）：
 
 ```rust
-.with_failing_containment(program)   // spawn 时 containment 建立失败
-.terminated_trees: Mutex<Vec<String>>          // 记录 terminate_tree 调用
-.fail_next_terminate_tree(session_id)          // 让下一次 terminate_tree 失败
+.with_failing_containment()                // spawn 时 containment 建立失败（带 os error 形状）
+.without_containment()                     // spawn 成功但会话没有 containment（树杀必须报错）
+.terminated_trees: Mutex<Vec<String>>     // 记录 terminate_tree 调用
+.fail_next_terminate_tree(session_id)     // 让下一次 terminate_tree 失败
 ```
 
 ```text
@@ -300,7 +314,9 @@ R5  parked writer 全链路（有界观察窗口，不 join）：
     A 的 writer park 在 OS 写里 → terminate_tree(A) → 树全死 →
     reaper 观测退出 → 终态 → forget → close_transport →
     parked write 返回 Err（ERROR_BROKEN_PIPE/109），且 writer worker 退出（is_finished）
-R6  kill-on-close：会话被 forget/释放之后仍有 descendant 时，descendants 被 OS 回收
+R6  kill-on-close：会话被 forget/释放之后仍有 descendant 时，descendants 被 OS 回收。
+    判别性说明见 L6：console 关闭也会收掉挂在同一 console 上的后代，所以产品级测试里
+    **同时**断言「显式取走 Job 句柄」这个机制事实；本 Task 实现时的变异验证记录在 plan Task 5。
 R7  真实 Harness Hub 宿主内 assign 成功（约束 6 第一条）：断言在**生产 TerminalRuntime +
     PortablePtyBackend** 路径上 containment 建立成功；失败时必须暴露具体 Win32 error
 ```
