@@ -185,7 +185,7 @@ try_enqueue → Ok   = “Harness Hub 已接受本次输入”
 
 worker 遇到真实的 `backend.write` error：
 
-```text
+````text
 1. failure = Some(error.to_string())
 2. 丢弃尚未发送的队列（batches.clear()；此时无 in-flight，pending_bytes = 0）
 3. 退出 worker 线程（不再尝试）
@@ -201,7 +201,7 @@ worker 遇到真实的 `backend.write` error：
 2. else failure           → InputWorkerFailed
 3. else 容量不足          → InputBackpressure
 4. else                   → 入队
-```
+````
 
 理由：显式 kill / forget 之后，「输入已关闭」是对调用方**最直接的当前事实**；worker 的底层错误
 仍保留在 `failure` 里作为诊断（随 `InputWorkerFailed.detail` 一并返回）。
@@ -211,7 +211,8 @@ worker 遇到真实的 `backend.write` error：
 这条必须由测试锁死（§6.1 T11），不能靠实现里的检查顺序碰巧成立。
 
 **未知 session 仍沿用原有 `InvalidInput("未知会话…")`**，不混进 `InputClosed`。
-```
+
+````
 
 ### 4.5 kill 成功 → 关闭输入侧
 
@@ -220,7 +221,7 @@ PtyManager::kill(session_id)
   → backend.kill(session_id)?
        Ok  → handle.shutdown_input()      // 之后 write_terminal → InputClosed
        Err → 不动输入侧（不擅自关闭，也不假装成功）
-```
+````
 
 理由：`kill` 之后到 reaper 收敛之间，会话已经「不接受了」，此时还能继续 enqueue 语义很怪。
 自然退出不经 kill：由 reaper → `forget` → `shutdown_input`（见 §4.8）。
@@ -337,13 +338,13 @@ InputWorkerFailed
 
 ## 5. 行为变化清单（谁会看到什么不同）
 
-| 变化 | 影响 |
-| --- | --- |
-| `write_terminal` 变成入队 | 返回 `Ok` 不再代表已写入 PTY；紧接着 kill 时排队输入可能永远不发出 |
-| 队列满 / 输入关闭 / worker 失败 | 返回新的三个错误变体（前端仍只看到字符串，UI 行为不变） |
-| `backend.written` 不再同步可见 | 现有 `pty::manager` 单测必须等 worker 排空后再断言（合法修改，不是放宽） |
-| 会话退出后释放 PTY 句柄与输入侧 | 修掉「forget 从没被调用」的既有泄漏；`live` 句柄不再跨会话累积 |
-| 每会话多一个线程 | 线程数 = 会话数 × 3（reader / reaper / writer worker），会话结束即回收 |
+| 变化                            | 影响                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------ |
+| `write_terminal` 变成入队       | 返回 `Ok` 不再代表已写入 PTY；紧接着 kill 时排队输入可能永远不发出       |
+| 队列满 / 输入关闭 / worker 失败 | 返回新的三个错误变体（前端仍只看到字符串，UI 行为不变）                  |
+| `backend.written` 不再同步可见  | 现有 `pty::manager` 单测必须等 worker 排空后再断言（合法修改，不是放宽） |
+| 会话退出后释放 PTY 句柄与输入侧 | 修掉「forget 从没被调用」的既有泄漏；`live` 句柄不再跨会话累积           |
+| 每会话多一个线程                | 线程数 = 会话数 × 3（reader / reaper / writer worker），会话结束即回收   |
 
 ## 6. 测试设计
 

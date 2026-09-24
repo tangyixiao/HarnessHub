@@ -30,26 +30,28 @@
 
 ## File Structure
 
-| 文件 | 责任 | 动作 |
-| --- | --- | --- |
-| `src-tauri/src/error.rs` | 三个新错误变体（背压诊断字段齐全） | Modify |
-| `src-tauri/src/pty/session.rs` | `InputState` / `SessionHandle`：有界队列、`pending_bytes` 记账、worker 生命周期 | Create |
-| `src-tauri/src/pty/mod.rs` | 暴露 `session` 模块与 `#[cfg(test)] mod input_tests;` | Modify |
-| `src-tauri/src/pty/manager.rs` | `PtyManager` 持 `sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>`；`write` 入队；`kill`/`forget`/reaper 关闭输入侧；fake 增加阻塞写/失败写 | Modify |
-| `src-tauri/src/pty/portable_pty_backend.rs` | 每会话独立加锁（writer/master/child），全局 map 锁只查 `Arc` | Modify |
-| `src-tauri/src/pty/input_tests.rs` | 确定性矩阵（T1–T10），不碰真实进程 | Create |
-| `src-tauri/tests/runtime_input_backpressure.rs` | 真机 synthetic child 验收（R1–R3） | Create |
-| `tests/e2e/README.md` | 8A 真机证据 | Modify |
+| 文件                                            | 责任                                                                                                                                                 | 动作   |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `src-tauri/src/error.rs`                        | 三个新错误变体（背压诊断字段齐全）                                                                                                                   | Modify |
+| `src-tauri/src/pty/session.rs`                  | `InputState` / `SessionHandle`：有界队列、`pending_bytes` 记账、worker 生命周期                                                                      | Create |
+| `src-tauri/src/pty/mod.rs`                      | 暴露 `session` 模块与 `#[cfg(test)] mod input_tests;`                                                                                                | Modify |
+| `src-tauri/src/pty/manager.rs`                  | `PtyManager` 持 `sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>`；`write` 入队；`kill`/`forget`/reaper 关闭输入侧；fake 增加阻塞写/失败写 | Modify |
+| `src-tauri/src/pty/portable_pty_backend.rs`     | 每会话独立加锁（writer/master/child），全局 map 锁只查 `Arc`                                                                                         | Modify |
+| `src-tauri/src/pty/input_tests.rs`              | 确定性矩阵（T1–T10），不碰真实进程                                                                                                                   | Create |
+| `src-tauri/tests/runtime_input_backpressure.rs` | 真机 synthetic child 验收（R1–R3）                                                                                                                   | Create |
+| `tests/e2e/README.md`                           | 8A 真机证据                                                                                                                                          | Modify |
 
 ---
 
 ### Task 1: 错误变体（背压诊断字段齐全）
 
 **Files:**
+
 - Modify: `src-tauri/src/error.rs`（`enum Error` 内 `InvalidInput` 之后）
 - Test: `src-tauri/src/error.rs`（文件末尾新增 `#[cfg(test)] mod tests`）
 
 **Interfaces:**
+
 - Consumes: 无
 - Produces: `Error::InputBackpressure { session_id: String, pending_bytes: usize, capacity_bytes: usize, attempted_bytes: usize }`、`Error::InputClosed { session_id: String }`、`Error::InputWorkerFailed { session_id: String, detail: String }`
 
@@ -148,12 +150,14 @@ git commit -m "feat(pty): add input backpressure/closed/worker-failed errors wit
 ### Task 2: 有界输入队列 + writer worker（T1–T5、T9、T10）
 
 **Files:**
+
 - Create: `src-tauri/src/pty/session.rs`
 - Modify: `src-tauri/src/pty/mod.rs`
 - Modify: `src-tauri/src/pty/manager.rs`
 - Test: `src-tauri/src/pty/input_tests.rs`（Create）
 
 **Interfaces:**
+
 - Consumes: `Error::{InputBackpressure, InputClosed}`（Task 1）
 - Produces:
   - `pty::session::DEFAULT_INPUT_CAPACITY_BYTES: usize`
@@ -475,7 +479,7 @@ assertion failed: 超上限必须被拒绝
 
 （本 Task 只做队列 + 记账 + 关闭；**失败态留给 Task 3**，否则 Task 3 的测试会一写就绿。）
 
-```rust
+````rust
 //! 每会话输入调度：**有界**队列 + 专属 writer worker。
 //!
 //! ```text
@@ -641,7 +645,7 @@ impl SessionHandle {
         self.input.pending_bytes()
     }
 }
-```
+````
 
 - [ ] **Step 4: 接线 `PtyManager`**
 
@@ -923,11 +927,13 @@ git commit -m "feat(pty): schedule per-session input through a bounded queue and
 ### Task 3: 异步 writer 失败语义（T6）
 
 **Files:**
+
 - Modify: `src-tauri/src/pty/session.rs`（加 `failure` 态）
 - Modify: `src-tauri/src/pty/manager.rs`（fake 加 `with_failing_write`）
 - Test: `src-tauri/src/pty/input_tests.rs`
 
 **Interfaces:**
+
 - Consumes: Task 2 的 `SessionHandle` / `manager_with_sinks` helper
 - Produces: `InputState` 的失败态（`failure: Option<String>`、`fail(&Error)`）、`Error::InputWorkerFailed` 的返回路径、fake 的 `with_failing_write(program, message) -> Self`
 
@@ -1133,10 +1139,12 @@ git commit -m "feat(pty): async writer failure marks the input side unavailable,
 ### Task 4: `kill` 成功关闭输入侧 / `forget` 后拒绝入队（T7/T8）
 
 **Files:**
+
 - Modify: `src-tauri/src/pty/manager.rs`（fake 加 `fail_next_kill`）
 - Test: `src-tauri/src/pty/input_tests.rs`
 
 **Interfaces:**
+
 - Consumes: Task 2 的 `PtyManager::{kill, forget}`（`kill` 成功关闭输入侧已在 Task 2 接线）
 - Produces: fake 的 `fail_next_kill(&self, session_id: &str)` + 字段 `failing_kills: Mutex<std::collections::HashSet<String>>`
 
@@ -1237,9 +1245,11 @@ git commit -m "test(pty): pin kill/forget interaction with the input side"
 ### Task 5: `PortablePtyBackend` 每会话独立加锁（INV-1/INV-4）
 
 **Files:**
+
 - Modify: `src-tauri/src/pty/portable_pty_backend.rs`
 
 **Interfaces:**
+
 - Consumes: 无
 - Produces: 同名 `PtyBackend` 实现，内部为 `Mutex<HashMap<String, Arc<LivePty>>>` + `LivePty { writer, master, child }` 三个独立 `Mutex`（**trait 不变**）
 
@@ -1398,10 +1408,12 @@ git commit -m "refactor(pty): hold per-session locks instead of the global map l
 ### Task 6: reaper 释放会话资源（spec §4.8）
 
 **Files:**
+
 - Modify: `src-tauri/src/pty/manager.rs`（`start_reading` 的 reaper 闭包 + fake 的 `forgotten` 记录）
 - Test: `src-tauri/src/pty/input_tests.rs`
 
 **Interfaces:**
+
 - Consumes: `PtyManager::forget`、`SessionHandle::shutdown_input`（Task 2）
 - Produces: reaper 在 `on_exit`（终态）之后走**固定顺序** `shutdown_input() → 从 manager map 移除 → backend.forget`，并在丢弃 PTY 前**有界**等待 reader 结束（`READER_DRAIN_GRACE = 250ms`，`Arc<AtomicBool>` 由 reader 线程置位）；fake 字段 `forgotten: Mutex<Vec<String>>`
 
@@ -1621,9 +1633,11 @@ git commit -m "fix(pty): release the session handle and PTY when the reaper sees
 ### Task 7: 真机 synthetic non-reader 验收（R1–R3）
 
 **Files:**
+
 - Create: `src-tauri/tests/runtime_input_backpressure.rs`
 
 **Interfaces:**
+
 - Consumes: `PtyManager::{with_input_capacity, spawn, start_reading, write, resize, kill, try_wait, pending_bytes}`、`PortablePtyBackend`
 - Produces: 8A 的真机证据（R1–R4：硬期限 + 实测耗时 + 尾部不截断；`tests/e2e/README.md` 引用其输出）
 
@@ -1837,9 +1851,11 @@ git commit -m "test(pty): a real child that never reads stdin can no longer free
 ### Task 8: 7D 回归 + 全量 Gate + 证据归档
 
 **Files:**
+
 - Modify: `tests/e2e/README.md`（新增「Task 8A」小节）
 
 **Interfaces:**
+
 - Consumes: 全部前序 Task
 - Produces: 8A 验收记录（真实输出）
 
@@ -1861,6 +1877,7 @@ git diff --stat origin/main..HEAD
 grep -rn "codex\|claude" src-tauri/src/pty/ src-tauri/src/error.rs   # 只应出现在测试数据/注释
 grep -rn "InputBackpressure\|InputClosed\|InputWorkerFailed" src-tauri/src
 ```
+
 Expected: 改动只落在 `pty/*`、`error.rs`、测试与文档；`pty/` 无 Harness 分支
 
 - [ ] **Step 4: 写证据到 `tests/e2e/README.md`**
