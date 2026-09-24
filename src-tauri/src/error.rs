@@ -35,6 +35,29 @@ pub enum Error {
 
     #[error("{0}")]
     InvalidInput(String),
+
+    /// 输入未被接受：会话的待写输入（含正在写的那一批）已达上限。
+    ///
+    /// 语义（spec §4.9）：**输入仍然可用**，只是本批次因容量不足被原子拒绝。
+    #[error(
+        "输入被丢弃：会话 {session_id} 的待写输入 {pending_bytes} 字节已达上限 {capacity_bytes}（本次 {attempted_bytes} 字节整批拒绝）"
+    )]
+    InputBackpressure {
+        session_id: String,
+        pending_bytes: usize,
+        capacity_bytes: usize,
+        attempted_bytes: usize,
+    },
+
+    /// 该会话的输入侧已**明确关闭**（kill 成功 / forget / shutdown）。
+    #[error("输入不可用：会话 {session_id} 的输入侧已关闭")]
+    InputClosed { session_id: String },
+
+    /// 异步 writer 遇到真实 `backend.write` 错误：输入路径**永久失败**。
+    ///
+    /// `detail` 保留底层错误用于诊断；**终态仍只由 reaper 决定**。
+    #[error("输入不可用：会话 {session_id} 的写入线程失败：{detail}")]
+    InputWorkerFailed { session_id: String, detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -45,5 +68,48 @@ impl Serialize for Error {
         S: Serializer,
     {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 背压错误必须自带四个诊断字段：用户贴 5 MiB 时要能一眼区分
+    /// 「队列本来就满」与「这一批自己超上限」（spec §4.9）。
+    #[test]
+    fn backpressure_error_carries_full_diagnostics() {
+        let error = Error::InputBackpressure {
+            session_id: "hub-1".to_string(),
+            pending_bytes: 65_536,
+            capacity_bytes: 65_536,
+            attempted_bytes: 12,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("hub-1"), "{message}");
+        assert!(message.contains("65536"), "{message}");
+        assert!(message.contains("12"), "{message}");
+        // 跨 IPC 仍是字符串（IpcResult 形状不变）。
+        assert_eq!(
+            serde_json::to_value(&error).expect("序列化"),
+            serde_json::json!(message)
+        );
+    }
+
+    #[test]
+    fn closed_and_worker_failure_are_distinguishable_variants() {
+        let closed = Error::InputClosed {
+            session_id: "hub-1".to_string(),
+        };
+        let failed = Error::InputWorkerFailed {
+            session_id: "hub-1".to_string(),
+            detail: "写入 PTY 失败".to_string(),
+        };
+
+        assert!(closed.to_string().contains("已关闭"));
+        assert!(failed.to_string().contains("写入 PTY 失败"));
+        assert!(matches!(closed, Error::InputClosed { .. }));
+        assert!(matches!(failed, Error::InputWorkerFailed { .. }));
     }
 }
