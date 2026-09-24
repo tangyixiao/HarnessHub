@@ -635,16 +635,25 @@ git commit -m "refactor(pty): terminate the owned tree instead of the direct chi
 - [ ] **Step 1: 写真机测试（forget 之后 parked write 必须返回）**
 
 本 Task 的**行为 RED** 是一个真机单元测试，放在 `portable_pty_backend.rs` 的
-`#[cfg(all(test, windows))] mod tests`（不需要新建文件）：
+`#[cfg(all(test, windows))] mod tests`（不需要新建文件）。
+
+> **实现时修正（重要，夹具前提）**：`conhost` 因为 `PSUEDOCONSOLE_INHERIT_CURSOR` 会在启动时
+> 发 `ESC[6n`（DSR）并等应答。生产里这个应答由前端终端模拟器（xterm.js）给出；
+> **headless 测试必须自己当终端**。第一版测试没有应答，结果 pseudoconsole 卡在初始化里，
+> 连 `ClosePseudoConsole` 都收不干净 —— master 被 drop 了 reader 也拿不到 EOF，
+> 于是被误判成「产品没关传输」。所以测试里必须先完成 DSR 握手（只应答一次，
+> 7D 的教训是无限重放会淹掉子进程输入缓冲），再 park 写。
 
 ```rust
+    /// conhost 因 `PSUEDOCONSOLE_INHERIT_CURSOR` 会发 DSR 并等应答；headless 测试要自己当终端。
+    const DSR_REQUEST: &[u8] = b"\x1b[6n";
+    const DSR_REPLY: &[u8] = b"\x1b[1;1R";
+
     /// `forget` 必须**主动**关闭 PTY master：否则 park 在 `write_all` 的线程（它自己持有
     /// `Arc<LivePty>`）永远不会返回 —— 这是 8B spike s5 三档实验唯一让写返回的那一档。
     #[test]
     fn forget_actively_closes_the_transport_so_a_parked_write_returns() {
-        use crate::harness::launch::LaunchSpec;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
         use std::time::{Duration, Instant};
 
         let backend = Arc::new(PortablePtyBackend::new());
@@ -662,7 +671,45 @@ git commit -m "refactor(pty): terminate the owned tree instead of the direct chi
                 rows: 24,
             })
             .expect("spawn");
-        let _reader = backend.take_reader("hub-parked").expect("reader");
+
+        // reader 一直排空 console 输出，看到 DSR 只应答一次。
+        let answered = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader = backend.take_reader("hub-parked").expect("reader");
+        {
+            let answered_for_reader = Arc::clone(&answered);
+            let done_for_reader = Arc::clone(&reader_done);
+            let backend_for_reader = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let mut reader = reader;
+                let mut sink = [0u8; 8192];
+                loop {
+                    match reader.read(&mut sink) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            let wants_dsr = sink[..read]
+                                .windows(DSR_REQUEST.len())
+                                .any(|window| window == DSR_REQUEST);
+                            if wants_dsr && !answered_for_reader.swap(true, Ordering::SeqCst) {
+                                let _ = backend_for_reader.write("hub-parked", DSR_REPLY);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                done_for_reader.store(true, Ordering::SeqCst);
+            });
+        }
+
+        // 握手必须在**开始 park 之前**完成：park 之后 writer 锁被占，应答写不进去。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !answered.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            answered.load(Ordering::SeqCst),
+            "前提：conhost 的 DSR 握手必须被应答，否则这条测试测不到传输关闭"
+        );
 
         let returned = Arc::new(AtomicBool::new(false));
         let returned_flag = Arc::clone(&returned);
@@ -680,15 +727,28 @@ git commit -m "refactor(pty): terminate the owned tree instead of the direct chi
             "前提：64 MiB 的写必须还 park 着，否则这条测试没测到目标场景"
         );
 
+        // 第一步：用户 kill → 树杀。**这一步解不开写**（spike s5 第二档）。
+        backend.terminate_tree("hub-parked").expect("树杀");
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            !returned.load(Ordering::SeqCst),
+            "树杀本身不得被当成「解开阻塞写」的手段（spike s5 第二档：still parked）"
+        );
+
+        // 第二步：reaper 写完终态 → forget。**这一步才解开写**（spike s5 第三档）。
         backend.forget("hub-parked").expect("forget");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !returned.load(Ordering::SeqCst) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             returned.load(Ordering::SeqCst),
-            "forget 之后 parked write 必须返回（有界 5s 观察窗口，不 join）"
+            "forget 之后 parked write 必须返回（有界 10s 观察窗口，不 join）"
+        );
+        assert!(
+            reader_done.load(Ordering::SeqCst),
+            "master 被关闭之后 reader 必须拿到 EOF（传输确实关了）"
         );
 
         let _ = std::process::Command::new("taskkill")
@@ -696,6 +756,9 @@ git commit -m "refactor(pty): terminate the owned tree instead of the direct chi
             .output();
     }
 ```
+
+（真机 RED 已实测：临时去掉 `forget` 里的 `close_transport()` 后，这条测试在 13s 内失败于
+`forget 之后 parked write 必须返回`。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -788,10 +851,15 @@ impl LivePty {
 ///
 /// 只用于「containment 没能建立」这一条失败路径；正常路径的整树终止走
 /// `Containment::terminate_tree()`。
+///
+/// 顺序是**先 root 后后代**（起草时写反了，实现时修正）：root 死了才不会在清理过程中
+/// 继续 fork 出新的后代；后代的 `ParentProcessId` 在 Windows 上是陈旧值（不会重挂到别的
+/// 进程），所以 root 死后仍然枚举得到。
 #[cfg(windows)]
-fn best_effort_cleanup(root_pid: Option<u32>, child: &Box<dyn Child + Send + Sync>) {
+fn best_effort_cleanup(root_pid: Option<u32>, child: &mut Box<dyn Child + Send + Sync>) {
+    let root_killed = child.kill().is_ok();
+
     if let Some(root_pid) = root_pid {
-        // 多轮：杀 root 之后后代会变成孤儿（父 PID 变成陈旧值），ParentProcessId 仍可枚举。
         for _ in 0..SWEEP_ROUNDS_LIMIT {
             let pending = descendants_of(root_pid);
             if pending.is_empty() {
@@ -804,9 +872,10 @@ fn best_effort_cleanup(root_pid: Option<u32>, child: &Box<dyn Child + Send + Syn
             }
         }
     }
-    // root 自己也杀掉（`Child::kill` 是既有原语）。
-    let mut child = child; // 见实现：这里需要 &mut，实际签名按最终代码调整
-    let _ = child.kill();
+
+    if !root_killed {
+        eprintln!("[pty] 启动失败清理无法结束 root 进程（best-effort）");
+    }
 }
 ```
 
