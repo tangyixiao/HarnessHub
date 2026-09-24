@@ -1033,7 +1033,8 @@ struct InputQueue {
 
 `InputState::new` 里加 `failure: None`。
 
-`try_enqueue` 开头（closed 检查**之前**）：
+`try_enqueue` 里，在 closed 检查**之后**、容量检查**之前**插入（**优先级：closed → failure →
+capacity**，见 spec §4.4.1）：
 
 ```rust
         if let Some(detail) = queue.failure.clone() {
@@ -1075,9 +1076,51 @@ worker 循环改为：
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::`
-Expected: `test result: ok`（含 T6）
+Expected: `test result: ok`（含 `the_reaper_releases_the_session_after_writing_the_terminal_state` 与
+`reader_eof_does_not_release_the_session`）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 锁死错误优先级（T11）**
+
+```rust
+/// T11：优先级固定为 closed → failure → capacity，不吃锁竞争（spec §4.4.1）。
+///
+/// 唯一可观测的竞争：worker 先失败，随后 kill 成功关闭输入侧（两个标志同时为真）。
+#[test]
+fn error_priority_is_closed_over_worker_failure() {
+    let backend = Arc::new(FakePtyBackend::new().with_failing_write(CODEX, "PTY 已关闭"));
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    manager.write("hub-a", b"first").expect("入队");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw_failure = false;
+    while Instant::now() < deadline {
+        if matches!(
+            manager.write("hub-a", b"probe"),
+            Err(Error::InputWorkerFailed { .. })
+        ) {
+            saw_failure = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(saw_failure, "先要看到 InputWorkerFailed");
+
+    // 显式关闭输入侧（kill 成功路径）→ 之后必须报 InputClosed，而不是继续报 worker 失败
+    manager.kill("hub-a").expect("kill 成功");
+    assert!(
+        matches!(manager.write("hub-a", b"after-kill"), Err(Error::InputClosed { .. })),
+        "closed 优先于 failure：显式关闭是对调用方最直接的当前事实"
+    );
+}
+```
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::input_tests::error_priority`
+Expected: PASS（若报 `InputWorkerFailed`，说明实现里的检查顺序反了 —— 按 spec §4.4.1 调成
+closed 在前，**不要**改测试）
+
+- [ ] **Step 6: 提交**
 
 ```bash
 cd D:/HarnessHub
@@ -1360,17 +1403,41 @@ git commit -m "refactor(pty): hold per-session locks instead of the global map l
 
 **Interfaces:**
 - Consumes: `PtyManager::forget`、`SessionHandle::shutdown_input`（Task 2）
-- Produces: reaper 在 `on_exit` 之后调用 `backend.forget` + 移除 handle + `shutdown_input`（**唯一**资源释放点）；fake 字段 `forgotten: Mutex<Vec<String>>`
+- Produces: reaper 在 `on_exit`（终态）之后走**固定顺序** `shutdown_input() → 从 manager map 移除 → backend.forget`，并在丢弃 PTY 前**有界**等待 reader 结束（`READER_DRAIN_GRACE = 250ms`，`Arc<AtomicBool>` 由 reader 线程置位）；fake 字段 `forgotten: Mutex<Vec<String>>`
 
 - [ ] **Step 1: 写失败测试**
 
 ```rust
 /// 会话退出后必须释放输入侧与 backend 句柄：否则每会话泄漏一个 worker 线程
-/// （现状 `forget` 全仓没有任何生产调用点）。
+/// （现状 `forget` 全仓没有任何生产调用点），同时**顺序**必须是「先写终态、再回收资源」。
 #[test]
-fn the_reaper_releases_the_session_and_its_input_side() {
+fn the_reaper_releases_the_session_after_writing_the_terminal_state() {
     let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
-    let manager = manager(Arc::clone(&backend), 64);
+    let exited = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let order_violated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let manager = {
+        let backend_for_sink = Arc::clone(&backend);
+        let exited_for_sink = Arc::clone(&exited);
+        let violated = Arc::clone(&order_violated);
+        PtyManager::with_input_capacity(
+            Arc::clone(&backend),
+            Arc::new(|_session, _seq, _bytes| {}),
+            Arc::new(move |session, _code| {
+                // 终态写入的这一刻，backend 里**不允许**已经被 forget
+                if !backend_for_sink
+                    .forgotten
+                    .lock()
+                    .expect("forgotten")
+                    .is_empty()
+                {
+                    violated.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                exited_for_sink.lock().expect("exited").push(session.to_string());
+            }),
+            64,
+        )
+    };
     spawn(&manager, "hub-a");
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1389,6 +1456,40 @@ fn the_reaper_releases_the_session_and_its_input_side() {
             .expect("forgotten")
             .contains(&"hub-a".to_string()),
         "reaper 必须调用 backend.forget"
+    );
+    assert_eq!(
+        exited.lock().expect("exited").as_slice(),
+        &["hub-a".to_string()],
+        "终态回调必须恰好发生一次"
+    );
+    assert!(
+        !order_violated.load(std::sync::atomic::Ordering::SeqCst),
+        "顺序必须是「先写终态、再回收资源」"
+    );
+}
+
+/// E1：reader EOF **不得**触发 forget（EOF ≠ 进程退出，ADR-0010 / spec §4.8）。
+#[test]
+fn reader_eof_does_not_release_the_session() {
+    let backend = Arc::new(FakePtyBackend::new().with_output(vec![b"bye".to_vec()]));
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    // 等 reader 把预置字节读完并 EOF（fake 的 try_wait 仍返回 None = 进程还在跑）
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(
+        backend.forgotten.lock().expect("forgotten").is_empty(),
+        "reader EOF 绝不能触发资源回收"
+    );
+    assert_eq!(
+        manager.pending_bytes("hub-a"),
+        Some(0),
+        "handle 必须还在（进程仍然存在）"
+    );
+    assert!(
+        manager.is_running("hub-a").expect("查询"),
+        "EOF 只表示输出流结束，进程仍应被视为运行中"
     );
 }
 ```
@@ -1413,51 +1514,89 @@ fake：加 `pub forgotten: Mutex<Vec<String>>`，并在 `forget` 中 push：
         }
 ```
 
-reaper 改为：
+reaper 改为（**顺序固定**：终态 → 有界等待 reader → shutdown_input → 移除 handle → backend.forget）：
 
 ```rust
-        // ---- reaper：唯一的退出状态事实来源 ----
+// 文件头新增：
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// reader 结束后的有界等待：让已经读到的最后字节交付完，避免「退出前最后几十字节被截断」
+/// （spec §4.8 E2）。**有界**，所以不是 join，也绝不会让 reaper 卡住。
+const READER_DRAIN_GRACE: Duration = Duration::from_millis(250);
+```
+
+```rust
+        // ---- reader：只负责输出与 EOF；**绝不**触发资源回收（spec E1）----
+        let on_output = Arc::clone(&self.on_output);
+        let reader_session = session_id.to_string();
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::clone(&reader_finished);
+        thread::spawn(move || {
+            let mut seq: u64 = 0;
+            let mut reader = reader;
+            let mut chunk = [0u8; 8192];
+
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break, // EOF：仅表示输出流结束
+                    Ok(read) => {
+                        // 原样转发：这里绝不解析、绝不改写字节。
+                        on_output(&reader_session, seq, &chunk[..read]);
+                        seq += 1;
+                    }
+                    Err(_) => break,
+                }
+            }
+            reader_done.store(true, Ordering::SeqCst);
+        });
+
+        // ---- reaper：唯一的退出状态事实来源 + 唯一的资源回收点 ----
         let backend = Arc::clone(&self.backend);
         let sessions = Arc::clone(&self.sessions);
         let on_exit = Arc::clone(&self.on_exit);
         let reaper_session = session_id.to_string();
         thread::spawn(move || loop {
-            let outcome = backend.try_wait(&reaper_session);
-            match outcome {
-                Ok(Some(code)) => {
-                    on_exit(&reaper_session, Some(code));
-                    break;
-                }
+            let exit_code = match backend.try_wait(&reaper_session) {
+                Ok(Some(code)) => Some(code),
                 // 仍在运行：继续等，**绝不猜测**
-                Ok(None) => thread::sleep(REAP_INTERVAL),
+                Ok(None) => {
+                    thread::sleep(REAP_INTERVAL);
+                    continue;
+                }
                 // 连退出状态都读不到：如实上报「拿不到」，由上层映射成 unknown/lost
-                Err(_) => {
-                    on_exit(&reaper_session, None);
-                    break;
-                }
+                Err(_) => None,
+            };
+
+            // 1) 终态：reaper 是唯一事实来源（forget 不决定 terminal state）。
+            on_exit(&reaper_session, exit_code);
+
+            // 2) 有界等待 reader 把已读到的字节交付完（E2；最多 READER_DRAIN_GRACE，必然会返回）。
+            let deadline = Instant::now() + READER_DRAIN_GRACE;
+            while !reader_finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
             }
+
+            // 3) 资源回收，顺序固定（spec §4.8）：
+            //    先 shutdown_input（让并发 write 拿到 InputClosed 而不是「未知会话」），
+            //    再从 manager map 移除，最后丢 backend 句柄（drop LivePty = 关 PTY master）。
+            let handle = sessions
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&reaper_session).cloned());
+            if let Some(handle) = handle {
+                handle.shutdown_input();
+            }
+            if let Ok(mut map) = sessions.lock() {
+                map.remove(&reaper_session);
+            }
+            let _ = backend.forget(&reaper_session);
+            break;
         });
+
+        Ok(())
+    }
 ```
-
-并在两个 `break` 之前统一插入释放（可提成一个局部闭包 `release`）：
-
-```rust
-        let release = {
-            let backend = Arc::clone(&self.backend);
-            let sessions = Arc::clone(&self.sessions);
-            move |session: &str| {
-                // 顺序固定：先移除 handle（之后的 write 走 InvalidInput），再 forget。
-                let handle = sessions.lock().ok().and_then(|mut map| map.remove(session));
-                if let Some(handle) = handle {
-                    handle.shutdown_input();
-                }
-                let _ = backend.forget(session);
-            }
-        };
-```
-
-`Ok(Some(code))` 分支：`on_exit(&reaper_session, Some(code)); release(&reaper_session); break;`
-`Err(_)` 分支：`on_exit(&reaper_session, None); release(&reaper_session); break;`
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -1486,7 +1625,7 @@ git commit -m "fix(pty): release the session handle and PTY when the reaper sees
 
 **Interfaces:**
 - Consumes: `PtyManager::{with_input_capacity, spawn, start_reading, write, resize, kill, try_wait, pending_bytes}`、`PortablePtyBackend`
-- Produces: 8A 的真机证据（`tests/e2e/README.md` 引用其输出）
+- Produces: 8A 的真机证据（R1–R4：硬期限 + 实测耗时 + 尾部不截断；`tests/e2e/README.md` 引用其输出）
 
 - [ ] **Step 1: 写测试**
 
@@ -1612,14 +1751,73 @@ fn a_real_child_that_never_reads_stdin_does_not_freeze_the_runtime() {
         assert!(!pid_alive(*pid), "synthetic child {pid} 必须被清理掉");
     }
 }
+
+/// E2 的回归锁：子进程**自己退出**（不 kill），reaper 走完「真实退出 → 终态 → 有界等待
+/// reader → 释放」之后，退出前最后写出的字节不得被截断。
+///
+/// 没有 `READER_DRAIN_GRACE` 时这条会在某些时序下丢尾部字节 —— 这正是那个有界等待存在的理由。
+#[test]
+fn the_last_output_is_not_truncated_when_the_reaper_releases_the_session() {
+    const MARKER: &str = "HH_TAIL_MARKER_271828";
+
+    let chunks: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&chunks);
+    let manager = PtyManager::with_input_capacity(
+        Arc::new(PortablePtyBackend::new()),
+        Arc::new(move |_session, _seq, bytes| {
+            sink.lock().expect("chunks").extend_from_slice(bytes);
+        }),
+        Arc::new(|_session, _code| {}),
+        CAPACITY,
+    );
+
+    let handle = manager
+        .spawn(
+            "hub-tail",
+            LaunchSpec {
+                program: PathBuf::from("cmd"),
+                args: vec!["/c".to_string(), format!("echo {MARKER}")],
+                cwd: None,
+                env: Vec::new(),
+                runtime_target_id: "local".to_string(),
+            },
+            80,
+            24,
+        )
+        .expect("spawn");
+    manager.start_reading("hub-tail").expect("start_reading");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if manager.pending_bytes("hub-tail").is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        manager.pending_bytes("hub-tail"),
+        None,
+        "reaper 必须回收 handle（真实退出路径）"
+    );
+
+    let text = String::from_utf8_lossy(&chunks.lock().expect("chunks")).into_owned();
+    assert!(
+        text.contains(MARKER),
+        "退出前最后写出的字节被截断了：{text:?}"
+    );
+    assert!(
+        !pid_alive(handle.pid.expect("pid") as u32),
+        "自己退出的 child 也必须真的结束"
+    );
+}
 ```
 
-- [ ] **Step 2: 跑测试（含自证）**
+- [ ] **Step 2: 跑测试（含自证 + 截断回归）**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test runtime_input_backpressure -- --nocapture`
-Expected: PASS，且日志里 `pending_bytes` 2 秒后仍是 65536。若这条断言失败，说明 synthetic child
-会读 stdin → 换备选 `pwsh -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 120"` 重跑，
-直到自证成立（**不要**放宽断言）
+Expected: 两条都 PASS，且日志里 `pending_bytes` 2 秒后仍是 65536。若这条断言失败，说明
+synthetic child 会读 stdin → 换备选 `pwsh -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 120"` 重跑，
+直到自证成立（**不要**放宽断言）。
 
 - [ ] **Step 3: 再跑一次确认稳定（真机用例不能一次就信）**
 
@@ -1687,7 +1885,7 @@ git commit -m "docs(e2e): record the Task 8A input-path acceptance and its measu
 ## 完成标准
 
 ```text
-✓ spec §8 的每一条 Gate 都有测试对应（T1–T10 + R1–R3 + 7D 回归）
+✓ spec §8 的每一条 Gate 都有测试对应（T1–T12 + R1–R4 + 7D 回归）
 ✓ pnpm verify 退出码 0；7D 全部回归绿
 ✓ INV-1..INV-4 在 portable_pty_backend.rs 里逐条可读
 ✓ `pending_bytes` 含 in-flight 由 T2 与 R1 两处锁死（单元 + 真机）

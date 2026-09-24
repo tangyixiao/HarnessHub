@@ -193,6 +193,24 @@ worker 遇到真实的 `backend.write` error：
 5. kill / resize / try_wait / reaper 继续正常工作
 6. **不写 Session 终态**（进程是否退出只有 reaper 是事实来源）
 7. **不新增 PtyEvent**
+
+### 4.4.1 错误优先级（**固定，不许由锁竞争决定**）
+
+```text
+1. closed                 → InputClosed
+2. else failure           → InputWorkerFailed
+3. else 容量不足          → InputBackpressure
+4. else                   → 入队
+```
+
+理由：显式 kill / forget 之后，「输入已关闭」是对调用方**最直接的当前事实**；worker 的底层错误
+仍保留在 `failure` 里作为诊断（随 `InputWorkerFailed.detail` 一并返回）。
+
+可观测的竞争场景只有一个：**worker 先失败，随后 kill 成功关闭输入侧**
+（`forget` 之后 handle 已被移除，调用方拿到的是「未知会话」而不是 `InputClosed`）。
+这条必须由测试锁死（§6.1 T11），不能靠实现里的检查顺序碰巧成立。
+
+**未知 session 仍沿用原有 `InvalidInput("未知会话…")`**，不混进 `InputClosed`。
 ```
 
 ### 4.5 kill 成功 → 关闭输入侧
@@ -236,19 +254,51 @@ trait / impl / fake）。也就是 `PortablePtyBackend::sessions` 里的 `LivePt
 map 里（PTY master 一直不关）。8A 之后每个会话还会多一个 `SessionHandle` + 一个 worker 线程，
 不释放就是「每个结束的会话泄漏一个线程 + 一个队列」。
 
-因此 8A 必须补上释放路径，放在**唯一知道进程真的消失的地方** —— reaper：
+因此 8A 必须补上释放路径，放在**唯一知道进程真的消失的地方** —— reaper。**顺序固定，不许调整**：
 
 ```text
-reaper 拿到退出状态 → on_exit(session, code)   // 现有：写 Session 终态 + 发 Exited
-                    → backend.forget(session)
-                    → sessions.remove(session) → shutdown_input()
+reaper 观测到真实子进程退出
+  ↓
+SessionService 写入终态（唯一事实来源）
+  ↓
+PtyManager::forget(session_id)
+    ├─ SessionHandle::shutdown_input()
+    ├─ 从 manager 的 handle map 移除
+    └─ 从 backend 的 session map 移除（drop LivePty）
 ```
 
-- `PtyManager::forget(session_id)` 仍然公开（手动/兜底路径），语义不变。
-- reaper 需要能访问 `sessions` map：`sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>`，
-  reaper 闭包 clone 一份 Arc。
-- 附带好处（**不是承诺**）：drop `LivePty` 会关闭 PTY master，可能让 park 在写里的 worker
-  拿到错误并退出。§7 仍然按「可能长期不返回」记录。
+原则不变：**reaper 是退出事实的唯一来源；forget 只是资源回收，不决定 Session terminal state。**
+顺序细节：先 `shutdown_input()` 再移除，是为了让「已经 clone 到 handle 的并发 write」拿到更精确的
+`InputClosed`，而不是「未知会话」；移除放在最后一步。
+
+`PtyManager::forget(session_id)` 仍然公开（手动/兜底路径），语义不变。
+
+**必须守住的两个边界：**
+
+```text
+E1  reader EOF **不得**触发 forget。EOF ≠ 进程退出（ADR-0010）：reader 线程只转发字节然后结束，
+    绝不写终态、绝不做资源回收。释放只发生在 reaper。
+
+E2  forget 之后，已经持有独立 reader clone 的读取必须仍能把**退出前最后写出的字节** drain 出来 ——
+    不得因为资源回收引入「最后几十字节被截断」的回归。
+```
+
+E2 不能只靠测试祈祷，需要一个明确的机制：`PtyManager::forget` 在 `backend.forget`（drop `LivePty`
+→ 关 PTY master）**之前**，等 reader 线程结束最多 `READER_DRAIN_GRACE = 250ms`。
+reader 线程退出时置一个 `Arc<AtomicBool>`（`reader_finished`），reaper 只做**有界等待**：
+
+```text
+reaper: on_exit(...)                      // 终态
+        wait_up_to(250ms, reader_finished) // 让 reader 把已完成读取的字节交付完
+        shutdown_input() → 移除 handle → backend.forget
+```
+
+为什么这不是「join」：它是 reaper 里的**有界**等待（最多 250ms，必然返回），不是
+`shutdown_input()` / Drop 路径上的无界 join；no-join 规则针对的是后者。子进程被 kill 而
+descendant 仍持有 PTY 时，reader 可能永远到不了 EOF —— 250ms 上限保证 reaper 仍然会继续走完释放。
+
+附带好处（**不是承诺**）：drop `LivePty` 会关闭 PTY master，可能让 park 在写里的 worker
+拿到错误并退出。§7 仍然按「可能长期不返回」记录。
 
 ### 4.9 错误类型（`error.rs`）
 
@@ -267,6 +317,23 @@ InputWorkerFailed { session_id: String, detail: String },
 ```
 
 诊断字段按 review 意见补全：用户贴 5 MiB 时，一眼就能区分「队列本来就满」还是「这一批自己超上限」。
+
+三个变体的语义**固定**为：
+
+```text
+InputBackpressure
+= 输入仍然可用，只是本批次因容量不足被**原子拒绝**（整批不落地）
+
+InputClosed
+= 该 session 的输入侧已**明确关闭**
+  （kill 成功 / forget / shutdown_input）
+
+InputWorkerFailed
+= 异步 writer 遇到真实 backend.write 错误，
+  输入路径因此**永久失败**（detail 保留底层错误用于诊断）
+```
+
+未知 session 走原有错误，**不**包装成上面任何一个。
 
 ## 5. 行为变化清单（谁会看到什么不同）
 
@@ -321,6 +388,12 @@ T9  shutdown_discards_queued_batches_and_never_joins
     worker park 在阻塞写时 shutdown_input() 必须在硬期限内返回（禁止 join 的回归锁）
 T10 a_blocked_writer_does_not_freeze_a_second_session（同 T1 但走 resize/kill 之外再加写，
     明确证明 B 的输入通道可用）
+T11 error_priority_is_closed_over_worker_failure
+    worker 先失败（InputWorkerFailed 可观测）之后 kill 成功关闭输入侧 →
+    下一次 write 必须报 InputClosed（§4.4.1 的优先级由测试锁死，不吃锁竞争）
+T12 reader_eof_does_not_release_the_session（E1）
+    fake 输出读完 EOF 之后：backend 未被 forget、handle 仍在、`is_running` 仍为 true
+    （EOF 只表示输出流结束，不表示进程退出）
 ```
 
 ### 6.2 真机 synthetic child（`#[cfg(windows)]`，8A 的验收核心）
@@ -341,6 +414,9 @@ R2  同一时刻（A 的 writer 真 park 在 OS write 里）：
       A 的 resize ✓ kill ✓ try_wait ✓
     每次调用都在硬期限内返回，并打印实测毫秒数作为证据
 R3  A kill 之后 enqueue → InputClosed；进程树清理干净（8A 用 taskkill /T，8B 换成 terminate_tree）
+R4  the_last_output_is_not_truncated_when_the_reaper_releases_the_session（E2）
+    子进程自己打印一个唯一 marker 后**自己退出**（不 kill）→ reaper 走「真实退出 → 终态 →
+    有界等待 reader → 释放」→ 收集到的输出必须完整包含该 marker，且 handle 已被回收
 ```
 
 ### 6.3 回归
@@ -393,6 +469,8 @@ L2  reaper 释放资源依赖退出状态可被观测；若 try_wait 永久返�
 ✓ 会话退出后释放输入侧与 PTY 句柄（reaper 负责；修掉 forget 从未被调用的泄漏）
 ✓ 真机 synthetic non-reader：同一结论 + 实测毫秒证据 + 零残留进程
 ✓ 7D 全部回归绿；pnpm verify 退出码 0
+✓ 错误优先级固定为 closed → failure → capacity，并由测试锁死（T11，不吃锁竞争）
+✓ reader EOF 不触发资源回收（E1 / T12）；reaper 释放后退出前的尾部输出不截断（E2 / R4）
 ✓ 无 Harness 特判、无新 IPC DTO、UI 无新状态
 ```
 
