@@ -54,10 +54,17 @@ fn serialize() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// 输出汇聚：只看字节，不做任何解析（ADR-0009：解析属于终端模拟器）。
+///
+/// `seen` 是每会话的**累计**首部（诊断用，上限 [`SEEN_LIMIT`]）：真机偶发「树没长出来」时，
+/// 只有把 TUI 的实际字节打出来才能区分「卡在首屏」与「shim 根本没起 node」。
 #[derive(Default)]
 struct Streams {
     chunks: Mutex<Vec<(String, Vec<u8>)>>,
+    seen: Mutex<HashMap<String, Vec<u8>>>,
 }
+
+/// 每会话最多留这么多字节的诊断输出。
+const SEEN_LIMIT: usize = 4096;
 
 impl Streams {
     fn sink(self: &Arc<Self>) -> OutputSink {
@@ -66,6 +73,15 @@ impl Streams {
             streams
                 .lock_chunks()
                 .push((session.to_string(), bytes.to_vec()));
+            let mut seen = streams
+                .seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = seen.entry(session.to_string()).or_default();
+            if entry.len() < SEEN_LIMIT {
+                let room = SEEN_LIMIT - entry.len();
+                entry.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            }
         })
     }
 
@@ -77,6 +93,25 @@ impl Streams {
 
     fn take(&self) -> Vec<(String, Vec<u8>)> {
         std::mem::take(&mut *self.lock_chunks())
+    }
+
+    /// 诊断用：某会话输出首部的可读形式。
+    fn head(&self, session: &str) -> String {
+        let seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match seen.get(session) {
+            None => "<没有收到任何输出>".to_string(),
+            Some(bytes) => {
+                let text: String = String::from_utf8_lossy(bytes)
+                    .chars()
+                    .map(|c| if c.is_control() { '.' } else { c })
+                    .take(300)
+                    .collect();
+                format!("{} 字节，首部：{text}", bytes.len())
+            }
+        }
     }
 }
 
@@ -162,6 +197,21 @@ impl Harness {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// 树没长出来时的现场：每个会话收到的字节首部 + 已应答 DSR 次数。
+    fn diagnose(&self, sessions: &[&str]) -> String {
+        sessions
+            .iter()
+            .map(|session| {
+                format!(
+                    "{session}: DSR 应答 {} 次；输出 {}",
+                    self.answered.get(*session).copied().unwrap_or(0),
+                    self.streams.head(session)
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
     }
 
     /// 等到 root 的后代节点数达到 `min_nodes`（含 root），期间持续应答 DSR。
@@ -402,12 +452,40 @@ fn terminate_tree_scopes_to_one_owned_tree_without_any_release() {
     let b = harness.spawn("hub-raw-b", CODEX, &[], codex_cwd);
     let c = harness.spawn("hub-raw-c", CLAUDE, &[], claude_cwd);
 
-    let tree_a = harness.wait_tree(a, 3, Duration::from_secs(30));
-    let tree_b = harness.wait_tree(b, 3, Duration::from_secs(30));
-    let tree_c = harness.wait_tree(c, 2, Duration::from_secs(30));
+    // 三条树**一起**等（分开顺序等会让先等的那条在负载下多跑几十秒，
+    // 真机上出现过「B 的 codex 自己先退出」把断言打成假阴性）。
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut tree_a, mut tree_b, mut tree_c);
+    loop {
+        tree_a = std::iter::once(a)
+            .chain(descendants(a))
+            .collect::<Vec<u32>>();
+        tree_b = std::iter::once(b)
+            .chain(descendants(b))
+            .collect::<Vec<u32>>();
+        tree_c = std::iter::once(c)
+            .chain(descendants(c))
+            .collect::<Vec<u32>>();
+        if (tree_a.len() >= 3 && tree_b.len() >= 3 && tree_c.len() >= 2)
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     eprintln!("[R4/raw] A={tree_a:?} B={tree_b:?} C={tree_c:?}");
     assert!(tree_a.len() >= 3 && tree_b.len() >= 3, "A/B 都必须是三层树");
     assert!(tree_c.len() >= 2, "C 至少两层");
+
+    // **判别性断言的正确形式**：拿「terminate(A) 之前还活着的 B/C 节点」做前后对比。
+    // 若写成「B 的树必须与初始快照等长」，任何**自己退出**的节点都会变成假阴性
+    // （真机在全量套件里踩到过一次）。真正要证明的是「A 的终止没有杀掉 B/C 的活节点」。
+    let alive_b = survivors(&tree_b);
+    let alive_c = survivors(&tree_c);
+    assert!(
+        !alive_b.is_empty() && !alive_c.is_empty(),
+        "前提：terminate(A) 之前 B 与 C 都必须还有活着的节点（B={alive_b:?} C={alive_c:?}）"
+    );
 
     harness
         .backend
@@ -420,25 +498,24 @@ fn terminate_tree_scopes_to_one_owned_tree_without_any_release() {
         survivors(&tree_a)
     );
     std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(
-        survivors(&tree_b).len(),
-        tree_b.len(),
-        "B 的整棵树必须存活（A/B 同名可执行文件），已死的：{:?}",
-        tree_b
-            .iter()
-            .copied()
-            .filter(|pid| !pid_alive(*pid))
-            .collect::<Vec<u32>>()
+
+    let killed_b: Vec<u32> = alive_b
+        .iter()
+        .copied()
+        .filter(|pid| !pid_alive(*pid))
+        .collect();
+    let killed_c: Vec<u32> = alive_c
+        .iter()
+        .copied()
+        .filter(|pid| !pid_alive(*pid))
+        .collect();
+    assert!(
+        killed_b.is_empty(),
+        "terminate(A) 不得碰 B 的任何活节点（A/B 同名可执行文件），被误杀的：{killed_b:?}（B 全树 {tree_b:?}）"
     );
-    assert_eq!(
-        survivors(&tree_c).len(),
-        tree_c.len(),
-        "C 的整棵树必须存活，已死的：{:?}",
-        tree_c
-            .iter()
-            .copied()
-            .filter(|pid| !pid_alive(*pid))
-            .collect::<Vec<u32>>()
+    assert!(
+        killed_c.is_empty(),
+        "terminate(A) 不得碰 C 的任何活节点，被误杀的：{killed_c:?}（C 全树 {tree_c:?}）"
     );
 
     harness.backend.terminate_tree("hub-raw-b").ok();
@@ -499,6 +576,9 @@ fn real_codex_and_claude_trees_are_fully_terminated() {
 
         let tree = harness.wait_tree(root, min_nodes, Duration::from_secs(30));
         eprintln!("[R2/R3] {session} tree = {tree:?}");
+        if tree.len() < min_nodes {
+            eprintln!("[R2/R3] 现场：{}", harness.diagnose(&[session]));
+        }
         assert!(
             tree.len() >= min_nodes,
             "{session} 的树节点数不足（期望 ≥ {min_nodes}）：{tree:?}"
@@ -542,12 +622,47 @@ fn killing_one_session_tree_never_touches_another() {
     let b = harness.spawn("hub-b", CODEX, &[], codex_cwd);
     let c = harness.spawn("hub-c", CLAUDE, &[], claude_cwd);
 
-    let tree_a = harness.wait_tree(a, 3, Duration::from_secs(30));
-    let tree_b = harness.wait_tree(b, 3, Duration::from_secs(30));
-    let tree_c = harness.wait_tree(c, 2, Duration::from_secs(30));
+    // 三条树一起等（理由同 R4/raw：顺序等会在负载下拖长，节点可能自己先退出）。
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut tree_a, mut tree_b, mut tree_c);
+    loop {
+        // **必须**持续应答 DSR：不 pump 的话 conhost 卡在初始化，TUI 连首屏都过不去、
+        // 后代永远不会出现（这条曾经漏掉，真机上表现为「三条树都只有 root」）。
+        harness.pump();
+        tree_a = std::iter::once(a)
+            .chain(descendants(a))
+            .collect::<Vec<u32>>();
+        tree_b = std::iter::once(b)
+            .chain(descendants(b))
+            .collect::<Vec<u32>>();
+        tree_c = std::iter::once(c)
+            .chain(descendants(c))
+            .collect::<Vec<u32>>();
+        if (tree_a.len() >= 3 && tree_b.len() >= 3 && tree_c.len() >= 2)
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     eprintln!("[R4] A={tree_a:?} B={tree_b:?} C={tree_c:?}");
+    if tree_a.len() < 3 || tree_b.len() < 3 || tree_c.len() < 2 {
+        eprintln!(
+            "[R4] 现场：\n{}",
+            harness.diagnose(&["hub-a", "hub-b", "hub-c"])
+        );
+    }
     assert!(tree_a.len() >= 3 && tree_b.len() >= 3, "A/B 都必须是三层树");
     assert!(tree_c.len() >= 2, "C 至少两层");
+
+    // 前后对比「terminate(A) 之前还活着的节点」，而不是「与初始快照等长」：
+    // 后者会把「B/C 自己退出的节点」误判成误伤。
+    let alive_b = survivors(&tree_b);
+    let alive_c = survivors(&tree_c);
+    assert!(
+        !alive_b.is_empty() && !alive_c.is_empty(),
+        "前提：kill(A) 之前 B 与 C 都必须还有活着的节点（B={alive_b:?} C={alive_c:?}）"
+    );
 
     harness.kill("hub-a");
     assert!(
@@ -555,29 +670,25 @@ fn killing_one_session_tree_never_touches_another() {
         "A 的全树必须死，仍在跑：{:?}",
         survivors(&tree_a)
     );
-    // 给 OS 一点时间把「误伤」暴露出来：B/C 里**任何一个**消失都是 session-scoped 失败。
+    // 给 OS 一点时间把「误伤」暴露出来：B/C 的**活节点**里任何一个消失都是 session-scoped 失败。
     std::thread::sleep(Duration::from_millis(1000));
-    let alive_b = survivors(&tree_b);
-    let alive_c = survivors(&tree_c);
-    assert_eq!(
-        alive_b.len(),
-        tree_b.len(),
-        "B 的整棵树必须存活（A/B 同名可执行文件），已死的：{:?}",
-        tree_b
-            .iter()
-            .copied()
-            .filter(|pid| !pid_alive(*pid))
-            .collect::<Vec<u32>>()
+    let killed_b: Vec<u32> = alive_b
+        .iter()
+        .copied()
+        .filter(|pid| !pid_alive(*pid))
+        .collect();
+    let killed_c: Vec<u32> = alive_c
+        .iter()
+        .copied()
+        .filter(|pid| !pid_alive(*pid))
+        .collect();
+    assert!(
+        killed_b.is_empty(),
+        "kill(A) 不得碰 B 的任何活节点（A/B 同名可执行文件），被误杀的：{killed_b:?}（B 全树 {tree_b:?}）"
     );
-    assert_eq!(
-        alive_c.len(),
-        tree_c.len(),
-        "C 的整棵树必须存活，已死的：{:?}",
-        tree_c
-            .iter()
-            .copied()
-            .filter(|pid| !pid_alive(*pid))
-            .collect::<Vec<u32>>()
+    assert!(
+        killed_c.is_empty(),
+        "kill(A) 不得碰 C 的任何活节点，被误杀的：{killed_c:?}（C 全树 {tree_c:?}）"
     );
 
     harness.kill("hub-b");
