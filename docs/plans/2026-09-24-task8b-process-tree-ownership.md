@@ -156,6 +156,24 @@ mod tests {
             "job 句柄关闭后 {child_pid} 必须被 OS 回收"
         );
     }
+
+    /// 失败路径：assign 一个打不开的进程必须报**具体 Win32 error**，不能返回 Ok、
+    /// 也不能只报一句「失败了」（约束 6 后半句）。
+    #[test]
+    fn assign_reports_the_win32_error_for_an_unopenable_process() {
+        let containment = Containment::create().expect("create job");
+
+        // 0xFFFF_FFFF 不可能是真实进程（OpenProcess 必定失败）。
+        let error = containment
+            .assign(0xFFFF_FFFF)
+            .expect_err("打不开的进程必须报错");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("os error"),
+            "错误信息必须带具体 Win32 error：{message}"
+        );
+    }
 }
 ```
 
@@ -201,7 +219,6 @@ windows-sys = { version = "0.59", features = [
 #[cfg(windows)]
 mod windows_impl {
     use std::ffi::c_void;
-    use std::sync::Mutex;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -215,7 +232,8 @@ mod windows_impl {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+        PROCESS_TERMINATE,
     };
 
     use crate::error::{Error, Result};
@@ -224,10 +242,18 @@ mod windows_impl {
     pub const SWEEP_ROUNDS_LIMIT: usize = 4;
 
     /// 一个 Session 的进程树所有权。**不可 Clone**。
+    ///
+    /// 句柄存成 `usize` 而不是 `HANDLE`：`HANDLE = *mut c_void` 既不是 `Send` 也不是 `Sync`，
+    /// 而 `Containment` 要活在 `Arc<LivePty>` 里被多个线程共享。存整数即可自动获得
+    /// `Send + Sync`，**不需要** `unsafe impl`（字段私有，只有本模块把它转回 `HANDLE`）。
     pub struct Containment {
-        job: HANDLE,
-        /// 只为了让 `Containment: Send + Sync`（`HANDLE` 本身不是 `Sync`）。
-        _marker: Mutex<()>,
+        job: usize,
+    }
+
+    impl Containment {
+        fn handle(&self) -> HANDLE {
+            self.job as HANDLE
+        }
     }
     impl Containment {
         pub fn create() -> Result<Self> {
@@ -256,7 +282,9 @@ mod windows_impl {
                     error.raw_os_error().unwrap_or(0)
                 )));
             }
-            Ok(Self { job, _marker: Mutex::new(()) })
+            Ok(Self {
+                job: job as usize,
+            })
         }
 
         pub fn assign(&self, pid: u32) -> Result<()> {
@@ -269,7 +297,7 @@ mod windows_impl {
                     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
                 )));
             }
-            let ok = unsafe { AssignProcessToJobObject(self.job, process) };
+            let ok = unsafe { AssignProcessToJobObject(self.handle(), process) };
             let error = std::io::Error::last_os_error();
             unsafe { CloseHandle(process) };
             if ok == 0 {
@@ -287,7 +315,7 @@ mod windows_impl {
                 return Ok(false); // 进程已退出/无权限：当作「不在 job 里」，交给上层补扫决定
             }
             let mut member: i32 = 0;
-            let ok = unsafe { IsProcessInJob(process, self.job, &mut member) };
+            let ok = unsafe { IsProcessInJob(process, self.handle(), &mut member) };
             unsafe { CloseHandle(process) };
             if ok == 0 {
                 return Ok(false);
@@ -296,7 +324,7 @@ mod windows_impl {
         }
 
         pub fn terminate_tree(&self) -> Result<()> {
-            let ok = unsafe { TerminateJobObject(self.job, 1) };
+            let ok = unsafe { TerminateJobObject(self.handle(), 1) };
             if ok == 0 {
                 return Err(Error::InvalidInput(format!(
                     "终止进程树失败（os error {}）",
@@ -310,7 +338,7 @@ mod windows_impl {
             let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
             let ok = unsafe {
                 QueryInformationJobObject(
-                    self.job,
+                    self.handle(),
                     JobObjectBasicAccountingInformation,
                     &mut info as *mut _ as *mut c_void,
                     std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
@@ -327,8 +355,29 @@ mod windows_impl {
     impl Drop for Containment {
         fn drop(&mut self) {
             // 最后一句柄关闭 → KILL_ON_JOB_CLOSE 生效（宿主异常死亡时由 OS 做同样的事）。
-            unsafe { CloseHandle(self.job) };
+            unsafe { CloseHandle(self.handle()) };
         }
+    }
+
+    /// 定向终止单个进程（只给启动失败的 best-effort 清理用）。
+    pub fn terminate_pid(pid: u32) -> Result<()> {
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            return Err(Error::InvalidInput(format!(
+                "打开进程 {pid} 失败（os error {}）",
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+            )));
+        }
+        let ok = unsafe { TerminateProcess(process, 1) };
+        let error = std::io::Error::last_os_error();
+        unsafe { CloseHandle(process) };
+        if ok == 0 {
+            return Err(Error::InvalidInput(format!(
+                "终止进程 {pid} 失败（os error {}）",
+                error.raw_os_error().unwrap_or(0)
+            )));
+        }
+        Ok(())
     }
 
     /// 从 root 开始的后代 PID（不包含 root），基于 ToolHelp 快照。
@@ -367,14 +416,14 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{descendants_of, Containment, SWEEP_ROUNDS_LIMIT};
+pub use windows_impl::{descendants_of, terminate_pid, Containment, SWEEP_ROUNDS_LIMIT};
 ````
 
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::containment`
-Expected: `test result: ok. 2 passed`（`a_job_contains_the_child_and_its_descendants` /
-`closing_the_last_handle_kills_the_contained_tree`）
+Expected: `test result: ok. 3 passed`（`a_job_contains_the_child_and_its_descendants` /
+`closing_the_last_handle_kills_the_contained_tree` / `assign_reports_the_win32_error_for_an_unopenable_process`）
 
 - [ ] **Step 6: 提交**
 
@@ -648,67 +697,6 @@ git commit -m "refactor(pty): terminate the owned tree instead of the direct chi
     }
 ```
 
-```rust
-    /// `forget` 必须**主动**关闭 PTY master：否则 park 在 `write_all` 的线程（它自己持有
-    /// `Arc<LivePty>`）永远不会返回 —— 这是 8B spike s5 三档实验唯一让写返回的那一档。
-    #[test]
-    fn forget_actively_closes_the_transport_so_a_parked_write_returns() {
-        use std::sync::Arc;
-        let backend = Arc::new(PortablePtyBackend::new());
-        let spawn = |session: &str, program: &str, args: &[&str]| {
-            backend
-                .spawn(PtySpawnRequest {
-                    session_id: session.to_string(),
-                    spec: LaunchSpec {
-                        program: std::path::PathBuf::from(program),
-                        args: args.iter().map(|a| a.to_string()).collect(),
-                        cwd: None,
-                        env: Vec::new(),
-                        runtime_target_id: "local".to_string(),
-                    },
-                    cols: 80,
-                    rows: 24,
-                })
-                .expect("spawn")
-        };
-        let _handle = spawn("hub-parked", "ping", &["-n", "300", "127.0.0.1"]);
-
-        let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let parked_flag = Arc::clone(&parked);
-        let returned_flag = Arc::clone(&returned);
-        let backend_for_writer = Arc::clone(&backend);
-        std::thread::spawn(move || {
-            let payload = vec![b'x'; 64 * 1024 * 1024];
-            parked_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            let _ = backend_for_writer.write("hub-parked", &payload);
-            returned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        assert!(parked.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(
-            !returned.load(std::sync::atomic::Ordering::SeqCst),
-            "前提：64 MiB 的写必须还 park 着（4 MiB 会被 ConPTY 缓冲吞掉）"
-        );
-
-        backend.forget("hub-parked").expect("forget");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !returned.load(std::sync::atomic::Ordering::SeqCst)
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            returned.load(std::sync::atomic::Ordering::SeqCst),
-            "forget 之后 parked write 必须返回（有界 5s 观察窗口，不 join）"
-        );
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &_handle.pid.unwrap_or(0).to_string()])
-            .output();
-    }
-```
-
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::portable_pty_backend`
@@ -719,9 +707,11 @@ Expected: FAIL `forget 之后 parked write 必须返回`（当前 forget 只 `se
 ```rust
 struct LiveProcess {
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    /// Windows：Job Object。单点所有权，**不 Clone / 不 Duplicate / 不给别的线程**。
+    /// Windows：Job Object。**单点所有权**（不 Clone / 不 Duplicate / 不给别的线程），
+    /// 而且和 master 一样是 `Option`：`forget` 必须能**显式取出并关闭唯一句柄** ——
+    /// parked writer 持有 `Arc<LivePty>` 时，等 Arc drop 就等于永远不关 job。
     #[cfg(windows)]
-    containment: Containment,
+    containment: Mutex<Option<Containment>>,
 }
 
 struct LivePty {
@@ -740,6 +730,21 @@ impl LivePty {
             let _ = master.take();
         }
     }
+
+    /// 显式取出并关闭唯一的 Job 句柄（`KILL_ON_JOB_CLOSE` 因此立即生效）。
+    ///
+    /// 返回未释放过的错误：**不吞掉**，也不重复释放（`take()` 之后是 `None`，幂等）。
+    #[cfg(windows)]
+    fn release_containment(&self) -> Result<()> {
+        let mut guard = self
+            .process
+            .containment
+            .lock()
+            .map_err(|_| Error::StateLockPoisoned)?;
+        // take() 之后 drop 掉 Containment → CloseHandle → 最后一句柄关闭 → job 内进程被回收。
+        drop(guard.take());
+        Ok(())
+    }
 }
 ```
 
@@ -753,25 +758,65 @@ impl LivePty {
         // 2) openpty + CreateProcess（现状不变）
         let child = pair.slave.spawn_command(builder)?;
         drop(pair.slave);
-        let pid = child.process_id();
 
-        // 3) **立即** assign root：job 成员资格只被「加入之后创建」的子进程继承。
+        // 3) root PID 必须拿得到：拿不到就等于「无法建立 containment」，不能静默返回成功。
+        let pid = child.process_id().ok_or_else(|| {
+            best_effort_cleanup(None, &child);
+            Error::InvalidInput(
+                "无法建立进程包含：root PID 不可用（containment 无从建立）".to_string(),
+            )
+        })?;
+
+        // 4) **立即** assign root：job 成员资格只被「加入之后创建」的子进程继承。
         #[cfg(windows)]
         {
-            if let Some(pid) = pid {
-                containment.assign(pid).map_err(|error| {
-                    // best-effort 定向清理：不留一个半受控的进程
-                    let _ = child.kill();
-                    Error::InvalidInput(format!(
-                        "无法建立进程包含（AssignProcessToJobObject 失败）：{error}"
-                    ))
-                })?;
-                // 4) 定点补扫：把 assign 之前已经创建出来的后代补进去（best-effort，见 ADR-0013）。
-                reconcile_descendants(&containment, pid);
+            containment.assign(pid).map_err(|error| {
+                // best-effort 定向清理：root 与**可枚举的后代**都要尽力收掉，不能只杀 root。
+                best_effort_cleanup(Some(pid), &child);
+                Error::InvalidInput(format!(
+                    "无法建立进程包含（AssignProcessToJobObject 失败）：{error}"
+                ))
+            })?;
+            // 5) 定点补扫：把 assign 之前已经创建出来的后代补进去（best-effort，见 ADR-0013）。
+            reconcile_descendants(&containment, pid);
+        }
+```
+
+```rust
+/// 启动失败时的 best-effort 定向清理：**root + 可枚举的后代**（不能只杀 root，
+/// 否则就是一个半受控、还在跑的进程树）。
+///
+/// 只用于「containment 没能建立」这一条失败路径；正常路径的整树终止走
+/// `Containment::terminate_tree()`。
+#[cfg(windows)]
+fn best_effort_cleanup(root_pid: Option<u32>, child: &Box<dyn Child + Send + Sync>) {
+    if let Some(root_pid) = root_pid {
+        // 多轮：杀 root 之后后代会变成孤儿（父 PID 变成陈旧值），ParentProcessId 仍可枚举。
+        for _ in 0..SWEEP_ROUNDS_LIMIT {
+            let pending = descendants_of(root_pid);
+            if pending.is_empty() {
+                break;
+            }
+            for pid in pending {
+                if let Err(error) = terminate_pid(pid) {
+                    eprintln!("[pty] 启动失败清理 {pid} 失败（best-effort）：{error}");
+                }
             }
         }
+    }
+    // root 自己也杀掉（`Child::kill` 是既有原语）。
+    let mut child = child; // 见实现：这里需要 &mut，实际签名按最终代码调整
+    let _ = child.kill();
+}
+```
 
-        // 5) 组装 LivePty（master 为 Option）
+> `terminate_pid(pid)` = `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess`，放在
+> `pty::containment` 里（与 `assign` 同一处，权限常量复用）。
+> `best_effort_cleanup` 的签名在实现时按借用需要调整（`child` 需要 `&mut`）；**不要**为了绕借用
+> 把 root 的 kill 省掉。
+
+```rust
+        // 6) 组装 LivePty（master / containment 都是 Option）
 ```
 
 ```rust
@@ -804,7 +849,17 @@ fn reconcile_descendants(containment: &Containment, root_pid: u32) {
         let live = self.live(session_id)?;
         #[cfg(windows)]
         {
-            return live.process.containment.terminate_tree();
+            let guard = live
+                .process
+                .containment
+                .lock()
+                .map_err(|_| Error::StateLockPoisoned)?;
+            let containment = guard.as_ref().ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "会话 {session_id} 的 containment 已释放，无法终止进程树"
+                ))
+            })?;
+            return containment.terminate_tree();
         }
         #[cfg(not(windows))]
         {
@@ -814,8 +869,11 @@ fn reconcile_descendants(containment: &Containment, root_pid: u32) {
         }
     }
 
+    /// 释放会话资源：**本 Task 只关传输**（让 park 在 `write_all` 的 worker 返回）。
+    ///
+    /// 显式释放 Job 句柄是 Task 5（它的 RED 正是「parked writer 还持有 Arc 时，job 没被关掉、
+    /// 后代偷活」）。两步都要有：transport closure 与 process containment 是两件事（spec §1.3）。
     fn forget(&self, session_id: &str) -> Result<()> {
-        // 主动关闭传输：**不依赖 Arc drop**（parked writer 自己持有 Arc）。
         let live = lock(&self.sessions)?.remove(session_id);
         if let Some(live) = live {
             live.close_transport();
@@ -911,10 +969,21 @@ fake 的 `spawn` 开头：
 
 ```rust
             if *self.fail_containment.lock().expect("fail_containment") {
+                // 真实的 AssignProcessToJobObject 失败会带上 Win32 error，fake 必须同样带，
+                // 否则「错误里要有具体 os error」这条约束无法在上层被测到。
                 return Err(Error::InvalidInput(
                     "fake: 无法建立进程包含（AssignProcessToJobObject 失败，os error 5）".to_string(),
                 ));
             }
+```
+
+并且测试要断言**错误形状**（不只是「失败了」）：
+
+```rust
+    assert!(
+        error.to_string().contains("os error"),
+        "containment 建立失败必须带具体 Win32 error：{error}"
+    );
 ```
 
 （`PtyManager::spawn` 已经在 `backend.spawn(...)?` 处直接返回错误、不插入 handle；`TerminalRuntime::start`
@@ -946,70 +1015,172 @@ git commit -m "test(pty): a session without containment is launch_failed, never 
 - Consumes: Task 3 的 `close_transport` / `Containment`
 - Produces: 无新 API
 
-- [ ] **Step 1: 写失败测试（确定性：释放会话必须收掉 containment）**
+- [ ] **Step 1: 写真机失败测试（parked writer 持有 Arc 时，forget 仍必须关掉 Job 句柄）**
+
+放在 `portable_pty_backend.rs` 的 Windows 测试模块里。**RED 是真实的**：Task 3 的 `forget` 只关
+传输、不取 job 句柄，而 parked writer 持有 `Arc<LivePty>` → `Containment` 不会被 drop → 后代偷活。
 
 ```rust
-/// T5：`forget` 必须**显式**收掉 containment，不能只依赖 `Arc<LivePty>` drop
-/// （parked writer 自己就持有 Arc；spec §4.5）。
-#[test]
-fn forgetting_a_session_also_reaps_its_containment() {
-    let backend = Arc::new(FakePtyBackend::new());
-    let manager = manager(Arc::clone(&backend), 64);
-    spawn(&manager, "hub-a");
+    /// T5：`forget` 必须**显式取出并关闭唯一 Job 句柄**，不能依赖 `Arc<LivePty>` drop ——
+    /// parked writer 自己就持有那个 Arc（spec §4.5 / 约束 4+5）。
+    ///
+    /// 断言两件事同时成立：parked write 返回（传输已关）**且**后代被回收（job 句柄已关）。
+    #[test]
+    fn forget_releases_the_job_even_while_a_writer_holds_the_arc() {
+        use crate::harness::launch::LaunchSpec;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
 
-    manager.forget("hub-a").expect("forget");
+        let backend = Arc::new(PortablePtyBackend::new());
+        let handle = backend
+            .spawn(PtySpawnRequest {
+                session_id: "hub-park-tree".to_string(),
+                spec: LaunchSpec {
+                    // cmd 起长跑 ping：root 是 cmd，后代 ping 留在 job 里。
+                    program: std::path::PathBuf::from("cmd"),
+                    args: vec!["/c".into(), "ping -n 300 127.0.0.1".into()],
+                    cwd: None,
+                    env: Vec::new(),
+                    runtime_target_id: "local".to_string(),
+                },
+                cols: 80,
+                rows: 24,
+            })
+            .expect("spawn");
+        let _reader = backend.take_reader("hub-park-tree").expect("reader");
+        let root = handle.pid.expect("pid");
 
-    assert!(
-        backend
-            .terminated_trees
-            .lock()
-            .expect("terminated_trees")
-            .contains(&"hub-a".to_string()),
-        "forget 必须对 containment 做显式收敛（否则 root 自然退出后后代可能偷活）"
-    );
-}
+        // 等后代出现（cmd → ping）
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendants = Vec::new();
+        while Instant::now() < deadline {
+            descendants = descendants_of(root);
+            if !descendants.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!descendants.is_empty(), "需要 cmd → ping 两层结构");
+
+        // 制造 parked writer（它持有 Arc<LivePty>）
+        let returned = Arc::new(AtomicBool::new(false));
+        let returned_flag = Arc::clone(&returned);
+        let backend_for_writer = Arc::clone(&backend);
+        std::thread::spawn(move || {
+            let payload = vec![b'x'; 64 * 1024 * 1024];
+            let _ = backend_for_writer.write("hub-park-tree", &payload);
+            returned_flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !returned.load(Ordering::SeqCst),
+            "前提：写必须还 park 着（64 MiB 才稳；4 MiB 会被 ConPTY 缓冲吞掉）"
+        );
+
+        backend.forget("hub-park-tree").expect("forget");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !returned.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(returned.load(Ordering::SeqCst), "forget 之后 parked write 必须返回");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline
+            && std::iter::once(root)
+                .chain(descendants.clone())
+                .any(|pid| process_alive(pid))
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let survivors: Vec<u32> = std::iter::once(root)
+            .chain(descendants.clone())
+            .filter(|pid| process_alive(*pid))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "forget 必须关掉 Job 句柄、回收残留后代（偷活的：{survivors:?}）"
+        );
+    }
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::input_tests::forgetting`
-Expected: FAIL（当前 `forget` 只 `close_transport` + `backend.forget`，不碰 containment）
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::portable_pty_backend::forget_releases`
+Expected: FAIL `forget 必须关掉 Job 句柄、回收残留后代`（Task 3 的 forget 不取 job 句柄）
 
-- [ ] **Step 3: 实现**
+- [ ] **Step 3: 实现（在 Task 3 的 `LivePty` 上加显式释放）**
 
-`forget` 里在 `close_transport()` 之后**显式**释放 containment（不要等 `Arc` drop）：
+Task 3 已经把 `containment` 做成 `Mutex<Option<Containment>>`；本 Task 加上
+`release_containment()` 并在 `forget` 里调用（**不吞错误**）：
+
+```rust
+impl LivePty {
+    /// 显式取出并关闭唯一的 Job 句柄（`KILL_ON_JOB_CLOSE` 因此立即生效）。
+    ///
+    /// `take()` 保证「即使 parked writer 还持有 `Arc<LivePty>`，句柄也已经关掉」；
+    /// 幂等：已经取过就是 `None`，直接 Ok。
+    #[cfg(windows)]
+    fn release_containment(&self) -> Result<()> {
+        let mut guard = self
+            .process
+            .containment
+            .lock()
+            .map_err(|_| Error::StateLockPoisoned)?;
+        drop(guard.take()); // Drop → CloseHandle → 最后一句柄关闭 → job 内进程被回收
+        Ok(())
+    }
+}
+```
 
 ```rust
     fn forget(&self, session_id: &str) -> Result<()> {
-        let live = lock(&self.sessions)?.remove(session_id);
-        if let Some(live) = live {
-            live.close_transport();
-            // 显式收掉 containment：`KILL_ON_JOB_CLOSE` 让「最后一个句柄关闭」= 杀掉 job 内
-            // 所有进程，因此即使 parked writer 还持有 Arc<LivePty>，job 也已经关闭。
-            #[cfg(windows)]
-            live.process.containment.terminate_tree().ok();
-        }
+        let Some(live) = (lock(&self.sessions)?.remove(session_id)) else {
+            return Ok(());
+        };
+        // 先关传输（让 parked write 返回），再关 job（回收残留后代）；两步都不能省。
+        live.close_transport();
+        #[cfg(windows)]
+        live.release_containment()?;
         Ok(())
     }
 ```
 
-> 注意：这里**先** `terminate_tree()` 再让 `Containment` 随 `Arc` drop —— 两者都指向「会话结束后
-> 不允许后代偷活」。不要引入第二个 job 句柄（约束 5）。
->
 > **宿主 crash 不需要另造机制**：进程死亡 = OS 关闭它的所有句柄，与这里的 `Drop` 路径是同一个
 > `KILL_ON_JOB_CLOSE` 机制（spike s6 已实测：`taskkill /F` 宿主后它拥有的 3 个进程全部被回收）。
+> 本 Task 测的是**产品语义**：`forget` / 最后一个 Job 句柄关闭 → 后代被回收；**不要**把这条测试
+> 说成「测过宿主 crash」。
 
-- [ ] **Step 4: 跑测试确认通过 + 8A/7D 回归**
+- [ ] **Step 4: 写第二条真机测试（reaper 路径：root 自然退出、后代仍存活）**
+
+```rust
+    /// reaper 路径：root **自然退出**时后代仍活着 → `forget` 必须把它们收掉。
+    ///
+    /// `start /b` 让 ping 成为 cmd 的后代但 cmd 立刻退出 —— 正是「root 走了、后代偷活」的形状。
+    #[test]
+    fn release_after_a_natural_root_exit_still_reaps_living_descendants() {
+        // 与上一条同构：spawn `cmd /c start /b ping -n 300 127.0.0.1`
+        // → 等 root 退出（child.try_wait() == Some(_)）且后代仍 alive
+        // → backend.forget(session)
+        // → 断言后代全部消失（job 句柄关闭 → KILL_ON_JOB_CLOSE）
+    }
+```
+
+> 若本机 `start /b` 的树形状与预期不符，**调整命令**直到「root 已退出 + 后代仍存活」这个前提
+> 由断言证明成立；**不要**放宽「后代必须被回收」这条断言。
+
+- [ ] **Step 5: 跑测试确认通过 + 8A/7D 回归**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty:: terminal::`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
 cd D:/HarnessHub
-git add src-tauri/src/pty/portable_pty_backend.rs src-tauri/src/pty/input_tests.rs
-git commit -m "fix(pty): reap leftover descendants when a session is released"
+git add src-tauri/src/pty/portable_pty_backend.rs
+git commit -m "fix(pty): release the job handle explicitly so released sessions cannot leak descendants"
 ```
 
 ---
@@ -1168,6 +1339,8 @@ fn synthetic_three_level_tree_is_fully_terminated() {
 }
 
 /// R2/R3：真实 codex.cmd / claude.cmd 的 `.cmd → node/claude` 树。
+///
+/// 这两条是**支撑证据**（缺 binary 时明确跳过）；R4/R7 才是不可跳过的 Gate。
 #[test]
 fn real_codex_and_claude_trees_are_fully_terminated() {
     let manager = manager();
@@ -1203,13 +1376,15 @@ fn real_codex_and_claude_trees_are_fully_terminated() {
 ///
 /// A 与 B **必须是同一个可执行文件**：错误的 executable-scoped 清理（例如 kill all node）
 /// 也能让「零残留」看起来成立，只有这条能把它抓出来。
+///
+/// 环境缺失**不算通过**（Gate）：需要真机 codex + claude，缺一个就 panic。
 #[test]
 fn killing_one_session_tree_never_touches_another() {
     let manager = manager();
-    if !std::path::Path::new(CODEX).is_file() || !std::path::Path::new(CLAUDE).is_file() {
-        eprintln!("跳过：本机需要同时装好 codex 与 claude");
-        return;
-    }
+    assert!(
+        std::path::Path::new(CODEX).is_file() && std::path::Path::new(CLAUDE).is_file(),
+        "本 Gate 需要真机 codex 与 claude（跳过不等于通过）"
+    );
 
     let a = manager.spawn("hub-a", spec(CODEX, &[]), 80, 24).expect("spawn A");
     manager.start_reading("hub-a").expect("start A");
@@ -1280,15 +1455,31 @@ git commit -m "test(pty): prove session-scoped tree termination on real harness 
 - [ ] **Step 1: 写测试**
 
 ```rust
-/// R5：A 的 writer park 在 OS 写里 → kill A（树杀）→ 树全死 → 终态 → forget 关 master →
-/// parked write 最终返回。**有界观察窗口，绝不 join writer。**
+/// R5：A 的 writer park 在 OS 写里 → kill A（树杀）→ 树全死 → 终态 → forget（关 master + 关 job）
+/// → parked write 最终返回。**有界观察窗口，绝不 join writer。**
 ///
 /// 这条把 8A 与 8B 串起来：树杀解决「进程还活着」，close_transport 解决「阻塞 writer 还醒不过来」。
+///
+/// **两个容易写错的点**（都靠断言钉住，不靠注释）：
+///  1. `PtyManager::write` 只是入队（8A 的有界队列），它会**立刻返回** —— 所以「parked 了没有」
+///     不能看入队调用是否返回，要看 `pending_bytes`：8A 的记账只在 `backend.write` 返回后才结算，
+///     所以 `pending_bytes` 持续停在容量值 = worker 正卡在 OS 写里。
+///  2. 因此容量要 ≥ 本批大小：默认 64 KiB 队列会让 64 MiB 的写**当场被拒**（InputBackpressure），
+///     根本到不了 backend。这里显式注入 64 MiB 容量。
 #[test]
 fn a_parked_writer_is_released_by_the_reaper_forgetting_the_session() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use harness_hub_lib::pty::PortablePtyBackend;
 
-    let manager = manager();
+    const PAYLOAD: usize = 64 * 1024 * 1024;
+    // 容量必须 ≥ 单批大小，否则 manager.write 直接 InputBackpressure（测不到阻塞写）。
+    let manager = Arc::new(PtyManager::with_input_capacity(
+        Arc::new(PortablePtyBackend::new()),
+        Arc::new(|_session, _seq, _bytes| {}),
+        Arc::new(|_session, _code| {}),
+        PAYLOAD,
+    ));
+    let _ = Mutex::new(()); // 占位说明：无需额外同步原语，全靠 pending_bytes 观察
+
     let handle = manager
         .spawn("hub-parked", spec("ping", &["-n", "300", "127.0.0.1"]), 80, 24)
         .expect("spawn");
@@ -1296,38 +1487,36 @@ fn a_parked_writer_is_released_by_the_reaper_forgetting_the_session() {
     let root = handle.pid.expect("pid");
     let tree = wait_tree(root, 1, Duration::from_secs(5));
 
-    // 64 MiB 才稳：4 MiB 会被 ConPTY 缓冲吞掉、自己就返回了（8B spike s5）。
-    let returned = Arc::new(AtomicBool::new(false));
-    let returned_flag = Arc::clone(&returned);
-    let manager_for_writer = Arc::clone(&manager);
-    std::thread::spawn(move || {
-        let payload = vec![b'x'; 64 * 1024 * 1024];
-        let _ = manager_for_writer.write("hub-parked", &payload);
-        returned_flag.store(true, Ordering::SeqCst);
-    });
-
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(
-        !returned.load(Ordering::SeqCst),
-        "前提：写必须还 park 着（否则这条测试没测到目标场景）"
+    // 入队（立刻返回）→ worker 取走并 park 在 backend.write 里
+    let payload = vec![b'x'; PAYLOAD];
+    manager.write("hub-parked", &payload).expect("入队必须被接受");
+    assert_eq!(
+        manager.pending_bytes("hub-parked"),
+        Some(PAYLOAD),
+        "入队后 in-flight 必须等于整批大小"
     );
 
-    // 树杀 → reaper 观测 root 退出 → 终态 → forget（关 master）
+    // V1：写确实进入了阻塞调用 —— 2 秒后 in-flight 仍未结算（8A 记账只在 write 返回后减）
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        manager.pending_bytes("hub-parked"),
+        Some(PAYLOAD),
+        "前提：worker 必须还 park 在 backend.write 里（否则这条测试没测到目标场景）"
+    );
+
+    // 树杀 → reaper 观测 root 退出 → 终态 → forget（关 master + 关 job 句柄）
     manager.kill("hub-parked").expect("kill");
     assert!(wait_dead(&tree, Duration::from_secs(10)), "树必须全死：{tree:?}");
 
+    // 有界观察：handle 被回收（reaper 走完 forget）后，in-flight 必须结算为 0
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !returned.load(Ordering::SeqCst) && Instant::now() < deadline {
+    while manager.pending_bytes("hub-parked").is_some() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        returned.load(Ordering::SeqCst),
-        "kill → 终态 → forget 之后，parked write 必须有界返回（不 join writer）"
-    );
     assert_eq!(
         manager.pending_bytes("hub-parked"),
         None,
-        "handle 必须已被 reaper 回收"
+        "reaper 必须回收 handle（= 终态已写 + forget 已执行）"
     );
     cleanup(&tree);
 }
@@ -1363,10 +1552,16 @@ fn descendants_are_reaped_when_the_session_is_released() {
     cleanup(&tree);
 }
 
-/// R7（约束 6 第一条）：真实 Harness Hub 宿主 + 生产 `TerminalRuntime` 路径上，
-/// containment 必须建立成功；失败时错误必须带具体 Win32 error（本机断言成功）。
+/// R7（约束 6 第一条）：**本机测试进程中的**生产 `TerminalRuntime` 路径 assign 必须成功。
+///
+/// 说清楚边界：cargo 测试进程 **不等于** 打包后的应用宿主（那个宿主可能自己就在别的 job 里、
+/// 或以不同完整性级别运行）。这里证的是「这条生产代码路径在本机这个进程环境下能建立 containment」，
+/// **不是**「任何宿主都必然成功」。
+///
+/// 环境缺失**不算通过**：本 Gate 需要真机 codex + E2E 目录；缺任何一个就直接 panic，
+/// 而不是打印「跳过」后返回 Ok（跳过 ≠ 通过）。
 #[test]
-fn containment_is_established_on_the_production_runtime_path() {
+fn containment_is_established_in_this_test_process_on_the_production_runtime_path() {
     use harness_hub_lib::harness::adapter::HarnessAdapter;
     use harness_hub_lib::harness::adapters::codex::CodexAdapter;
     use harness_hub_lib::harness::inventory::{installation_id, reconcile_harnesses};
@@ -1374,14 +1569,18 @@ fn containment_is_established_on_the_production_runtime_path() {
     use harness_hub_lib::harness::registry::HarnessRegistry;
     use harness_hub_lib::runtime::local::LOCAL_TARGET_ID;
     use harness_hub_lib::terminal::TerminalRuntime;
-    use std::sync::Mutex;
 
     let e2e_cwd = r"D:\HarnessHub-E2E\codex-concurrent";
     let adapter = CodexAdapter::new(Arc::new(SystemHostProbe::new()));
-    if !adapter.detect().installed || !std::path::Path::new(e2e_cwd).is_dir() {
-        eprintln!("跳过：本机没有 codex 或 {e2e_cwd} 不存在");
-        return;
-    }
+    let detected = adapter.detect();
+    assert!(
+        detected.installed,
+        "本 Gate 需要真机 codex（跳过不等于通过）：detect = {detected:?}"
+    );
+    assert!(
+        std::path::Path::new(e2e_cwd).is_dir(),
+        "本 Gate 需要 {e2e_cwd}（跳过不等于通过）"
+    );
 
     let db = harness_hub_lib::db::Database::open_in_memory().expect("内存库");
     harness_hub_lib::runtime::local::ensure_local_target(db.connection()).expect("target");
@@ -1412,11 +1611,32 @@ fn containment_is_established_on_the_production_runtime_path() {
     let root = session.pid.expect("pid") as u32;
     let tree = wait_tree(root, 3, Duration::from_secs(20));
     eprintln!("[R7] production runtime tree = {tree:?}");
-    assert!(tree.len() >= 3, "生产路径上 containment 必须覆盖整棵树：{tree:?}");
+    assert!(
+        tree.len() >= 3,
+        "生产路径上 containment 必须覆盖整棵树（cmd → node → codex.exe）：{tree:?}"
+    );
 
     runtime.kill(&session.hub_session_id).expect("kill");
-    assert!(wait_dead(&tree, Duration::from_secs(10)), "生产路径 kill 后全树必须消失");
+    assert!(
+        wait_dead(&tree, Duration::from_secs(10)),
+        "生产路径 kill 后全树必须消失"
+    );
     cleanup(&tree);
+}
+```
+
+**R7 的失败路径单独断言**（约束 6 后半句：不能 fallback 后还宣称 containment 成功）：
+
+```rust
+/// containment 建立失败时，错误必须**带具体 Win32 error**，且绝不能变成「已 running」。
+///
+/// 这里用 fake 强制 AssignProcessToJobObject 失败（真实失败无法在不改产品代码的前提下稳定构造），
+/// 断言错误形状；primitive 层的真实 Win32 error 由 Task 1 的
+/// `assign_reports_the_win32_error_for_an_unopenable_process` 覆盖。
+#[test]
+fn a_failed_containment_reports_a_win32_error_and_never_runs() {
+    // 见 Task 4：`PtyManager::with_input_capacity(...)` + fake `.with_failing_containment()`
+    // 断言：spawn 返回 Err、消息含 "os error"、`pending_bytes` 为 None、DB 里是 failed/launch_failed。
 }
 ```
 
