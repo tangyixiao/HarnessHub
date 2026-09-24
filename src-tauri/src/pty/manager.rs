@@ -439,6 +439,8 @@ pub(crate) mod fake {
         /// 哪些 program 的 `write` 会 park（模拟子进程不读 stdin）。
         blocking_writes: Mutex<std::collections::HashSet<String>>,
         gate: WriteGate,
+        /// 哪些 program 的 `write` 直接返回 Err（模拟真实写入失败）。
+        failing_writes: Mutex<HashMap<String, String>>,
         /// 读端返回的字节（spawn 时按顺序弹出）。**共享队列**：只适合单会话测试。
         outputs: Mutex<Vec<Vec<u8>>>,
         /// 按 program 分流的实时输出流（可并发、可运行期追加）。
@@ -509,6 +511,15 @@ pub(crate) mod fake {
         /// 放行所有被 park 的写（语义写在 `WriteGate::release` 上：一次性放行）。
         pub fn release_blocked_write(&self) {
             self.gate.release();
+        }
+
+        /// 该 program 的 `write` 直接返回 Err（模拟真实 PTY 写失败 / 会话已失效）。
+        pub fn with_failing_write(self, program: &str, message: &str) -> Self {
+            self.failing_writes
+                .lock()
+                .expect("failing_writes")
+                .insert(program.to_string(), message.to_string());
+            self
         }
 
         /// 运行期追加输出：已启动的 reader 会按序读到它。
@@ -621,6 +632,18 @@ pub(crate) mod fake {
                 .lock()
                 .expect("written")
                 .push((session_id.to_string(), bytes.to_vec()));
+
+            if let Some(message) = self.program_of(session_id).and_then(|program| {
+                self.failing_writes
+                    .lock()
+                    .expect("failing_writes")
+                    .get(&program)
+                    .cloned()
+            }) {
+                return Err(Error::InvalidInput(format!(
+                    "fake: 写入 PTY 失败：{message}"
+                )));
+            }
 
             if let Some(program) = self.program_of(session_id) {
                 if self

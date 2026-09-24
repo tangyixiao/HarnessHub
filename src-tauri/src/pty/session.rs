@@ -27,6 +27,8 @@ struct InputQueue {
     /// 队列中未 pop 的字节 + 正在 `backend.write` 里的那一批。
     pending_bytes: usize,
     closed: bool,
+    /// worker 遇到的真实 `backend.write` 错误（spec §4.4）。
+    failure: Option<String>,
 }
 
 pub(crate) struct InputState {
@@ -45,6 +47,7 @@ impl InputState {
                 batches: VecDeque::new(),
                 pending_bytes: 0,
                 closed: false,
+                failure: None,
             }),
             ready: Condvar::new(),
         }
@@ -61,12 +64,24 @@ impl InputState {
     }
 
     /// 整批接受或整批拒绝；**绝不** partial enqueue。
+    ///
+    /// 错误优先级固定（spec §4.4.1）：**closed → failure → capacity**。
+    /// closed 在前，是因为显式 kill / forget 之后「输入已关闭」是对调用方最直接的当前事实；
+    /// worker 的底层错误仍留在 `failure` 里，等输入侧没有被显式关闭时才报出来。
+    /// 这条顺序必须由测试锁死，不能靠检查顺序碰巧成立。
     pub(crate) fn try_enqueue(&self, bytes: &[u8]) -> Result<()> {
         let mut queue = self.lock();
 
         if queue.closed {
             return Err(Error::InputClosed {
                 session_id: self.session_id.clone(),
+            });
+        }
+
+        if let Some(detail) = queue.failure.clone() {
+            return Err(Error::InputWorkerFailed {
+                session_id: self.session_id.clone(),
+                detail,
             });
         }
 
@@ -87,7 +102,7 @@ impl InputState {
         Ok(())
     }
 
-    /// worker 取下一批；`None` = 输入侧已关闭，可以退出线程。
+    /// worker 取下一批；`None` = 输入侧已关闭/失败，可以退出线程。
     ///
     /// **不在 pop 时减 `pending_bytes`**：那一批仍在 `backend.write` 里，属于 in-flight。
     /// 减账只发生在 [`Self::finish_batch`]（写入返回之后），否则容量可以被「pop 后重填」绕过。
@@ -97,7 +112,7 @@ impl InputState {
             if let Some(batch) = queue.batches.pop_front() {
                 return Some(batch);
             }
-            if queue.closed {
+            if queue.closed || queue.failure.is_some() {
                 return None;
             }
             queue = self
@@ -111,6 +126,18 @@ impl InputState {
     fn finish_batch(&self, len: usize) {
         let mut queue = self.lock();
         queue.pending_bytes = queue.pending_bytes.saturating_sub(len);
+    }
+
+    /// worker 失败：标记输入侧永久失败 + 丢弃尚未发送的输入（此时无 in-flight，pending 归零）。
+    ///
+    /// **不写 Session 终态、不发事件**：进程是否退出只有 reaper 是事实来源（spec §4.4）。
+    fn fail(&self, error: &Error) {
+        let mut queue = self.lock();
+        queue.failure = Some(error.to_string());
+        queue.batches.clear();
+        queue.pending_bytes = 0;
+        drop(queue);
+        self.ready.notify_all();
     }
 
     /// 关闭输入侧：标记 closed、丢弃未发送输入、修正 `pending_bytes`、唤醒 worker。**不 join。**
@@ -146,8 +173,11 @@ impl SessionHandle {
             while let Some(batch) = worker_input.take_batch() {
                 match backend.write(&worker_session, &batch) {
                     Ok(()) => worker_input.finish_batch(batch.len()),
-                    // Task 3 会把这里换成「标记输入侧失败 + 丢弃未发送队列」。
-                    Err(_) => break,
+                    // 真实写入失败：输入侧永久失败，但**不碰 Session 终态**（reaper 才是事实来源）。
+                    Err(error) => {
+                        worker_input.fail(&error);
+                        break;
+                    }
                 }
             }
         });

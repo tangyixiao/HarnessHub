@@ -51,6 +51,25 @@ fn spawn_program(manager: &PtyManager, session_id: &str, program: &str) -> u32 {
     handle.pid.expect("pid")
 }
 
+/// 带可观测 sink 的 manager：用来证明输入路径**不发事件、不写终态**（spec §4.4）。
+fn manager_with_sinks(
+    backend: Arc<FakePtyBackend>,
+    capacity: usize,
+    outputs: Arc<std::sync::Mutex<Vec<String>>>,
+    exits: Arc<std::sync::Mutex<Vec<String>>>,
+) -> Arc<PtyManager> {
+    Arc::new(PtyManager::with_input_capacity(
+        backend,
+        Arc::new(move |session, _seq, _bytes| {
+            outputs.lock().expect("outputs").push(session.to_string());
+        }),
+        Arc::new(move |session, _code| {
+            exits.lock().expect("exits").push(session.to_string());
+        }),
+        capacity,
+    ))
+}
+
 /// 硬期限：把「Runtime 被冻结」变成可断言的失败，而不是静默挂死。
 fn within<T: Send + 'static>(
     timeout: Duration,
@@ -339,4 +358,108 @@ fn a_blocked_writer_does_not_freeze_a_second_session_input() {
         .map(|(_, bytes)| bytes.clone())
         .collect();
     assert_eq!(written, vec![b"one".to_vec(), b"two".to_vec()]);
+}
+
+/// T6：worker 遇到真实写入错误 → 输入侧失败 + 丢弃未发送 + 后续明确报错，
+/// 但 **不发事件、不写终态**，且 kill/resize/reap 仍然工作（spec §4.4）。
+#[test]
+fn worker_failure_closes_input_and_keeps_control_paths_alive() {
+    let backend = Arc::new(FakePtyBackend::new().with_failing_write(CODEX, "PTY 已关闭"));
+    let outputs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let exits = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let manager = manager_with_sinks(
+        Arc::clone(&backend),
+        64,
+        Arc::clone(&outputs),
+        Arc::clone(&exits),
+    );
+    spawn(&manager, "hub-a");
+
+    manager
+        .write("hub-a", b"first")
+        .expect("入队成功（此刻还无法知道会失败）");
+    manager
+        .write("hub-a", b"queued-but-never-sent")
+        .expect("第二批发进队列");
+
+    // 等 worker 真的进入失败态（后续写入必须明确报 InputWorkerFailed）
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut failure = None;
+    while Instant::now() < deadline {
+        if let Err(error @ Error::InputWorkerFailed { .. }) = manager.write("hub-a", b"probe") {
+            failure = Some(error);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let failure = failure.expect("worker 失败后写入必须明确报 InputWorkerFailed");
+    assert!(failure.to_string().contains("PTY 已关闭"), "{failure}");
+
+    // 未发送的排队字节被丢弃，pending 归零
+    assert_eq!(manager.pending_bytes("hub-a"), Some(0));
+
+    // 控制面仍然活着（INV-3）
+    assert!(
+        within_manager(Duration::from_secs(2), "resize", &manager, |m| m
+            .resize("hub-a", 100, 30))
+        .is_ok()
+    );
+    assert!(
+        within_manager(Duration::from_secs(2), "try_wait", &manager, |m| m
+            .try_wait("hub-a"))
+        .is_ok()
+    );
+    assert!(
+        within_manager(Duration::from_secs(2), "kill", &manager, |m| m
+            .kill("hub-a"))
+        .is_ok()
+    );
+
+    // 输入路径绝不写终态、绝不发事件（终态只由 reaper 决定）
+    assert!(
+        exits.lock().expect("exits").is_empty(),
+        "输入失败不得触发退出回调：{:?}",
+        exits.lock().expect("exits")
+    );
+    assert!(
+        outputs.lock().expect("outputs").is_empty(),
+        "输入失败不得产生输出事件：{:?}",
+        outputs.lock().expect("outputs")
+    );
+}
+
+/// T11：优先级固定为 closed → failure → capacity，不吃锁竞争（spec §4.4.1）。
+///
+/// 唯一可观测的竞争：worker 先失败，随后 kill 成功关闭输入侧（两个标志同时为真）。
+#[test]
+fn error_priority_is_closed_over_worker_failure() {
+    let backend = Arc::new(FakePtyBackend::new().with_failing_write(CODEX, "PTY 已关闭"));
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    manager.write("hub-a", b"first").expect("入队");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw_failure = false;
+    while Instant::now() < deadline {
+        if matches!(
+            manager.write("hub-a", b"probe"),
+            Err(Error::InputWorkerFailed { .. })
+        ) {
+            saw_failure = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(saw_failure, "先要看到 InputWorkerFailed");
+
+    // 显式关闭输入侧（kill 成功路径）→ 之后必须报 InputClosed，而不是继续报 worker 失败
+    manager.kill("hub-a").expect("kill 成功");
+    assert!(
+        matches!(
+            manager.write("hub-a", b"after-kill"),
+            Err(Error::InputClosed { .. })
+        ),
+        "closed 优先于 failure：显式关闭是对调用方最直接的当前事实"
+    );
 }
