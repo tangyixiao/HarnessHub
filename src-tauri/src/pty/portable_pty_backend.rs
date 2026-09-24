@@ -81,9 +81,9 @@ impl LivePty {
 
     /// 显式取出并关闭唯一的 Job 句柄（`KILL_ON_JOB_CLOSE` 因此立即生效）。
     ///
-    /// `take()` 之后是 `None`，因此幂等；错误**不吞掉**。
+    /// `take()` 保证「即使 parked writer 还持有 `Arc<LivePty>`，句柄也已经关掉」；
+    /// 幂等：已经取过就是 `None`。
     #[cfg(windows)]
-    #[allow(dead_code)] // Task 5 的调用点：forget 必须 release containment。
     fn release_containment(&self) -> Result<()> {
         let mut guard = lock(&self.process.containment)?;
         // take() 之后 drop 掉 Containment → CloseHandle → 最后一句柄关闭 → job 内进程被回收。
@@ -354,18 +354,20 @@ impl PtyBackend for PortablePtyBackend {
         Ok(status.map(|status| status.exit_code() as i32))
     }
 
-    /// 显式丢弃会话（终态写入之后由上层调用，释放 PTY 句柄）。
+    /// 显式丢弃会话（终态写入之后由上层调用）。
     ///
-    /// **主动**关闭传输：parked writer 自己持有 `Arc<LivePty>`，等 Arc drop 就等于
-    /// 永远不关 master，写线程永远不返回（8B spike s5）。
-    ///
-    /// Job 句柄的显式释放是 Task 5（它的 RED 正是「parked writer 还持有 Arc 时，
-    /// job 没被关掉、后代偷活」）。
+    /// **两步都不能省**（spec §1.3：containment ≠ transport closure）：
+    /// 1. `close_transport()`：**主动**关闭 PTY master —— parked writer 自己持有
+    ///    `Arc<LivePty>`，等 Arc drop 就等于永远不关 master，写线程永远不返回（spike s5）。
+    /// 2. `release_containment()`：**显式取走并关闭唯一 Job 句柄** —— 同样是 parked writer
+    ///    持有 Arc 的缘故，等 Arc drop 就等于永远不关 job，后代偷活（约束 4+5）。
     fn forget(&self, session_id: &str) -> Result<()> {
-        let live = lock(&self.sessions)?.remove(session_id);
-        if let Some(live) = live {
-            live.close_transport();
-        }
+        let Some(live) = lock(&self.sessions)?.remove(session_id) else {
+            return Ok(());
+        };
+        live.close_transport();
+        #[cfg(windows)]
+        live.release_containment()?;
         Ok(())
     }
 
@@ -388,48 +390,56 @@ impl PtyBackend for PortablePtyBackend {
 mod tests {
     use super::*;
     use crate::harness::launch::LaunchSpec;
+    use crate::pty::containment::test_support::{process_alive, wait_until_dead};
 
     /// conhost 因为 `PSUEDOCONSOLE_INHERIT_CURSOR` 会在启动时发 `ESC[6n`（DSR）并等应答。
     /// 生产里这个应答由前端终端模拟器（xterm.js）给出；headless 测试必须自己当终端。
     ///
     /// **不应答的后果不只是「子进程黑屏」**：pseudoconsole 卡在初始化里，之后连
     /// `ClosePseudoConsole` 都收不干净 —— master 明明被 drop 了，reader 也拿不到 EOF，
-    /// park 的写永远不会返回。本 Task 的 RED 一开始就把它误判成「产品没关传输」。
+    /// park 的写永远不会返回。Task 3 的 RED 一开始就把它误判成「产品没关传输」。
     const DSR_REQUEST: &[u8] = b"\x1b[6n";
     const DSR_REPLY: &[u8] = b"\x1b[1;1R";
 
-    /// `forget` 必须**主动**关闭 PTY master：否则 park 在 `write_all` 的线程（它自己持有
-    /// `Arc<LivePty>`）永远不会返回 —— 这是 8B spike s5 三档实验里唯一让写返回的那一档。
-    #[test]
-    fn forget_actively_closes_the_transport_so_a_parked_write_returns() {
+    /// headless 测试的「终端模拟器」：持续排空 console 输出，并在看到 DSR 时**只应答一次**
+    /// （7D 的教训：无限重放应答会把子进程的输入缓冲淹掉）。
+    struct TestTerminal {
+        answered: Arc<std::sync::atomic::AtomicBool>,
+        done: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TestTerminal {
+        /// 阻塞到握手完成（有界 10s）：park 之后 writer 锁被占，应答就写不进去了。
+        fn wait_for_handshake(&self) {
+            use std::sync::atomic::Ordering;
+            use std::time::{Duration, Instant};
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.answered.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                self.answered.load(Ordering::SeqCst),
+                "前提：conhost 的 DSR 握手必须被应答，否则测试测不到传输关闭"
+            );
+        }
+
+        fn is_done(&self) -> bool {
+            self.done.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn attach_test_terminal(backend: &Arc<PortablePtyBackend>, session_id: &str) -> TestTerminal {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::{Duration, Instant};
 
-        let backend = Arc::new(PortablePtyBackend::new());
-        let handle = backend
-            .spawn(PtySpawnRequest {
-                session_id: "hub-parked".to_string(),
-                spec: LaunchSpec {
-                    program: std::path::PathBuf::from("ping"),
-                    args: vec!["-n".into(), "300".into(), "127.0.0.1".into()],
-                    cwd: None,
-                    env: Vec::new(),
-                    runtime_target_id: "local".to_string(),
-                },
-                cols: 80,
-                rows: 24,
-            })
-            .expect("spawn");
-
-        // reader 必须一直排空 console 输出，并在看到 DSR 时**只应答一次**
-        // （7D 的教训：无限重放应答会把子进程的输入缓冲淹掉）。
         let answered = Arc::new(AtomicBool::new(false));
-        let reader_done = Arc::new(AtomicBool::new(false));
-        let reader = backend.take_reader("hub-parked").expect("reader");
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = backend.take_reader(session_id).expect("reader");
         {
             let answered_for_reader = Arc::clone(&answered);
-            let done_for_reader = Arc::clone(&reader_done);
-            let backend_for_reader = Arc::clone(&backend);
+            let done_for_reader = Arc::clone(&done);
+            let backend_for_reader = Arc::clone(backend);
+            let session = session_id.to_string();
             std::thread::spawn(move || {
                 let mut reader = reader;
                 let mut sink = [0u8; 8192];
@@ -441,7 +451,7 @@ mod tests {
                                 .windows(DSR_REQUEST.len())
                                 .any(|window| window == DSR_REQUEST);
                             if wants_dsr && !answered_for_reader.swap(true, Ordering::SeqCst) {
-                                let _ = backend_for_reader.write("hub-parked", DSR_REPLY);
+                                let _ = backend_for_reader.write(&session, DSR_REPLY);
                             }
                         }
                         Err(_) => break,
@@ -450,58 +460,243 @@ mod tests {
                 done_for_reader.store(true, Ordering::SeqCst);
             });
         }
+        TestTerminal { answered, done }
+    }
 
-        // 握手必须在**开始 park 之前**完成：park 之后 writer 锁被占，应答就写不进去了。
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !answered.load(Ordering::SeqCst) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+    fn spec(program: &str, args: &[&str]) -> LaunchSpec {
+        LaunchSpec {
+            program: std::path::PathBuf::from(program),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: None,
+            env: Vec::new(),
+            runtime_target_id: "local".to_string(),
         }
-        assert!(
-            answered.load(Ordering::SeqCst),
-            "前提：conhost 的 DSR 握手必须被应答，否则这条测试测不到传输关闭"
-        );
+    }
+
+    fn request(session_id: &str, spec: LaunchSpec) -> PtySpawnRequest {
+        PtySpawnRequest {
+            session_id: session_id.to_string(),
+            spec,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// 在后台 park 一次 64 MiB 的写（返回「写已返回」的标志）。
+    ///
+    /// 64 MiB：4 MiB 会被 ConPTY 缓冲吞掉（约 4.7s 自然返回），测不到长期 park。
+    fn park_a_write(
+        backend: &Arc<PortablePtyBackend>,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let returned = Arc::new(AtomicBool::new(false));
         let returned_flag = Arc::clone(&returned);
-        let backend_for_writer = Arc::clone(&backend);
+        let backend_for_writer = Arc::clone(backend);
+        let session = session_id.to_string();
         std::thread::spawn(move || {
-            // 64 MiB：4 MiB 会被 ConPTY 缓冲吞掉（约 4.7s 自然返回），测不到长期 park。
             let payload = vec![b'x'; 64 * 1024 * 1024];
-            let _ = backend_for_writer.write("hub-parked", &payload);
+            let _ = backend_for_writer.write(&session, &payload);
             returned_flag.store(true, Ordering::SeqCst);
         });
+        returned
+    }
 
-        std::thread::sleep(Duration::from_secs(2));
+    fn assert_parked(returned: &Arc<std::sync::atomic::AtomicBool>, why: &str) {
         assert!(
-            !returned.load(Ordering::SeqCst),
-            "前提：64 MiB 的写必须还 park 着，否则这条测试没测到目标场景"
+            !returned.load(std::sync::atomic::Ordering::SeqCst),
+            "前提：写必须还 park 着（{why}）"
         );
+    }
+
+    /// `forget` 必须**主动**关闭 PTY master：否则 park 在 `write_all` 的线程（它自己持有
+    /// `Arc<LivePty>`）永远不会返回 —— 这是 8B spike s5 三档实验唯一让写返回的那一档。
+    #[test]
+    fn forget_actively_closes_the_transport_so_a_parked_write_returns() {
+        use std::time::Duration;
+
+        let backend = Arc::new(PortablePtyBackend::new());
+        let handle = backend
+            .spawn(request(
+                "hub-parked",
+                spec("ping", &["-n", "300", "127.0.0.1"]),
+            ))
+            .expect("spawn");
+        let terminal = attach_test_terminal(&backend, "hub-parked");
+        terminal.wait_for_handshake();
+
+        let returned = park_a_write(&backend, "hub-parked");
+        std::thread::sleep(Duration::from_secs(2));
+        assert_parked(&returned, "64 MiB 才稳");
 
         // 第一步：用户 kill → 树杀。**这一步解不开写**（spike s5 第二档）：
         // 进程死了不等于管道写端会返回 —— containment ≠ transport closure。
         backend.terminate_tree("hub-parked").expect("树杀");
         std::thread::sleep(Duration::from_secs(1));
-        assert!(
-            !returned.load(Ordering::SeqCst),
-            "树杀本身不得被当成「解开阻塞写」的手段（spike s5 第二档：still parked）"
-        );
+        assert_parked(&returned, "树杀不得被当成解开阻塞写的手段");
 
         // 第二步：reaper 写完终态 → forget。**这一步才解开写**（spike s5 第三档）。
         backend.forget("hub-parked").expect("forget");
 
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !returned.load(Ordering::SeqCst) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
         assert!(
-            returned.load(Ordering::SeqCst),
+            wait_for(&returned, Duration::from_secs(10)),
             "forget 之后 parked write 必须返回（有界 10s 观察窗口，不 join）"
         );
         assert!(
-            reader_done.load(Ordering::SeqCst),
+            terminal.is_done(),
             "master 被关闭之后 reader 必须拿到 EOF（传输确实关了）"
         );
 
+        cleanup(&handle);
+    }
+
+    /// T5：`forget` 必须**显式取出并关闭唯一 Job 句柄**，不能依赖 `Arc<LivePty>` drop ——
+    /// parked writer 自己就持有那个 Arc（spec §4.5 / 约束 4+5）。
+    ///
+    /// 断言的**判别性来源**是「从句柄被 parked writer 持有的那个 `Arc` 里看，
+    /// `containment` 已经被取走（None）」（已用「取走但 `mem::forget` 泄漏句柄」的变异验证过：
+    /// 变异后本条与本文件另外两条的「后代被回收」断言**照样通过**）。
+    /// 原因是 `ClosePseudoConsole` 本身就会带走挂在同一 console 上的后代，
+    /// 所以「后代消失」这条**不足以**区分实现；Job 路径的判别性证据在
+    /// `containment::tests::closing_the_last_handle_kills_the_contained_tree`（纯 Job、
+    /// 没有 console 参与）与 spike s6（宿主被 `taskkill /F`）。
+    /// 「forget 之后不得留下偷活后代」仍然作为产品级结论保留在这里。
+    #[test]
+    fn forget_releases_the_job_even_while_a_writer_holds_the_arc() {
+        use std::time::{Duration, Instant};
+
+        let backend = Arc::new(PortablePtyBackend::new());
+        let handle = backend
+            .spawn(request(
+                "hub-park-tree",
+                spec("cmd", &["/c", "ping -n 300 127.0.0.1"]),
+            ))
+            .expect("spawn");
+        let terminal = attach_test_terminal(&backend, "hub-park-tree");
+        terminal.wait_for_handshake();
+        let root = handle.pid.expect("pid");
+
+        // 等后代出现（cmd → ping）
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendants = Vec::new();
+        while Instant::now() < deadline {
+            descendants = descendants_of(root);
+            if !descendants.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!descendants.is_empty(), "需要 cmd → ping 两层结构");
+
+        let returned = park_a_write(&backend, "hub-park-tree");
+        std::thread::sleep(Duration::from_secs(2));
+        assert_parked(&returned, "parked writer 必须持有 Arc<LivePty>");
+
+        // forget 之前先拿一份 Arc：forget 之后 map 里没有了，但 parked writer 还持有它。
+        let live = backend.live("hub-park-tree").expect("live");
+        backend.forget("hub-park-tree").expect("forget");
+
+        assert!(
+            wait_for(&returned, Duration::from_secs(10)),
+            "forget 之后 parked write 必须返回"
+        );
+        assert!(
+            live.process
+                .containment
+                .lock()
+                .expect("containment")
+                .is_none(),
+            "forget 必须显式取走并关闭唯一 Job 句柄（不能等 Arc<LivePty> drop）"
+        );
+
+        let all: Vec<u32> = std::iter::once(root).chain(descendants.clone()).collect();
+        assert!(
+            wait_until_dead(&all, Duration::from_secs(10)),
+            "forget 之后不得留下偷活的后代（存活：{:?}）",
+            all.iter()
+                .copied()
+                .filter(|pid| process_alive(*pid))
+                .collect::<Vec<u32>>()
+        );
+
+        cleanup(&handle);
+    }
+
+    /// reaper 路径：root **自然退出**、后代仍存活 → `forget` 必须把它们收掉。
+    ///
+    /// `start /b` 让 ping 成为 cmd 的后代但 cmd 立刻退出 —— 正是「root 走了、后代偷活」的形状。
+    #[test]
+    fn release_after_a_natural_root_exit_still_reaps_living_descendants() {
+        use std::time::{Duration, Instant};
+
+        let backend = Arc::new(PortablePtyBackend::new());
+        let handle = backend
+            .spawn(request(
+                "hub-natural",
+                spec("cmd", &["/c", "start /b ping -n 300 127.0.0.1"]),
+            ))
+            .expect("spawn");
+        let terminal = attach_test_terminal(&backend, "hub-natural");
+        terminal.wait_for_handshake();
+        let root = handle.pid.expect("pid");
+
+        // 前提 1：后代存在；前提 2：root 已自然退出（reaper 观察到的那个事实）。
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut descendants = Vec::new();
+        let mut root_exited = false;
+        while Instant::now() < deadline {
+            descendants = descendants_of(root);
+            root_exited = backend.try_wait("hub-natural").expect("try_wait").is_some();
+            if !descendants.is_empty() && root_exited {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(root_exited, "前提：root（cmd）必须已经自然退出");
+        assert!(!descendants.is_empty(), "前提：root 退出时后代仍然存在");
+        assert!(
+            descendants.iter().any(|pid| process_alive(*pid)),
+            "前提：至少一个后代在 root 退出后仍然存活：{descendants:?}"
+        );
+
+        let live = backend.live("hub-natural").expect("live");
+        backend.forget("hub-natural").expect("forget");
+
+        assert!(
+            live.process
+                .containment
+                .lock()
+                .expect("containment")
+                .is_none(),
+            "forget 必须显式取走并关闭唯一 Job 句柄"
+        );
+        assert!(
+            wait_until_dead(&descendants, Duration::from_secs(10)),
+            "root 自然退出后，forget 仍必须回收存活的后代（存活：{:?}）",
+            descendants
+                .iter()
+                .copied()
+                .filter(|pid| process_alive(*pid))
+                .collect::<Vec<u32>>()
+        );
+
+        cleanup(&handle);
+    }
+
+    /// 有界等待一个 `AtomicBool` 变真（测试里到处要用，避免 sleep 猜）。
+    fn wait_for(flag: &Arc<std::sync::atomic::AtomicBool>, timeout: std::time::Duration) -> bool {
+        use std::time::Instant;
+
+        let deadline = Instant::now() + timeout;
+        while !flag.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 收尾：残余进程一律清掉，别给后面的测试留垃圾。
+    fn cleanup(handle: &PtyProcessHandle) {
         let _ = std::process::Command::new("taskkill")
             .args([
                 "/F",

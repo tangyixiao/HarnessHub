@@ -218,12 +218,13 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{descendants_of, terminate_pid, Containment, SWEEP_ROUNDS_LIMIT};
 
+/// 真机测试共用的进程存活探针（Task 5/6 的 `portable_pty_backend` 与 `tests/` 都要用，
+/// 只留这一份 `tasklist` 包装）。
 #[cfg(all(test, windows))]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use std::time::{Duration, Instant};
 
-    fn alive(pid: u32) -> bool {
+    pub(crate) fn process_alive(pid: u32) -> bool {
         let output = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
             .output()
@@ -231,10 +232,11 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
     }
 
-    fn wait_dead(pids: &[u32], timeout: Duration) -> bool {
+    /// 等到 `pids` 全部消失；超时返回 false（**不**把超时当成功）。
+    pub(crate) fn wait_until_dead(pids: &[u32], timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if pids.iter().all(|pid| !alive(*pid)) {
+            if pids.iter().all(|pid| !process_alive(*pid)) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -243,6 +245,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::test_support::{process_alive, wait_until_dead};
+    use super::*;
+    use std::time::{Duration, Instant};
 
     /// Job 能否覆盖「直接子进程 + 它的后代」：cmd 起一个 ping，两个进程都要在 job 里。
     #[test]
@@ -284,7 +293,7 @@ mod tests {
         );
 
         containment.terminate_tree().expect("terminate tree");
-        assert!(wait_dead(&tree, Duration::from_secs(10)), "{tree:?}");
+        assert!(wait_until_dead(&tree, Duration::from_secs(10)), "{tree:?}");
         // 收尾：子进程已经被 job 杀掉，但仍要 wait() 回收句柄（否则 clippy::zombie_processes）。
         let _ = child.kill();
         let _ = child.wait();
@@ -306,11 +315,11 @@ mod tests {
                 .expect("spawn ping");
             child_pid = child.id();
             containment.assign(child_pid).expect("assign");
-            assert!(alive(child_pid));
+            assert!(process_alive(child_pid));
             // containment 在这里 drop → 最后一句柄关闭 → KILL_ON_JOB_CLOSE
         }
         assert!(
-            wait_dead(&[child_pid], Duration::from_secs(10)),
+            wait_until_dead(&[child_pid], Duration::from_secs(10)),
             "job 句柄关闭后 {child_pid} 必须被 OS 回收"
         );
         // 回收句柄（进程已被 job 杀掉）。
