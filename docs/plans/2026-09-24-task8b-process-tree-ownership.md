@@ -1715,21 +1715,39 @@ fn containment_is_established_in_this_test_process_on_the_production_runtime_pat
 
 ```rust
 /// containment 建立失败时，错误必须**带具体 Win32 error**，且绝不能变成「已 running」。
-///
-/// 这里用 fake 强制 AssignProcessToJobObject 失败（真实失败无法在不改产品代码的前提下稳定构造），
-/// 断言错误形状；primitive 层的真实 Win32 error 由 Task 1 的
-/// `assign_reports_the_win32_error_for_an_unopenable_process` 覆盖。
 #[test]
 fn a_failed_containment_reports_a_win32_error_and_never_runs() {
-    // 见 Task 4：`PtyManager::with_input_capacity(...)` + fake `.with_failing_containment()`
-    // 断言：spawn 返回 Err、消息含 "os error"、`pending_bytes` 为 None、DB 里是 failed/launch_failed。
+    // `#[cfg(test)]` 的 fake backend 对 integration test **不可见**，所以这条纪律测试
+    // 只能放在 lib 内 —— 实现落在 Task 4 的
+    // `terminal::tests::start_fails_when_containment_cannot_be_established`
+    // （断言 spawn 返回 Err、消息含 "含包含/containment"、DB 里是 failed/launch_failed、
+    //  pid 为空、事件里没有 Start）。已用「关掉 fake 的 containment 检查」变异验证其对检查敏感。
 }
 ```
 
 - [ ] **Step 2: 跑测试**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --test process_tree_ownership -- --nocapture --test-threads=1`
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test process_tree_ownership -- --nocapture`
 Expected: 全绿
+
+> **实现时修正（措辞与边界，都写进了测试的 doc comment）**：
+>
+> 1. **R5 的可观测边界**：`pending_bytes → None` 证明的是「reaper 走完了终态 + `forget`」，
+>    **看不见** worker 内部是否已从 `backend.write` 返回（handle 的移除与 worker 的解除
+>    是两件事）。真正断言「parked 写被放出来」的是 transport 层的判别性用例
+>    `pty::portable_pty_backend::tests::forget_actively_closes_the_transport_so_a_parked_write_returns`
+>    （已用「去掉 `close_transport()`」变异验证）。R5 保留产品级链路结论。
+> 2. **R6 的措辞**：只写「验证 `forget` / 最后一个 Job 句柄关闭会收敛残留后代」，
+>    **不**称它直接测过宿主 crash；宿主 crash 的证据是 spike s6（同一个
+>    `KILL_ON_JOB_CLOSE` 机制），引用但不等价。
+> 3. **R7 的命名与前提**：名字保持
+>    `containment_is_established_in_this_test_process_on_the_production_runtime_path`，
+>    doc 里明说 cargo 测试进程 ≠ 打包后的应用宿主；缺 codex / 缺 E2E 目录一律 panic
+>    （跳过 ≠ 通过）；并断言生产路径上的树确实 ≥ 3 层（cmd → node → codex.exe）。
+> 4. **并发**：文件内用 `static SERIAL: Mutex<()>` 串行化（与 7D 的
+>    `two_harness_concurrency.rs` 同一手法），所以**不依赖** `--test-threads=1`。
+>
+> 实测：8 条用例连跑两次全绿（约 25s），日志见 `D:\HarnessHub-E2E\8b-task7-gate.log`。
 
 - [ ] **Step 3: 提交**
 
