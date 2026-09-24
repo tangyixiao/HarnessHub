@@ -16,6 +16,10 @@
 pub mod backend;
 pub mod manager;
 pub mod portable_pty_backend;
+pub mod session;
+
+#[cfg(test)]
+mod input_tests;
 
 pub use backend::{PtyBackend, PtyProcessHandle, PtySpawnRequest};
 pub use manager::{ExitSink, OutputSink, PtyManager};

@@ -256,6 +256,22 @@ impl Fixture {
             .collect()
     }
 
+    /// 写入是**异步**的（8A：每会话 writer worker + 有界队列）：
+    /// 断言 backend 记录之前必须等它排空，不能 sleep 猜。
+    ///
+    /// 这同时**加强**了下面的负向断言：等到「claude 的批次已经被投递到某处」之后，
+    /// 才有把握说 codex 那边什么都没收到。
+    fn wait_for_writes(&self, session_id: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if self.writes_for(session_id).len() >= expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("会话 {session_id} 在 5 秒内没有把 {expected} 次写入交给 backend");
+    }
+
     fn resizes_for(&self, session_id: &str) -> Vec<(u16, u16)> {
         self.backend
             .resized
@@ -399,6 +415,7 @@ fn input_and_resize_reach_only_the_addressed_session() {
         .runtime
         .resize(&claude, 90, 20)
         .expect("resize claude");
+    fixture.wait_for_writes(&claude, 1);
 
     assert_eq!(fixture.writes_for(&claude), vec![b"CLAUDE_INPUT".to_vec()]);
     assert!(
@@ -419,6 +436,7 @@ fn input_and_resize_reach_only_the_addressed_session() {
         .runtime
         .resize(&codex, 101, 31)
         .expect("resize codex");
+    fixture.wait_for_writes(&codex, 1);
 
     assert_eq!(fixture.writes_for(&codex), vec![b"CODEX_INPUT".to_vec()]);
     assert_eq!(fixture.writes_for(&claude), vec![b"CLAUDE_INPUT".to_vec()]);

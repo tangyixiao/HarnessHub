@@ -26,6 +26,7 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::harness::launch::LaunchSpec;
 use crate::pty::backend::{PtyBackend, PtyProcessHandle};
+use crate::pty::session::{SessionHandle, DEFAULT_INPUT_CAPACITY_BYTES};
 
 /// 原始输出回调：`(session_id, seq, bytes)`。
 pub type OutputSink = Arc<dyn Fn(&str, u64, &[u8]) + Send + Sync>;
@@ -40,6 +41,7 @@ pub struct PtyManager {
     backend: Arc<dyn PtyBackend>,
     on_output: OutputSink,
     on_exit: ExitSink,
+    input_capacity_bytes: usize,
     /// spawn 时取好读端，等调用方把会话标记为 `running` 之后再启动读线程。
     ///
     /// 为什么必须分开：进程可能 spawn 成功后**立刻**退出。如果读线程在
@@ -48,16 +50,39 @@ pub struct PtyManager {
     /// （真实竞态，已由 terminal 编排测试抓出）。
     /// 把「取读端」与「开始读」拆开，顺序就由调用方确定，不再依赖线程调度。
     pending_readers: Mutex<HashMap<String, Box<dyn Read + Send>>>,
+    /// 每会话输入侧（有界队列 + writer worker）。`Arc` 是为了让 reaper 也能释放它。
+    sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>,
 }
 
 impl PtyManager {
     pub fn new(backend: Arc<dyn PtyBackend>, on_output: OutputSink, on_exit: ExitSink) -> Self {
+        Self::with_input_capacity(backend, on_output, on_exit, DEFAULT_INPUT_CAPACITY_BYTES)
+    }
+
+    /// 容量可注入：单元测试用 8 / 16 字节，不必硬编码 64 KiB（spec §6.1）。
+    pub fn with_input_capacity(
+        backend: Arc<dyn PtyBackend>,
+        on_output: OutputSink,
+        on_exit: ExitSink,
+        input_capacity_bytes: usize,
+    ) -> Self {
         Self {
             backend,
             on_output,
             on_exit,
+            input_capacity_bytes,
             pending_readers: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn session_handle(&self, session_id: &str) -> Result<Arc<SessionHandle>> {
+        self.sessions
+            .lock()
+            .map_err(|_| Error::StateLockPoisoned)?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| Error::InvalidInput(format!("未知会话：{session_id}")))
     }
 
     /// spawn 并**取好读端**，但此时还没有读线程。
@@ -82,6 +107,19 @@ impl PtyManager {
             .lock()
             .map_err(|_| Error::StateLockPoisoned)?
             .insert(session_id.to_string(), reader);
+
+        // spawn 失败不得留下 handle（spec §7 L1）：走到这里说明进程已经起来了。
+        self.sessions
+            .lock()
+            .map_err(|_| Error::StateLockPoisoned)?
+            .insert(
+                session_id.to_string(),
+                Arc::new(SessionHandle::spawn(
+                    session_id,
+                    Arc::clone(&self.backend),
+                    self.input_capacity_bytes,
+                )),
+            );
 
         Ok(handle)
     }
@@ -143,8 +181,19 @@ impl PtyManager {
         Ok(())
     }
 
+    /// **非阻塞**：只入队（INV-2）。`Ok` 只表示「Harness Hub 已接受本次输入」，
+    /// **不**表示 OS 已经把字节写进 PTY（真正的写入由该会话的 writer worker 做）。
     pub fn write(&self, session_id: &str, bytes: &[u8]) -> Result<()> {
-        self.backend.write(session_id, bytes)
+        self.session_handle(session_id)?.try_enqueue(bytes)
+    }
+
+    /// 该会话尚未完成的输入字节数（队列 + 正在写的那一批）。诊断 / 测试用。
+    pub fn pending_bytes(&self, session_id: &str) -> Option<usize> {
+        self.sessions
+            .lock()
+            .ok()?
+            .get(session_id)
+            .map(|handle| handle.pending_bytes())
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<()> {
@@ -156,8 +205,15 @@ impl PtyManager {
         self.backend.resize(session_id, cols, rows)
     }
 
+    /// 用户主动结束：**kill 成功才关闭输入侧**（spec §4.5）。
+    ///
+    /// kill 失败不擅自关闭输入侧 —— 那会把「没能结束进程」伪装成「进程已经结束」。
     pub fn kill(&self, session_id: &str) -> Result<()> {
-        self.backend.kill(session_id)
+        self.backend.kill(session_id)?;
+        if let Ok(handle) = self.session_handle(session_id) {
+            handle.shutdown_input();
+        }
+        Ok(())
     }
 
     pub fn is_running(&self, session_id: &str) -> Result<bool> {
@@ -168,8 +224,16 @@ impl PtyManager {
         self.backend.try_wait(session_id)
     }
 
-    /// 丢弃会话句柄（终态写入之后调用）。
+    /// 丢弃会话句柄：关闭输入侧 + 丢 backend 句柄（终态写入之后调用）。
     pub fn forget(&self, session_id: &str) -> Result<()> {
+        let handle = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::StateLockPoisoned)?
+            .remove(session_id);
+        if let Some(handle) = handle {
+            handle.shutdown_input();
+        }
         self.backend.forget(session_id)
     }
 }
@@ -313,12 +377,68 @@ pub(crate) mod fake {
         }
     }
 
+    /// 「子进程永远不读 stdin」的可编程替身：让某个 program 的 `write` park 在 Condvar 上。
+    ///
+    /// 为什么需要它：8A 的核心断言是「一条会话卡在阻塞写里时，整台 Runtime 都不冻结」，
+    /// 这必须能**确定性**地制造出来，不能靠 sleep 猜时序。
+    #[derive(Default)]
+    struct WriteGate {
+        entered: Mutex<std::collections::HashSet<String>>,
+        entered_changed: Condvar,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl WriteGate {
+        fn block(&self, session_id: &str) {
+            {
+                let mut entered = self.entered.lock().expect("entered");
+                entered.insert(session_id.to_string());
+                self.entered_changed.notify_all();
+            }
+            let mut released = self.released.lock().expect("released");
+            while !*released {
+                released = self
+                    .release_changed
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+
+        fn wait_entered(&self, session_id: &str, timeout: Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            let mut entered = self.entered.lock().expect("entered");
+            loop {
+                if entered.contains(session_id) {
+                    return true;
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                let (guard, _) = self
+                    .entered_changed
+                    .wait_timeout(entered, remaining)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                entered = guard;
+            }
+        }
+
+        fn release(&self) {
+            *self.released.lock().expect("released") = true;
+            self.release_changed.notify_all();
+        }
+    }
+
     #[derive(Default)]
     pub struct FakePtyBackend {
         pub spawned: Mutex<Vec<PtySpawnRequest>>,
         pub written: Mutex<Vec<(String, Vec<u8>)>>,
         pub resized: Mutex<Vec<(String, u16, u16)>>,
         pub killed: Mutex<Vec<String>>,
+        /// 哪些 program 的 `write` 会 park（模拟子进程不读 stdin）。
+        blocking_writes: Mutex<std::collections::HashSet<String>>,
+        gate: WriteGate,
         /// 读端返回的字节（spawn 时按顺序弹出）。**共享队列**：只适合单会话测试。
         outputs: Mutex<Vec<Vec<u8>>>,
         /// 按 program 分流的实时输出流（可并发、可运行期追加）。
@@ -370,6 +490,25 @@ pub(crate) mod fake {
                 .expect("pids_by_program")
                 .insert(program.to_string(), pid);
             self
+        }
+
+        /// 该 program 的 `write` 会**永久** park，直到 [`Self::release_blocked_write`]。
+        pub fn with_blocking_write(self, program: &str) -> Self {
+            self.blocking_writes
+                .lock()
+                .expect("blocking_writes")
+                .insert(program.to_string());
+            self
+        }
+
+        /// 等 worker 真的进入阻塞写（确定性，不靠 sleep 猜）。
+        pub fn wait_for_write_blocked(&self, session_id: &str, timeout: Duration) -> bool {
+            self.gate.wait_entered(session_id, timeout)
+        }
+
+        /// 放行所有被 park 的写（语义写在 `WriteGate::release` 上：一次性放行）。
+        pub fn release_blocked_write(&self) {
+            self.gate.release();
         }
 
         /// 运行期追加输出：已启动的 reader 会按序读到它。
@@ -482,6 +621,17 @@ pub(crate) mod fake {
                 .lock()
                 .expect("written")
                 .push((session_id.to_string(), bytes.to_vec()));
+
+            if let Some(program) = self.program_of(session_id) {
+                if self
+                    .blocking_writes
+                    .lock()
+                    .expect("blocking_writes")
+                    .contains(&program)
+                {
+                    self.gate.block(session_id);
+                }
+            }
             Ok(())
         }
 
@@ -567,6 +717,22 @@ mod tests {
             Arc::new(|_session, _code| {}),
         );
         (manager, chunks)
+    }
+
+    /// 写入现在是**异步**的（每会话 writer worker）：断言 backend 记录前必须等 worker 排空，
+    /// 不能 sleep 猜。
+    ///
+    /// 顺序也变了：`kill` 成功会关闭输入侧并丢弃尚未发送的批次（spec §4.5），
+    /// 所以「write 之后立刻 kill」不再保证那次写已经到达 backend —— 必须先等排空再 kill。
+    fn wait_for_writes(backend: &Arc<FakePtyBackend>, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if backend.written.lock().expect("written").len() >= expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("backend 在 5 秒内没有收到 {expected} 次写入");
     }
 
     #[test]
@@ -665,6 +831,7 @@ mod tests {
         manager.start_reading("hub-1").expect("开始读取");
 
         manager.write("hub-1", b"ls\r").expect("写入");
+        wait_for_writes(&backend, 1);
         manager.resize("hub-1", 100, 40).expect("调整尺寸");
         manager.kill("hub-1").expect("结束");
 
