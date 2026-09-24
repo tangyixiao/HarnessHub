@@ -980,10 +980,14 @@ Task 8B 的本地交付我认可。7 条 review 修正都有对应实现和证�
 ```text
 1. 本次验收的证据是**实现者报告的真机输出**（上面每一段），验收人的独立重跑**未执行**
    （本机 rustup 组件下载受阻，cargo test 没有启动）。所以这是「本地交付已验收」，
-   **不是**「第三方独立复验通过」。
-2. 远端未推送：alpha.3..HEAD 的提交（验收人核对时为 30 个；写入本条验收记录后为 31 个）
-   与 v0.1.0-alpha.3（annotated tag，6787aa1 → d1ff944，**未移动**）都只在本地。
-   网络恢复后执行 `git push origin main --follow-tags`（tag 不重建、不改指向）。
+   **不是**「第三方独立复验通过」；该表述在独立复验完成前保持不变。
+2. 推送状态（写入本条时更新）：已执行 `git push origin main --follow-tags`，
+   c4b0359..ebf394c。推送时**远端已经分叉**：origin/main 领先 2 个提交
+   （980aa5e / c4b0359，Apache-2.0 许可变更：LICENSE / NOTICE），因此先合并再推送
+   （merge commit ebf394c，这是本仓库第一个 merge commit）。**刻意不用 rebase**：
+   远端早已存在 v0.1.0-alpha.3，重写我们的提交会让这个**已发布**的 tag 指向 main 之外的
+   孤儿提交。tag 仍是 annotated 6787aa1 -> d1ff944，未被本次推送改动，且 d1ff944
+   现在是 main 的祖先；本地与 origin/main 已同步（alpha.3 之后 34 个提交）。
 3. spec §6 L1–L7 的已知限制随本次验收一并接受；其中 L1（分配前 race 只能 best-effort
    压到最小）是**能力边界**，不是待办缺陷。
 ```
