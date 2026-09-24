@@ -247,7 +247,7 @@ impl PtyManager {
     ///
     /// kill 失败不擅自关闭输入侧 —— 那会把「没能结束进程」伪装成「进程已经结束」。
     pub fn kill(&self, session_id: &str) -> Result<()> {
-        self.backend.kill(session_id)?;
+        self.backend.terminate_tree(session_id)?;
         if let Ok(handle) = self.session_handle(session_id) {
             handle.shutdown_input();
         }
@@ -474,6 +474,12 @@ pub(crate) mod fake {
         pub written: Mutex<Vec<(String, Vec<u8>)>>,
         pub resized: Mutex<Vec<(String, u16, u16)>>,
         pub killed: Mutex<Vec<String>>,
+        /// 被 `terminate_tree` 的会话（记录「走的是树杀而不是 direct-child kill」）。
+        pub terminated_trees: Mutex<Vec<String>>,
+        /// spawn 时 containment 建立失败（模拟 AssignProcessToJobObject 被拒）。
+        fail_containment: Mutex<bool>,
+        /// 会话没有 containment（T6 用）：spawn 正常，但树杀必须报明确错误。
+        no_containment: Mutex<bool>,
         /// 被 `forget` 的会话（记录「资源回收确实发生过」，供 reaper 用例断言）。
         pub forgotten: Mutex<Vec<String>>,
         /// 哪些 program 的 `write` 会 park（模拟子进程不读 stdin）。
@@ -481,8 +487,8 @@ pub(crate) mod fake {
         gate: WriteGate,
         /// 哪些 program 的 `write` 直接返回 Err（模拟真实写入失败）。
         failing_writes: Mutex<HashMap<String, String>>,
-        /// 下一次 `kill` 必须失败的会话（模拟 backend 层面的终止失败）。
-        failing_kills: Mutex<std::collections::HashSet<String>>,
+        /// 下一次 `terminate_tree` 必须失败的会话（模拟 backend 层面的终止失败）。
+        failing_terminations: Mutex<std::collections::HashSet<String>>,
         /// 读端返回的字节（spawn 时按顺序弹出）。**共享队列**：只适合单会话测试。
         outputs: Mutex<Vec<Vec<u8>>>,
         /// 按 program 分流的实时输出流（可并发、可运行期追加）。
@@ -564,12 +570,27 @@ pub(crate) mod fake {
             self
         }
 
-        /// 让下一次 `kill` 直接失败（模拟 backend 层面的终止失败）。
-        pub fn fail_next_kill(&self, session_id: &str) {
-            self.failing_kills
+        /// 让下一次 `terminate_tree` 直接失败（模拟 backend 层面的终止失败）。
+        pub fn fail_next_terminate_tree(&self, session_id: &str) {
+            self.failing_terminations
                 .lock()
-                .expect("failing_kills")
+                .expect("failing_terminations")
                 .insert(session_id.to_string());
+        }
+
+        /// spawn 之后的 containment 建立失败（T1/T6 用）。
+        ///
+        /// 第一个调用点是 Task 4 的 T1；在此之前只有 spawn 里的检查读这个标志位。
+        #[allow(dead_code)]
+        pub fn with_failing_containment(self) -> Self {
+            *self.fail_containment.lock().expect("fail_containment") = true;
+            self
+        }
+
+        /// spawn 正常，但会话**没有** containment（T6 用）：树杀必须报明确错误。
+        pub fn without_containment(self) -> Self {
+            *self.no_containment.lock().expect("no_containment") = true;
+            self
         }
 
         /// 运行期追加输出：已启动的 reader 会按序读到它。
@@ -638,6 +659,13 @@ pub(crate) mod fake {
         fn spawn(&self, request: PtySpawnRequest) -> Result<PtyProcessHandle> {
             if *self.fail_spawn.lock().expect("fail_spawn") {
                 return Err(Error::InvalidInput("fake: spawn 失败".to_string()));
+            }
+
+            // containment 必须在进程变成 `running` **之前**建立；失败即 launch_failed。
+            if *self.fail_containment.lock().expect("fail_containment") {
+                return Err(Error::InvalidInput(
+                    "fake: 建立 containment 失败（os error 5）".to_string(),
+                ));
             }
 
             let program = request.spec.program.to_string_lossy().into_owned();
@@ -716,22 +744,31 @@ pub(crate) mod fake {
             Ok(())
         }
 
-        fn kill(&self, session_id: &str) -> Result<()> {
+        fn terminate_tree(&self, session_id: &str) -> Result<()> {
             if self
-                .failing_kills
+                .failing_terminations
                 .lock()
-                .expect("failing_kills")
+                .expect("failing_terminations")
                 .remove(session_id)
             {
-                return Err(Error::InvalidInput("fake: 结束进程失败".to_string()));
+                return Err(Error::InvalidInput("fake: 终止进程树失败".to_string()));
+            }
+            if *self.no_containment.lock().expect("no_containment") {
+                return Err(Error::InvalidInput(format!(
+                    "会话 {session_id} 没有 containment（fake）"
+                )));
             }
 
+            self.terminated_trees
+                .lock()
+                .expect("terminated_trees")
+                .push(session_id.to_string());
             self.killed
                 .lock()
                 .expect("killed")
                 .push(session_id.to_string());
 
-            // 真实语义：kill 之后进程**会**退出，reaper 随后就能读到退出状态。
+            // 真实语义：树杀之后 root **会**退出，reaper 随后就能读到退出状态。
             if !*self.always_exited.lock().expect("always_exited") {
                 self.exit_codes
                     .lock()

@@ -162,7 +162,8 @@ impl PtyBackend for PortablePtyBackend {
             .map_err(|error| Error::InvalidInput(format!("调整 PTY 尺寸失败：{error}")))
     }
 
-    fn kill(&self, session_id: &str) -> Result<()> {
+    /// Task 2 只做改名：这里暂时仍是 direct-child 行为；Task 3 换成 `containment.terminate_tree()`。
+    fn terminate_tree(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id)?;
         let mut child = lock(&live.child)?;
 

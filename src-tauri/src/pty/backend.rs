@@ -52,14 +52,21 @@ pub trait PtyBackend: Send + Sync {
 
     fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<()>;
 
-    fn kill(&self, session_id: &str) -> Result<()>;
+    /// 终止该会话**拥有的整棵进程树**（不是「直接子进程」）。
+    ///
+    /// Windows 上由 Job Object 承担（ADR-0013）：containment 在 spawn 阶段建立，
+    /// 因此**运行中的会话一定具备 containment**；缺失时必须返回明确错误，
+    /// **不得**静默降级成 direct-child kill。
+    ///
+    /// 语义边界：这只是**控制动作**。会话终态仍只由 reaper/reconcile 依退出事实写成。
+    fn terminate_tree(&self, session_id: &str) -> Result<()>;
 
     /// 非阻塞查询退出码；`Ok(None)` 表示仍在运行。**reaper 是唯一调用者。**
     fn try_wait(&self, session_id: &str) -> Result<Option<i32>>;
 
     fn is_running(&self, session_id: &str) -> Result<bool>;
 
-    /// 丢弃会话句柄（终态写入之后调用）。`kill` **不得**隐式丢弃 ——
+    /// 丢弃会话句柄（终态写入之后调用）。`terminate_tree` **不得**隐式丢弃 ——
     /// 否则 reaper 读不到退出状态，终态永远写不下去。
     fn forget(&self, session_id: &str) -> Result<()>;
 }

@@ -485,10 +485,10 @@ fn input_is_closed_after_a_successful_kill_but_not_after_a_failed_one() {
     let broken_backend = Arc::new(FakePtyBackend::new());
     let broken_manager = manager(Arc::clone(&broken_backend), 64);
     spawn(&broken_manager, "hub-b");
-    broken_backend.fail_next_kill("hub-b");
+    broken_backend.fail_next_terminate_tree("hub-b");
     assert!(
         broken_manager.kill("hub-b").is_err(),
-        "backend kill 失败必须如实返回"
+        "backend 终止进程树失败必须如实返回"
     );
     assert!(
         broken_manager.write("hub-b", b"still-ok").is_ok(),
@@ -512,6 +512,61 @@ fn enqueue_after_forget_is_rejected() {
         "forget 之后不得成功入队"
     );
     assert_eq!(manager.pending_bytes("hub-a"), None, "handle 必须已被移除");
+}
+
+/// T2：kill 必须走 `terminate_tree`（Session 拥有的是进程树，不是 direct child）。
+#[test]
+fn kill_terminates_the_owned_tree_and_closes_the_input_side() {
+    let backend = Arc::new(FakePtyBackend::new());
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    manager.kill("hub-a").expect("kill 成功");
+
+    assert_eq!(
+        backend
+            .terminated_trees
+            .lock()
+            .expect("terminated_trees")
+            .clone(),
+        vec!["hub-a".to_string()],
+        "kill 必须调用 terminate_tree，而不是只杀直接子进程"
+    );
+    assert!(
+        matches!(manager.write("hub-a", b"x"), Err(Error::InputClosed { .. })),
+        "kill 成功之后输入侧仍然要关闭（8A 语义不变）"
+    );
+}
+
+/// T3：terminate_tree 失败 → 不关闭输入侧、不写终态（沿用 8A T7 的形状）。
+#[test]
+fn a_failed_tree_termination_changes_nothing() {
+    let backend = Arc::new(FakePtyBackend::new());
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+    backend.fail_next_terminate_tree("hub-a");
+
+    assert!(manager.kill("hub-a").is_err(), "backend 失败必须如实返回");
+    assert!(
+        manager.write("hub-a", b"still-ok").is_ok(),
+        "树杀失败不得关闭输入侧"
+    );
+}
+
+/// T6：没有 containment 的会话必须报明确错误，而不是静默降级成 direct-child kill。
+#[test]
+fn terminating_a_session_without_containment_is_an_explicit_error() {
+    let backend = Arc::new(FakePtyBackend::new().without_containment());
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    let error = manager
+        .kill("hub-a")
+        .expect_err("没有 containment 必须报错");
+    assert!(
+        error.to_string().contains("containment") || error.to_string().contains("包含"),
+        "错误信息要说明缺少 containment：{error}"
+    );
 }
 
 /// 会话退出后必须释放输入侧与 backend 句柄：否则每会话泄漏一个 worker 线程
