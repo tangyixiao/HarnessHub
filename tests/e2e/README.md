@@ -686,3 +686,123 @@ claude 会话（`c0811428…`，cwd `claude-terminal`，13:57:49Z 开始）—�
 - 没有新增 multi-tab / split terminal，因此同一 App 实例里只有**当前**会话可由 UI 操作
   （第二条会话靠导航离开后仍存活来实现，见 [4]）。
 - `hub_session_id` 与 ccusage 裸 UUID 的关联仍然不可证明，7D 不碰（ADR-0011 决策八）。
+
+---
+
+## Task 8A：Runtime 输入路径 — 跨会话锁下不得有阻塞 I/O（2026-09-24）
+
+### 要修的东西（7D 发现的第 2 条）
+
+```text
+PortablePtyBackend::write（旧）
+  lock sessions            ← 全局 map 锁
+  session.writer.write_all ← 子进程不读 stdin 时**永久阻塞**
+  unlock
+```
+
+一条会话的阻塞写会把 `resize` / `kill` / `try_wait`（reaper）全部冻住 —— 连「结束会话」
+这个唯一的恢复手段都进不去（7D 真机实测：15+ 分钟静默挂死，测试进程 CPU ≈ 0，
+两个 Harness 的 shim 都还活着）。
+
+冻结的不变量（spec：`docs/specs/2026-09-24-task8a-runtime-input-path-design.md`）：
+
+```text
+INV-1  任何可能阻塞的 OS I/O 不得发生在跨会话锁持有期间
+INV-2  write_terminal 不得阻塞在子进程 stdin 上
+INV-3  kill / try_wait / resize / take_reader 不得依赖 writer 的锁
+INV-4  全局 sessions 锁只用于「查找 → clone Arc / 插入 / 删除」
+```
+
+### 确定性矩阵（fake backend，每次提交都跑）
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --lib pty::input_tests`
+
+```text
+running 12 tests ... test result: ok. 12 passed; 0 failed（0.1s 量级，全部靠 Condvar 同步，无 sleep 猜时序）
+```
+
+| 用例                              | 锁死的事实                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| 单批 > 容量（默认 & 注入 8 字节） | 空队列也整批拒绝                                                                       |
+| in-flight 记账                    | worker 阻塞在写里时 `pending_bytes == 8`；容量不可能被「pop 后重填」绕过               |
+| 无 partial enqueue                | 被拒批次一个字节都不落地；放行后 backend 只收到被接受的批次                            |
+| FIFO                              | 三批按序写入                                                                           |
+| A 阻塞写不影响 B                  | B 的 write/resize/kill **以及 A 自己的 resize/kill/try_wait** 全部 < 2s 返回           |
+| shutdown 不 join                  | worker park 在阻塞写里时 `forget` 仍立即返回（硬期限锁死）                             |
+| worker 失败语义                   | 输入侧永久失败 + 丢弃未发送 + `pending_bytes` 归零；**不发事件、不写终态**；控制面照常 |
+| 错误优先级                        | closed → failure → capacity（worker 先失败、随后 kill 关闭时报 `InputClosed`）         |
+| kill / forget 交互                | kill 成功才关输入侧；kill 失败不关；forget 之后写入被拒                                |
+| reaper 释放                       | 退出后释放 handle + 调 `backend.forget`，且**顺序**是「先写终态、再回收资源」          |
+| E1 reader EOF                     | EOF **不**触发资源回收；handle 还在，`is_running` 仍为 true                            |
+
+两个 RED 值得留档（都是先看到失败才改的实现）：
+
+```text
+1) 队列第一版在 pop 时就减 pending_bytes
+   → 16 字节容量实测能塞进约 2 倍（in-flight 没被计入）→ 改成只在 backend.write 返回后结算
+2) 失败态第一版把 failure 检查放在 closed 之前
+   → 显式 kill 之后仍报 worker 失败 → 按 spec §4.4.1 调成 closed 优先
+```
+
+### 真机验收（synthetic child 永不读 stdin）
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test runtime_input_backpressure -- --nocapture`
+
+```text
+test a_real_child_that_never_reads_stdin_does_not_freeze_the_runtime ... ok
+test the_last_output_is_not_truncated_when_the_reaper_releases_the_session ... ok
+test result: ok. 2 passed; 0 failed; finished in 6.58s（连续多次同结果）
+
+[R2] A 背压写入 返回耗时 = 378.4µs      ← A 的 writer 此刻真的 park 在 OS write 里
+[R2] B write   返回耗时 = 264.4µs
+[R2] B resize  返回耗时 = 280.3µs
+[R2] B kill    返回耗时 = 442.4µs
+[R2] A resize  返回耗时 = 233.6µs      ← 卡住的那条会话自己也能被 resize/kill
+[R2] A kill    返回耗时 = 370.7µs
+[R2] A try_wait 返回耗时 = 175.4µs
+```
+
+```text
+R1  4 MiB 批次被接受 → 之后写入得到 InputBackpressure；
+    2 秒后 pending_bytes 仍是 4 MiB —— 这同时**自证** child 真的不读 stdin
+R2  上表：六个控制调用全部在约 160–450 微秒内返回（旧实现是 15+ 分钟挂死）
+R3  kill 之后写入得到 InputClosed；synthetic child 全部清理干净
+R4  自己退出的 child（打印唯一 marker 后退出）→ reaper 走完「真实退出 → 终态 →
+    有界等待 reader → 释放」→ marker 完整出现在收集到的输出里（尾部不截断）
+```
+
+### 写这条测试时被机器教的三件事（都已写进测试注释）
+
+```text
+1. 容量必须**大于 ConPTY 的输入缓冲区**：64 KiB 会被 OS 一次性吞掉，write_all 根本不阻塞，
+   那样就没在测「park 在 OS 写里」。实测取 4 MiB 才能稳定造出阻塞写。
+2. `cmd /c echo` 在 ConPTY 下**不会退出**（GetExitCodeProcess 与 tasklist 都确认它 15 秒后仍活着），
+   所以「自然退出」用例改用绝对路径的 Windows PowerShell（CreateProcess 不搜 PATH）。
+3. 短命 console child（cmd / PowerShell）和 Claude 一样，**先发 ESC[6n 并等待应答**
+   （实测：只收到 4 字节 ESC[6n 就永远不动）。R4 因此需要 test-only DSR responder；
+   应答本身走 manager.write，也就是新的队列 —— 顺带把输入路径端到端过了一遍。
+```
+
+### 8A 的承诺边界（写进 spec §7，不许含糊）
+
+```text
+已证明：A 的 writer 永久 park 时，整台 Runtime、B 会话、以及 A 自己的 kill/resize/reap
+        都不冻结（确定性 + 真机两层）。
+未证明：回收那条被 OS syscall 卡死的 writer 线程本身 —— 这属于 Task 8B 的
+        process-tree ownership（Job Object / 受控 tree termination）。
+```
+
+### 回归与 Gate
+
+```text
+7D 确定性矩阵       7 passed（新队列路径 + 新锁结构下仍全绿）
+7D 真机并发         3 passed
+claude_lifecycle    4 passed（user_killed / natural_exit / host_shutdown / lost）
+real_codex_terminal 2 passed
+pnpm verify         退出码 0：Rust 单测 276 passed、全部集成套件、前端 124 passed、
+                    build、clippy -D warnings、格式检查；act() 警告 0
+pnpm python:test    Ran 12 tests ... OK
+Core diff 审计      只落在 pty/*、error.rs、测试与文档；pty/ 与 error.rs 里 codex/claude
+                    只出现在 #[cfg(test)] 测试数据中；commands.rs / src/lib / src/features
+                    零改动（无新 IPC DTO、UI 无新状态）
+```
