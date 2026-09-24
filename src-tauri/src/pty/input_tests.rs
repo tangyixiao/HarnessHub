@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::harness::launch::LaunchSpec;
+use crate::pty::backend::PtyBackend;
 use crate::pty::manager::fake::FakePtyBackend;
 use crate::pty::PtyManager;
 
@@ -511,4 +512,98 @@ fn enqueue_after_forget_is_rejected() {
         "forget 之后不得成功入队"
     );
     assert_eq!(manager.pending_bytes("hub-a"), None, "handle 必须已被移除");
+}
+
+/// 会话退出后必须释放输入侧与 backend 句柄：否则每会话泄漏一个 worker 线程
+/// （现状 `forget` 全仓没有任何生产调用点），同时**顺序**必须是「先写终态、再回收资源」。
+#[test]
+fn the_reaper_releases_the_session_after_writing_the_terminal_state() {
+    let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
+    let exited = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let order_violated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let manager = {
+        let backend_for_sink = Arc::clone(&backend);
+        let exited_for_sink = Arc::clone(&exited);
+        let violated = Arc::clone(&order_violated);
+        let backend_handle: Arc<dyn PtyBackend> = backend.clone();
+        Arc::new(PtyManager::with_input_capacity(
+            backend_handle,
+            Arc::new(|_session, _seq, _bytes| {}),
+            Arc::new(move |session, _code| {
+                // 终态写入的这一刻，backend 里**不允许**已经被 forget
+                if !backend_for_sink
+                    .forgotten
+                    .lock()
+                    .expect("forgotten")
+                    .is_empty()
+                {
+                    violated.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                exited_for_sink
+                    .lock()
+                    .expect("exited")
+                    .push(session.to_string());
+            }),
+            64,
+        ))
+    };
+    spawn(&manager, "hub-a");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if manager.pending_bytes("hub-a").is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        manager.pending_bytes("hub-a"),
+        None,
+        "reaper 必须释放 handle"
+    );
+    assert!(
+        backend
+            .forgotten
+            .lock()
+            .expect("forgotten")
+            .contains(&"hub-a".to_string()),
+        "reaper 必须调用 backend.forget"
+    );
+    assert_eq!(
+        exited.lock().expect("exited").as_slice(),
+        &["hub-a".to_string()],
+        "终态回调必须恰好发生一次"
+    );
+    assert!(
+        !order_violated.load(std::sync::atomic::Ordering::SeqCst),
+        "顺序必须是「先写终态、再回收资源」"
+    );
+}
+
+/// E1：reader EOF **不得**触发 forget（EOF ≠ 进程退出，ADR-0010 / spec §4.8）。
+#[test]
+fn reader_eof_does_not_release_the_session() {
+    let backend = Arc::new(FakePtyBackend::new().with_output(vec![b"bye".to_vec()]));
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    // 负向断言的落定窗口：reader 读完预置字节（fake 随即 EOF）只需毫秒级，
+    // 200ms 足够让「错误地把 EOF 当退出」的实现暴露出来。
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(
+        backend.forgotten.lock().expect("forgotten").is_empty(),
+        "reader EOF 绝不能触发资源回收"
+    );
+    assert_eq!(
+        manager.pending_bytes("hub-a"),
+        Some(0),
+        "handle 必须还在（进程仍然存在）"
+    );
+    assert!(
+        manager.is_running("hub-a").expect("查询"),
+        "EOF 只表示输出流结束，进程仍应被视为运行中"
+    );
 }

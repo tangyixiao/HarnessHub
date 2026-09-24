@@ -19,9 +19,10 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::harness::launch::LaunchSpec;
@@ -36,6 +37,13 @@ pub type ExitSink = Arc<dyn Fn(&str, Option<i32>) + Send + Sync>;
 
 /// reaper 轮询间隔。
 const REAP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// reaper 在丢掉 PTY 句柄之前，等 reader 结束的**有界**宽限（spec §4.8 E2）。
+///
+/// 为什么需要它：`forget` 会 drop `LivePty`（关闭 PTY master），而 reader 线程可能还在
+/// `read` 中途 —— 那会把「退出前最后写出的字节」截断。有界意味着它绝不会让 reaper 卡住，
+/// 也**不是** §4.7 禁止的那种无界 join。
+const READER_DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 pub struct PtyManager {
     backend: Arc<dyn PtyBackend>,
@@ -126,9 +134,10 @@ impl PtyManager {
 
     /// 启动 reader 与 reaper 线程。**必须在 `mark_running` 成功之后调用。**
     ///
-    /// 两个线程职责严格分离：
-    /// - reader：按序转发输出；读到 EOF 就结束，**不碰退出码**；
-    /// - reaper：轮询 `try_wait`，只有拿到真实退出状态才调用 [`ExitSink`]。
+    /// 三个线程职责严格分离：
+    /// - reader：按序转发输出；读到 EOF 就结束，**不碰退出码、也不做资源回收**（E1）；
+    /// - reaper：轮询 `try_wait`，只有拿到真实退出状态才调用 [`ExitSink`]，
+    ///   然后按固定顺序回收资源（spec §4.8）。
     pub fn start_reading(&self, session_id: &str) -> Result<()> {
         let reader = self
             .pending_readers
@@ -137,9 +146,11 @@ impl PtyManager {
             .remove(session_id)
             .ok_or_else(|| Error::InvalidInput(format!("会话没有待读取的 PTY：{session_id}")))?;
 
-        // ---- reader：只负责输出与 EOF ----
+        // ---- reader：只负责输出与 EOF（**绝不**触发资源回收）----
         let on_output = Arc::clone(&self.on_output);
         let reader_session = session_id.to_string();
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::clone(&reader_finished);
         thread::spawn(move || {
             let mut seq: u64 = 0;
             let mut reader = reader;
@@ -156,26 +167,53 @@ impl PtyManager {
                     Err(_) => break,
                 }
             }
+            reader_done.store(true, Ordering::SeqCst);
         });
 
-        // ---- reaper：唯一的退出状态事实来源 ----
+        // ---- reaper：唯一的退出状态事实来源 + 唯一的资源回收点 ----
         let backend = Arc::clone(&self.backend);
+        let sessions = Arc::clone(&self.sessions);
         let on_exit = Arc::clone(&self.on_exit);
         let reaper_session = session_id.to_string();
         thread::spawn(move || loop {
-            match backend.try_wait(&reaper_session) {
-                Ok(Some(code)) => {
-                    on_exit(&reaper_session, Some(code));
-                    break;
-                }
+            let exit_code = match backend.try_wait(&reaper_session) {
+                Ok(Some(code)) => Some(code),
                 // 仍在运行：继续等，**绝不猜测**
-                Ok(None) => thread::sleep(REAP_INTERVAL),
-                Err(_) => {
-                    // 连退出状态都读不到：如实上报「拿不到」，由上层映射成 unknown/lost
-                    on_exit(&reaper_session, None);
-                    break;
+                Ok(None) => {
+                    thread::sleep(REAP_INTERVAL);
+                    continue;
                 }
+                // 连退出状态都读不到：如实上报「拿不到」，由上层映射成 unknown/lost
+                Err(_) => None,
+            };
+
+            // 1) 终态：reaper 是唯一事实来源（forget 只回收资源，不决定 terminal state）。
+            on_exit(&reaper_session, exit_code);
+
+            // 2) 有界等待 reader 把已读到的字节交付完（spec §4.8 E2：避免退出前尾部被截断）。
+            //    这是**有界**等待（最多 READER_DRAIN_GRACE），不是 join ——
+            //    子进程被 kill 而 descendant 仍持有 PTY 时 reader 可能永远到不了 EOF，
+            //    上限保证 reaper 仍然会继续走完释放。
+            let deadline = Instant::now() + READER_DRAIN_GRACE;
+            while !reader_finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
             }
+
+            // 3) 资源回收，顺序固定（spec §4.8）：
+            //    先 shutdown_input（让并发 write 拿到 InputClosed 而不是「未知会话」），
+            //    再从 manager map 移除，最后丢 backend 句柄（drop LivePty = 关 PTY master）。
+            let handle = sessions
+                .lock()
+                .ok()
+                .and_then(|map| map.get(&reaper_session).cloned());
+            if let Some(handle) = handle {
+                handle.shutdown_input();
+            }
+            if let Ok(mut map) = sessions.lock() {
+                map.remove(&reaper_session);
+            }
+            let _ = backend.forget(&reaper_session);
+            break;
         });
 
         Ok(())
@@ -436,6 +474,8 @@ pub(crate) mod fake {
         pub written: Mutex<Vec<(String, Vec<u8>)>>,
         pub resized: Mutex<Vec<(String, u16, u16)>>,
         pub killed: Mutex<Vec<String>>,
+        /// 被 `forget` 的会话（记录「资源回收确实发生过」，供 reaper 用例断言）。
+        pub forgotten: Mutex<Vec<String>>,
         /// 哪些 program 的 `write` 会 park（模拟子进程不读 stdin）。
         blocking_writes: Mutex<std::collections::HashSet<String>>,
         gate: WriteGate,
@@ -720,6 +760,10 @@ pub(crate) mod fake {
         }
 
         fn forget(&self, _session_id: &str) -> Result<()> {
+            self.forgotten
+                .lock()
+                .expect("forgotten")
+                .push(_session_id.to_string());
             Ok(())
         }
     }
