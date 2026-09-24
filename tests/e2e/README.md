@@ -806,3 +806,159 @@ Core diff 审计      只落在 pty/*、error.rs、测试与文档；pty/ 与 er
                     只出现在 #[cfg(test)] 测试数据中；commands.rs / src/lib / src/features
                     零改动（无新 IPC DTO、UI 无新状态）
 ```
+
+---
+
+## Task 8B：进程树所有权 / 受控终止（2026-09-24）
+
+契约：`docs/specs/2026-09-24-task8b-process-tree-ownership-design.md`（§3 冻结语义、
+§6 已知限制、§7 测试设计）；实施：`docs/plans/2026-09-24-task8b-process-tree-ownership.md`；
+平台保证等级：`docs/adr/0013-windows-process-containment-establishment.md`。
+
+### 要解决的问题
+
+7D 的遗留问题（8A 只解决了其中一半）：`.cmd` 的**直接子进程**是 `cmd.exe`（shim 解释器），
+真正干活的是它的后代（`node.exe` / `codex.exe` / `claude.exe`）。8A 让「阻塞写不再冻结
+Runtime」，但没有解决「**Session 拥有的进程树还可能活着**」。
+
+冻结语义：**Session 拥有的是进程树，不是一个 PID**。`kill_terminal(session_id)` 终止整棵
+被拥有的树；containment 在进程变成 `running` **之前**建立，失败即 `launch_failed`。
+
+### spike 证据（真机，`D:\HarnessHub-E2E\spike-8b\`，throwaway，代码不入库）
+
+```text
+s1  job.terminate → synthetic 三层树 3/3 全灭
+s2  session-scoped：只杀 A 的 job，B（same_exe=true）3/3 存活；第一版先起后 assign 丢了 race，
+    只杀死 root —— 这就是「立即 assign + 定点补扫」的来历（ADR-0013 如实记为**非** race-free）
+s3  真实 codex.cmd：cmd.exe → node.exe → codex.exe（job.active_processes = 3）
+s4  真实 claude.cmd：cmd.exe → claude.exe（2 节点）
+s6  宿主 `taskkill /F` 强杀 → 它拥有的 3 个进程全部被 OS 回收（KILL_ON_JOB_CLOSE）
+s7  5/5 轮 assign 成功（本机、同用户、同完整性级别）
+```
+
+**s5 三档对照（负面结论，定义了 8B 的两条独立路径，载荷 64 MiB）**：
+
+```text
+shim-only(child.kill)              动作后：shim dead / ping ALIVE，写仍然 park（15s 未返回）
+whole-tree(job.terminate)          动作后：树全 dead，**写仍然 park**（15s 未返回）
+whole-tree + drop master           动作后：树全 dead，写返回 Err(管道已结束。 (os error 109))，约 0.9s
+```
+
+结论：**进程包含 ≠ 传输关闭**。「进程还活着」由 `terminate_tree` 修；
+「阻塞 writer 醒不过来」只能由 `close_transport`（关 PTY master）修。两者都在 `forget` 里。
+
+### 确定性矩阵（fake backend，每次提交都跑）
+
+```text
+T1  未建立 containment 不得进入 running：spawn 失败 → failed + launch_failed + 无 pid，
+    错误信息带具体 os error（不静默降级成「没有 containment 也在跑」）
+T2  kill 走的是 terminate_tree（断言 backend 收到 terminate_tree 调用），kill 成功后输入侧关闭
+T3  terminate_tree 失败 → 不关闭输入侧、不写终态（沿用 8A 形状）
+T4  forget 先关输入侧（8A 顺序不变）
+T5  reaper 顺序不变：终态 →（有界等待 reader）→ shutdown_input → 移除 handle → backend.forget
+T6  没有 containment 的会话 terminate_tree 必须报明确错误，**不得**降级成 direct-child kill
+```
+
+### 真机单测（`pty::portable_pty_backend` / `pty::containment`）
+
+```text
+containment::a_job_contains_the_child_and_its_descendants                    ok
+containment::closing_the_last_handle_kills_the_contained_tree                ok
+containment::assign_reports_the_win32_error_for_an_unopenable_process        ok
+portable_pty_backend::forget_actively_closes_the_transport_so_a_parked_write_returns  ok
+portable_pty_backend::forget_releases_the_job_even_while_a_writer_holds_the_arc        ok
+portable_pty_backend::release_after_a_natural_root_exit_still_reaps_living_descendants ok
+```
+
+### 真机 Gate（`src-tauri/tests/process_tree_ownership.rs`，8 条）
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --test process_tree_ownership -- --nocapture`
+
+```text
+[R2/R3] hub-codex tree = [4984, 50716, 3408]        ← cmd.exe → node.exe → codex.exe
+[R2/R3] hub-claude tree = [22444, 46684]            ← cmd.exe → claude.exe
+[R4] A=[55728, 48380, 51140] B=[58084, 51800, 50032] C=[56308, 50936]
+[R6] tree = [23208, 55408]
+[R1] tree = [57544, 46572, 14672]
+[R7] production runtime tree = [41864, 52356, 12584]（DSR 应答 1 次）
+[R4/raw] A=[36824, 51388, 42824] B=[30312, 52820, 29360] C=[56324, 25912]
+[R1/raw] tree = [53980, 58212, 43356]
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.12s
+```
+
+```text
+R1      synthetic cmd → cmd → ping：kill → 3 个 PID 全部消失
+R2/R3   真实 codex（3 层）/ claude（2 层）：kill → 全树消失（支撑证据；缺 binary 时明确跳过）
+R4      Codex A + Codex B + Claude C 同时运行 → kill A → A 全死、B/C 的**活节点**全活
+        （A/B 同一个可执行文件：executable-scoped 的错误清理也骗不过这条）
+R5      writer park 在 OS 写里（pending_bytes 持续等于整批 64 MiB）→ kill → 树全死 →
+        reaper 走完终态 + forget → handle 被回收（有界 15s 观察，不 join writer）
+R6      不先 kill、直接 forget：残留在 Job 里的后代被收敛（措辞边界见下）
+R7      生产 TerminalRuntime 路径：真实 codex 树 ≥ 3 层 + kill 后全树消失
+R1/raw  只用 PortablePtyBackend + terminate_tree（**没有任何 forget 兜底**）→ 全树消失
+R4/raw  同上，A/B/C 三条会话 → terminate_tree(A) → A 全死、B/C 的活节点全活
+```
+
+### 变异验证（本 Task 最有价值的一段：证明断言真的在测东西）
+
+```text
+A) terminate_tree 退回 direct-child kill
+   R1/R2/R3/R4（走 PtyManager::kill）**照样全绿** —— kill 之后 reaper 会 forget，
+   残留后代会死在「关 console + 释放 Job 句柄」那一步。
+   所以它们只是**产品级**结论；判别性证据是 R1/raw 与 R4/raw：
+     R1/raw 失败：terminate_tree 必须终结整棵树（这里没有任何 forget 兜底），
+                  仍在跑：[50500, 30040]
+     R4/raw 失败：A 的全树必须死，仍在跑：[55388, 49372]
+B) forget 里去掉 close_transport()
+   portable_pty_backend::forget_actively_closes_the_transport_so_a_parked_write_returns
+   在 13s 内失败于「forget 之后 parked write 必须返回」
+C) forget 里改成就地取走但不释放 Job 句柄（mem::forget 泄漏）
+   「后代被回收」断言**照样通过**（ClosePseudoConsole 自己会带走挂在同一 console 上的后代），
+   但「containment 必须已被显式取走」断言失败 —— 这条写进了 spec 已知限制 L6
+D) 关掉 fake 的 containment 检查
+   pty::input_tests::a_session_without_containment_is_failed_not_running 与
+   terminal::tests::start_fails_when_containment_cannot_be_established 双双失败
+```
+
+### 8B 过程中被机器教的三件事（都已写进测试注释）
+
+```text
+1. headless 测试必须自带终端模拟器：conhost 因 PSUEDOCONSOLE_INHERIT_CURSOR 会发 ESC[6n 并等应答，
+   **不应答时 pseudoconsole 卡在初始化**，连 ClosePseudoConsole 都收不干净 ——
+   表现为「master 已 drop、reader 拿不到 EOF、parked 写永不返回」。
+   第一版测试没有应答，于是把这个夹具缺陷误判成「产品没关传输」。
+2. 等树长出来的循环里必须**持续** pump DSR；漏掉 pump 时三条真实 TUI 全卡在首屏，
+   症状是「树只有 root」，与 session-scoped 失败长得完全不一样。
+3. session-scoped 断言要比较「terminate(A) 之前还活着的节点」，不能比较「与初始快照等长」：
+   后者会把真实 TUI 自己退出的节点算成 A 的误杀（全量套件里踩到过一次）。
+```
+
+### 8B 的承诺边界（写进 spec §6 L1–L7，不许含糊）
+
+```text
+已证明：containment 在 running 之前建立（失败 = launch_failed + 具体 Win32 error）；
+        terminate_tree 只终止该会话拥有的树（合成 + 真实 codex/claude 两层证据）；
+        forget 显式关闭传输与唯一 Job 句柄（parked writer 持有 Arc 时也必须关）；
+        root 自然退出后残留后代仍被收敛。
+未证明：分配前 race 的数学消除（L1，ADR-0013 记为 best-effort 补扫）；
+        宿主异常死亡以外的「任何宿主都必然 assign 成功」（R7 只证本机测试进程这条生产路径）；
+        非 Windows 平台的 containment（L5）。
+```
+
+### 回归与 Gate
+
+```text
+pty::（含 8A 12 条 + 8B 6 条）      30 passed
+terminal::（含 7D 确定性矩阵）      15 passed
+process_tree_ownership（8B 真机）   8 passed（连续 4 轮同结果）
+7D 真机并发                         3 passed
+claude_lifecycle                    4 passed
+runtime_input_backpressure          2 passed
+pnpm verify                         退出码 0：Rust 单测 287 passed、全部集成套件、
+                                    前端 124 passed（6 files）、build、clippy -D warnings、
+                                    rustfmt --check
+pnpm python:test                    Ran 12 tests in 0.001s ... OK
+Core diff 审计（alpha.3..HEAD）     只落在 pty/*、terminal.rs（测试）、Cargo.toml、tests/、docs/；
+                                    pty/ 里 codex/claude 只出现在测试数据与注释；
+                                    commands.rs / src/lib / src/features 零改动
+```

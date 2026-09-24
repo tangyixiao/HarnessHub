@@ -72,6 +72,12 @@ Rust Control Plane 的模块边界与规格第 8 节仓库结构一致，见 `do
 - `usage::{UsageSource, UsageImport, UsageEvent}` —— 跨 IPC 的 Usage DTO（契约见 ADR-0011）。
 - `session::SessionRecord` —— Session 持久化模型（含 `hub_session_id` / `source_session_id` / `runtime_target_id`）。
 - `db::Database` —— SQLite 连接 + 迁移执行器。
+- `pty::PtyBackend::terminate_tree(session_id)` —— **Session 拥有的是进程树，不是一个 PID**
+  （Task 8B 冻结）。Windows 用 Job Object（`pty::containment`，`KILL_ON_JOB_CLOSE`）承担所有权；
+  containment 在进程变成 `running` **之前**建立，失败即 `launch_failed`（绝不静默降级）。
+  保证等级与已知 race 见 ADR-0013。
+  `forget` 必须**显式**关掉 PTY master 与唯一 Job 句柄（不能依赖 `Arc` drop，因为 parked
+  writer 自己持有那个 `Arc`）：`close_transport` 让阻塞写返回，`release_containment` 回收残留后代。
 
 Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开放 localhost HTTP 端口。
 

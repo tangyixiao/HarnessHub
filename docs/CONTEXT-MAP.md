@@ -12,7 +12,7 @@
 | Usage 契约与取证                   | `docs/adr/0011-usage-import-contracts.md`、`fixtures/ccusage/README.md`                                                                                                   |
 | Session 生命周期与索引             | `src-tauri/src/session/`                                                                                                                                                  |
 | SQLite schema / 迁移               | `src-tauri/src/db/`（`migrations/` 下为 SQL，`migrations.rs` 为执行器）                                                                                                   |
-| 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`                                                                                                                            |
+| 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`（Windows 进程包含 = `pty/containment.rs`，Job Object；真机 Gate = `src-tauri/tests/process_tree_ownership.rs`）            |
 | Git / Worktree 观察                | `src-tauri/src/git/`                                                                                                                                                      |
 | 文件监听                           | `src-tauri/src/watcher/`                                                                                                                                                  |
 | Python Sidecar 生命周期 / JSON-RPC | `src-tauri/src/sidecar/`（Rust 侧）、`python/harness_hub_runtime/`（Python 侧）                                                                                           |
