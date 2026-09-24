@@ -29,3 +29,14 @@ sha2 = "0.10.9"
 tauri = { version = "2", features = [] }
 thiserror = "2.0.20"
 uuid = { version = "1.20.0", features = ["v4"] }
+
+# Windows 进程包含（Task 8B）：Job Object 是唯一能覆盖 .cmd → node → descendants 的机制。
+# 只在 Windows target 上引入；非 Windows 平台将来用 process group / session 实现同一语义。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

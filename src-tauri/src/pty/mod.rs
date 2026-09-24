@@ -14,6 +14,7 @@
 //! 复用而非自研（规格 1.1）：PTY 直接用成熟 crate `portable-pty`。
 
 pub mod backend;
+pub mod containment;
 pub mod manager;
 pub mod portable_pty_backend;
 pub mod session;
