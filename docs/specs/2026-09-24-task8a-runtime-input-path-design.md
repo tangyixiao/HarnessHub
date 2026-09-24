@@ -109,8 +109,8 @@ pub(crate) const DEFAULT_INPUT_CAPACITY_BYTES: usize = 64 * 1024;
 pub(crate) struct SessionHandle {
     input: Arc<InputState>,
     /// 只表达 detach 语义：drop 它 = detach。**任何路径都不 join**（见 §4.7）。
-    /// 测试要观察线程是否退出只能用 `is_finished()`（`#[cfg(test)] fn worker_finished()`），
-    /// 不 join。字段名带下划线前缀是为了如实表达「不读它」而不是骗过 dead_code lint。
+    /// 「确实没有 join」由 T9 的硬期限用例证明：若哪条路径 join 了正 park 在 OS 写里的 worker，
+    /// `forget` 会一直不返回，用例在 2 秒后失败。
     _worker: JoinHandle<()>,
 }
 
@@ -139,13 +139,14 @@ String + Arc<InputState> + Arc<dyn PtyBackend>
 impl SessionHandle {
     pub(crate) fn spawn(session_id: &str, backend: Arc<dyn PtyBackend>, capacity_bytes: usize) -> Self;
     pub(crate) fn try_enqueue(&self, bytes: &[u8]) -> Result<()>;
-    pub(crate) fn shutdown_input(&self);       // 见 §4.7
-    pub(crate) fn pending_bytes(&self) -> usize;      // 诊断 / 测试
-    /// 「输入侧是否还能接受输入」= `closed || failure.is_some()`。**不要**再暴露第二个谓词，
-    /// 否则调用方容易只查 `closed` 而漏掉 worker 失败态（§4.4）。
-    pub(crate) fn input_unavailable(&self) -> bool;
+    pub(crate) fn shutdown_input(&self);           // 见 §4.7
+    pub(crate) fn pending_bytes(&self) -> usize;   // 诊断 / 测试（真机验收也用它）
 }
 ```
+
+可观测契约就是**三个错误变体**（§4.9）：`InputBackpressure` / `InputClosed` /
+`InputWorkerFailed`。**不**额外暴露 `closed` / `failure` 谓词 —— 没有第二个谓词，就没有
+「调用方只查了 `closed`、漏掉 worker 失败态」这种坑。`pending_bytes()` 不是谓词，是记账读数。
 
 ### 4.3 记账：`pending_bytes` 必须包含 in-flight 批次
 
