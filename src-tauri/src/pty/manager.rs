@@ -441,6 +441,8 @@ pub(crate) mod fake {
         gate: WriteGate,
         /// 哪些 program 的 `write` 直接返回 Err（模拟真实写入失败）。
         failing_writes: Mutex<HashMap<String, String>>,
+        /// 下一次 `kill` 必须失败的会话（模拟 backend 层面的终止失败）。
+        failing_kills: Mutex<std::collections::HashSet<String>>,
         /// 读端返回的字节（spawn 时按顺序弹出）。**共享队列**：只适合单会话测试。
         outputs: Mutex<Vec<Vec<u8>>>,
         /// 按 program 分流的实时输出流（可并发、可运行期追加）。
@@ -520,6 +522,14 @@ pub(crate) mod fake {
                 .expect("failing_writes")
                 .insert(program.to_string(), message.to_string());
             self
+        }
+
+        /// 让下一次 `kill` 直接失败（模拟 backend 层面的终止失败）。
+        pub fn fail_next_kill(&self, session_id: &str) {
+            self.failing_kills
+                .lock()
+                .expect("failing_kills")
+                .insert(session_id.to_string());
         }
 
         /// 运行期追加输出：已启动的 reader 会按序读到它。
@@ -667,6 +677,15 @@ pub(crate) mod fake {
         }
 
         fn kill(&self, session_id: &str) -> Result<()> {
+            if self
+                .failing_kills
+                .lock()
+                .expect("failing_kills")
+                .remove(session_id)
+            {
+                return Err(Error::InvalidInput("fake: 结束进程失败".to_string()));
+            }
+
             self.killed
                 .lock()
                 .expect("killed")

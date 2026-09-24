@@ -463,3 +463,52 @@ fn error_priority_is_closed_over_worker_failure() {
         "closed 优先于 failure：显式关闭是对调用方最直接的当前事实"
     );
 }
+
+/// T7：kill 成功 → 输入侧关闭；kill 失败 → **不**擅自关闭（spec §4.5）。
+#[test]
+fn input_is_closed_after_a_successful_kill_but_not_after_a_failed_one() {
+    // 成功路径
+    let ok_backend = Arc::new(FakePtyBackend::new());
+    let ok_manager = manager(Arc::clone(&ok_backend), 64);
+    spawn(&ok_manager, "hub-a");
+    ok_manager.kill("hub-a").expect("kill 成功");
+    assert!(
+        matches!(
+            ok_manager.write("hub-a", b"x"),
+            Err(Error::InputClosed { .. })
+        ),
+        "kill 成功之后必须拒绝新输入"
+    );
+
+    // 失败路径：backend 拒绝终止时，绝不能把「没能结束进程」伪装成「进程已结束」
+    let broken_backend = Arc::new(FakePtyBackend::new());
+    let broken_manager = manager(Arc::clone(&broken_backend), 64);
+    spawn(&broken_manager, "hub-b");
+    broken_backend.fail_next_kill("hub-b");
+    assert!(
+        broken_manager.kill("hub-b").is_err(),
+        "backend kill 失败必须如实返回"
+    );
+    assert!(
+        broken_manager.write("hub-b", b"still-ok").is_ok(),
+        "kill 失败不得擅自关闭输入侧"
+    );
+}
+
+/// T8：forget 之后再入队必须被拒（不得静默入队到已释放的会话）。
+#[test]
+fn enqueue_after_forget_is_rejected() {
+    let backend = Arc::new(FakePtyBackend::new());
+    let manager = manager(Arc::clone(&backend), 64);
+    spawn(&manager, "hub-a");
+
+    manager.forget("hub-a").expect("forget");
+    assert!(
+        matches!(
+            manager.write("hub-a", b"x"),
+            Err(Error::InvalidInput(_) | Error::InputClosed { .. })
+        ),
+        "forget 之后不得成功入队"
+    );
+    assert_eq!(manager.pending_bytes("hub-a"), None, "handle 必须已被移除");
+}
