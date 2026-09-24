@@ -514,6 +514,40 @@ fn enqueue_after_forget_is_rejected() {
     assert_eq!(manager.pending_bytes("hub-a"), None, "handle 必须已被移除");
 }
 
+/// T1：无法建立 containment 的会话**不得**被宣称为 running（约束 1：
+/// 失败 ⇒ launch_failed，绝不静默降级成「没有 containment 也在跑」）。
+#[test]
+fn a_session_without_containment_is_failed_not_running() {
+    let backend = Arc::new(FakePtyBackend::new().with_failing_containment());
+    let manager = manager(Arc::clone(&backend), 64);
+
+    let error = manager
+        .spawn("hub-a", spec_for(CODEX), 80, 24)
+        .expect_err("containment 建立失败必须启动失败");
+
+    assert!(
+        error.to_string().contains("containment") || error.to_string().contains("包含"),
+        "错误信息要说明是 containment 建立失败：{error}"
+    );
+    assert!(
+        error.to_string().contains("os error"),
+        "containment 建立失败必须带具体 Win32 error（约束 6 后半句）：{error}"
+    );
+    assert!(
+        manager.pending_bytes("hub-a").is_none(),
+        "启动失败不得留下 SessionHandle"
+    );
+    assert!(
+        backend
+            .spawned
+            .lock()
+            .expect("spawned")
+            .iter()
+            .all(|request| request.session_id != "hub-a"),
+        "containment 建立失败必须发生在进程被当成「已启动」之前"
+    );
+}
+
 /// T2：kill 必须走 `terminate_tree`（Session 拥有的是进程树，不是 direct child）。
 #[test]
 fn kill_terminates_the_owned_tree_and_closes_the_input_side() {

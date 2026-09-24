@@ -457,6 +457,39 @@ mod tests {
         );
     }
 
+    /// 无法建立 containment → `failed` / `launch_failed`，**绝不** running
+    /// （Task 8B 约束 1：containment 必须在进程变成 running 之前建立）。
+    #[test]
+    fn start_fails_when_containment_cannot_be_established() {
+        let backend = Arc::new(FakePtyBackend::new().with_failing_containment());
+        let (runtime, installation) = runtime(Arc::clone(&backend));
+        let (emitter, events) = collector();
+
+        let error = runtime
+            .start(&installation, None, 80, 24, Some(emitter))
+            .expect_err("containment 建立失败必须返回错误");
+
+        assert!(
+            error.to_string().contains("包含") || error.to_string().contains("containment"),
+            "错误信息要说明是 containment 建立失败：{error}"
+        );
+
+        let sessions = runtime.list_sessions(10).expect("列出");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Failed);
+        assert_eq!(
+            sessions[0].termination_reason,
+            Some(TerminationReason::LaunchFailed)
+        );
+        assert!(sessions[0].pid.is_none(), "启动失败不得留下 pid");
+
+        let recorded = events.lock().expect("events").clone();
+        assert!(
+            matches!(recorded.as_slice(), [PtyEvent::Error { .. }]),
+            "必须发出 Error 事件（不得先 Start）：{recorded:?}"
+        );
+    }
+
     #[test]
     fn natural_exit_finishes_the_session_and_emits_exit_code() {
         let backend = Arc::new(
