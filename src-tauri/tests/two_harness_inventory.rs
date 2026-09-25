@@ -127,7 +127,11 @@ fn adding_claude_preserves_the_existing_codex_installation() {
     assert_eq!(installation_count(&db), 1);
     assert_eq!(installation_ids(&db), vec!["codex@local"]);
 
-    let before: (String, String) = db
+    // `binary_path` 在「本机没装 codex」时**合法地**为 NULL（availability = unavailable）：
+    // `reconcile_harnesses` 给每个 harness 都建安装行，只有真检测到 binary 才写路径
+    // （CI runner 就是这一种形状）。所以按 `Option<String>` 读，两种形状都断言「不得被覆盖」；
+    // 非 NULL 的那一支只在装了 codex 的机器上真正生效。
+    let before: (Option<String>, String) = db
         .connection()
         .query_row(
             "SELECT binary_path, first_detected_at FROM harness_installations WHERE id = 'codex@local'",
@@ -143,7 +147,7 @@ fn adding_claude_preserves_the_existing_codex_installation() {
     assert_eq!(installation_ids(&db), vec!["claude@local", "codex@local"]);
     assert_eq!(installation_count(&db), 2, "不得重复插入");
 
-    let after: (String, String) = db
+    let after: (Option<String>, String) = db
         .connection()
         .query_row(
             "SELECT binary_path, first_detected_at FROM harness_installations WHERE id = 'codex@local'",
