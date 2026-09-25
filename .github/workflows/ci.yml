@@ -14,9 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # **不要**在这里再写 `version:`：`package.json` 的 `packageManager`（pnpm@11.0.9）是
+      # 唯一事实来源，两处同时声明会让 action 在 setup 阶段直接失败
+      # （Multiple versions of pnpm specified: version 11 vs pnpm@11.0.9）。
+      # v4 文档明确写着「Omit `version` input to use the version in the `packageManager` field」。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 22
