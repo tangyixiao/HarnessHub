@@ -15,6 +15,9 @@
 //! 同理，**ccusage 可用不等于这台机器有真实用量**：GitHub runner 上 `npx` 能装好 ccusage，
 //! 但 home 里没有 Claude/Codex 数据，导入会**合法地**得到 0 条记录。那种机器上也明确跳过，
 //! 有真实数据的机器上则必须完整跑完下面每一条对账断言。
+//!
+//! 跳过条件由报告**本身**决定（`common::precondition`）：报告 `session`/`daily` 都没有行
+//! 才算「机器没有数据」；报告里有行却一条都没导入是 adapter 丢行，必须失败而不是跳过。
 
 use std::collections::BTreeMap;
 
@@ -26,6 +29,8 @@ use harness_hub_lib::usage::runner::{
     resolve_runner, session_report_arguments, CommandRunner, SystemCommandRunner,
 };
 use harness_hub_lib::usage::{ImportStatus, SourceStatus};
+
+mod common;
 
 #[test]
 fn real_ccusage_import_reconciles_against_its_own_totals() {
@@ -61,17 +66,26 @@ fn real_ccusage_import_reconciles_against_its_own_totals() {
     let reconciliation = outcome.reconciliation;
 
     assert_eq!(outcome.import.status, ImportStatus::Succeeded);
-    if outcome.import.records_seen == 0 {
-        // 「ccusage 可用」不等于「这台机器有真实用量」（见文件头）。CI 实测：session / daily
-        // 都是空数组、totals 全 0，导入合法地得到 0 条记录。这里既不能断言「一定有 usage」，
-        // 也不能伪装成对账通过 —— 明确跳过，并说清跳过的正是对账本身。
-        eprintln!(
-            "跳过：ccusage 可用，但本机没有真实用量数据（records_seen = 0）——\
-             对账断言只在有真实数据的机器上有意义"
-        );
-        drop(database);
-        let _ = std::fs::remove_dir_all(&directory);
-        return;
+    // 前提判定只看**报告本身**（见文件头与 `common::precondition`）：
+    // 报告空 → 这台机器确实没有用量，明确跳过；报告有行却一条都没导入 → **硬失败**，
+    // 因为那是 adapter 丢行，不是「机器没有数据」。
+    match common::precondition(&report, outcome.import.records_seen) {
+        common::Precondition::NoDataInSource => {
+            eprintln!(
+                "跳过：ccusage 可用，但来源报告本身是空的（session/daily 都没有行）——\
+                 对账断言只在有真实数据的机器上有意义"
+            );
+            drop(database);
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+        common::Precondition::SourceHadRowsButNothingImported => panic!(
+            "来源报告里有行，导入却得到 0 条：adapter 丢行（不是机器没有数据）。\
+             报告 session/daily 行数 = {}/{}",
+            report["session"].as_array().map_or(0, Vec::len),
+            report["daily"].as_array().map_or(0, Vec::len)
+        ),
+        common::Precondition::Proceed => {}
     }
     assert_eq!(
         outcome.import.records_inserted, outcome.import.records_seen,

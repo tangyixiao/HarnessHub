@@ -10,15 +10,20 @@
 //! 本机没有 ccusage 时明确跳过，不伪装通过。
 //!
 //! 同理，**ccusage 可用不等于这台机器有真实用量**：GitHub runner 上 `npx` 能装好 ccusage，
-//! 但 home 里没有数据，导入会**合法地**得到 0 条记录。那种机器上明确跳过，有真实数据的
-//! 机器上则必须完整跑完下面每一条对账断言。
+//! 但 home 里没有数据，导入会**合法地**得到 0 条记录。跳过条件与 `real_ccusage_import.rs`
+//! 共用同一条规则（`common::precondition`）：报告本身为空才算「机器没有数据」；
+//! 报告里有行却一条都没导入是 adapter 丢行，必须失败。
 
 use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
 use harness_hub_lib::usage::adapter::{CcusageAdapter, UsageSourceAdapter};
-use harness_hub_lib::usage::runner::{resolve_runner, SystemCommandRunner};
+use harness_hub_lib::usage::runner::{
+    resolve_runner, session_report_arguments, CommandRunner, SystemCommandRunner,
+};
 use harness_hub_lib::usage::summary::{range_bounds, summary, UsageRange};
 use harness_hub_lib::usage::SourceStatus;
+
+mod common;
 
 #[test]
 fn the_dashboard_summary_matches_an_independent_sql_query() {
@@ -35,6 +40,15 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
         "detect 说可用就必须能解析出 runner"
     );
 
+    // 与 `real_ccusage_import.rs` 一样先取一次**来源报告**：前提判定要看报告本身是否为空，
+    // 不能只看「导入了 0 条」（那会把 adapter 丢行一起吞掉）。这一次调用同时保证下面的
+    // 独立 SQL 对账有真实数据可比。
+    let runner = resolve_runner(&probe, None).expect("上面已断言可解析");
+    let command = runner.with_arguments(&session_report_arguments());
+    let raw = executor.run(&command).expect("调用 ccusage");
+    assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
+    let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
+
     let directory = std::env::temp_dir().join(format!("hh-dashboard-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("临时目录");
     let database_file = directory.join("harness-hub.sqlite3");
@@ -42,16 +56,23 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
 
     let database = Database::open(&database_file).expect("打开数据库");
     let outcome = adapter.import(database.connection()).expect("真机导入");
-    if outcome.import.records_seen == 0 {
-        // 「ccusage 可用」不等于「这台机器有真实用量」（见文件头）：CI runner 上导入合法地
-        // 得到 0 条记录，此时对账断言无意义 —— 明确跳过，不伪装通过。
-        eprintln!(
-            "跳过：ccusage 可用，但本机没有真实用量数据（records_seen = 0）——\
-             对账断言只在有真实数据的机器上有意义"
-        );
-        drop(database);
-        let _ = std::fs::remove_dir_all(&directory);
-        return;
+    match common::precondition(&report, outcome.import.records_seen) {
+        common::Precondition::NoDataInSource => {
+            eprintln!(
+                "跳过：ccusage 可用，但来源报告本身是空的（session/daily 都没有行）——\
+                 对账断言只在有真实数据的机器上有意义"
+            );
+            drop(database);
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+        common::Precondition::SourceHadRowsButNothingImported => panic!(
+            "来源报告里有行，导入却得到 0 条：adapter 丢行（不是机器没有数据）。\
+             报告 session/daily 行数 = {}/{}",
+            report["session"].as_array().map_or(0, Vec::len),
+            report["daily"].as_array().map_or(0, Vec::len)
+        ),
+        common::Precondition::Proceed => {}
     }
     let now = harness_hub_lib::clock::now_rfc3339();
 
