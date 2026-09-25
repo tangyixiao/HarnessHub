@@ -114,19 +114,19 @@ JSON 原始十进制文本（serde_json RawValue，取到的是 21.1206150000000
   `Σ cost` 因此是**下界**（`totals.unpricedModels = ["GLM-5.3-Flash"]`），
   UI 与对账都必须能说出这一点。`cost` 字段本身缺失或为 `null` 时同样落 `NULL`（防御性）。
 
-## 决策七：优先单次 invocation，`totals` 是同快照真值
+## 决策七：优先单次 invocation，`totals` 是同一次调用的真值（不保证原子快照）
 
 实测 `ccusage session --sections daily --by-agent --json`（20.0.24）**可用**，一次调用返回
-`session` + `daily` + `totals`，且**三个分段来自同一次数据加载**：
+`session` + `daily` + `totals`，且**三个分段来自同一次调用的输出**（**不保证**是原子快照）：
 
 ```text
 一次 invocation
 ├─ session  → 真正导入
 ├─ daily    → reconciliation 的第二个视角（不导入）
-└─ totals   → 同快照真值
+└─ totals   → 同一次调用的真值（原子性见下面的「修订（2026-09-25）」）
 ```
 
-> **注意（2026-09-25 修订）**：「同一次数据加载」**不等于**「冻结快照」。写入方活跃时，
+> **注意（2026-09-25 修订）**：「同一次调用的输出」**不等于**「原子快照」。写入方活跃时，
 > 同一次调用内部先算的 `daily` 与后算的 `session` 也会不一致 —— 详见本决策后面的
 > 「修订（2026-09-25）」一节。该节同时给出稳定窗口的适用边界。
 
@@ -137,10 +137,12 @@ JSON 原始十进制文本（serde_json RawValue，取到的是 21.1206150000000
 
 ```text
 totals == Σ(session rows)          逐项精确（input / output / cacheCreation / cacheRead / totalTokens / totalCost）
-daily  != session                  差值 100% 落在 agent=claude 一个 agent 上
-                                   codex / opencode / zcode 逐 token 相等（**仅当加载期间数据不变**，
-                                   写入方活跃时不成立 —— 见「修订（2026-09-25）」）
+daily  != session                  **静态取证样本**（安静机器，2026-09 取证，不含写入方活跃时段）：
+                                   当时差值 100% 落在 claude 一个 agent；codex / opencode / zcode 逐 token 相等；
                                    claude: daily 1,709,428 vs session 461,899（差 1,247,529 totalTokens）
+                                   —— 这几行只描述**那一次静态样本**，不是永久性质：写入方活跃时
+                                   codex 同样会出现 daily/session 差异（实测 -166271 / -84090 / 0），
+                                   见「修订（2026-09-25）」
 totals.unpricedModels = ["GLM-5.3-Flash"]  → cost 总数是下界，不是全量
 行 totalTokens vs 四类之和          221/222 相等；唯一例外是 opencode 的 +910（决策十一）
 金额：独立舍入 + 求和 vs 整体舍入   实测 235 个计价 breakdown 上相差 +4 微单位（0.000004 USD）
@@ -152,8 +154,9 @@ totals.unpricedModels = ["GLM-5.3-Flash"]  → cost 总数是下界，不是全�
 2. `Σ(事件 cost) - totals.cost` 的残差必须 ≤ ⌈计价 breakdown 数 / 2⌉ 微单位，
    并且**具体数值要打印出来**（每个事件独立舍入，量级上限是可证明的）；
 3. 时间戳无法推导的事件必须**被单独计数并解释**，不允许混进差值里蒙过去；
-4. 与 `daily` 的差异必须**归因到具体 agent**（当前版本：仅 claude），
-   不允许出现「未知来源的差异」。
+4. 与 `daily` 的差异**必须逐 agent 归因**，不允许出现「未知来源的差异」。
+   注意「差异只出现在 claude」只是**静态取证样本**的现象（见上表），不是这条断言的强度：
+   写入方活跃时 codex 也会出现差异（「修订（2026-09-25）」），归因要求不变。
 
 ### 修订（2026-09-25）：一次 invocation ≠ 冻结快照
 
@@ -168,13 +171,13 @@ rollout 文件（`%USERPROFILE%\.codex\sessions\<date>\rollout-*.jsonl`，只追
                   行数不变、其中 3 个 rollout 行被上游改写（21178283 → 21875738 等）
 ```
 
-因此「同快照」的适用范围必须按下面写：
+因此「同一次调用的输出」与「原子快照」的适用范围必须按下面写：
 
 ```text
-成立        totals == Σ(session rows)             同一次加载内部的算术恒等式（原实测依然有效）
+成立        totals == Σ(session rows)             同一次调用内部的算术恒等式（原实测依然有效）
 成立        daily vs session 差异逐 agent 归因    这是内部一致性检查，与数据是否在变无关
-不成立      codex daily == session「逐 token 相等」  需要「加载期间数据不变」，即冻结快照
-            （写入方活跃时它必然可能不成立；原始实测是在安静机器上得到的）
+不成立      codex daily == session「逐 token 相等」  需要「调用期间数据不变」，即原子快照
+            （写入方活跃时它必然可能不成立；原始实测是在安静机器上得到的静态样本）
 ```
 
 对**测试/对账**的边界（实现只落在测试侧，不碰生产代码）：
@@ -280,7 +283,7 @@ ccusage 同时存在 focused 文档里展示的 `sessionId` 语义，因此 adap
 
 - `fixtures/ccusage/README.md`：两轮真实取证（单模式 + `--sections` 单次调用）的原始结构。
 - `src-tauri/tests/real_ccusage_import.rs`：真实机器上跑 `--sections` → 导入 →
-  与同快照 `totals` 逐项对账 → 打印每一条差异的归因（含 910 与金额残差）。
+  与**同一次调用**的 `totals` 逐项对账 → 打印每一条差异的归因（含 910 与金额残差）。
   该用例按「修订（2026-09-25）」使用稳定窗口，因此对账覆盖的是已结束的日期。
 - 迁移 0006 / 0007 的裸 `Connection` 迁移测试；`usage::key` 的碰撞测试。
 - 单次调用内部 `daily` 与 `session` 不一致的实测（`-166271 / -84090 / 0`）与跨调用增量
