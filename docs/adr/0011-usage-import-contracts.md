@@ -126,6 +126,10 @@ JSON 原始十进制文本（serde_json RawValue，取到的是 21.1206150000000
 └─ totals   → 同快照真值
 ```
 
+> **注意（2026-09-25 修订）**：「同一次数据加载」**不等于**「冻结快照」。写入方活跃时，
+> 同一次调用内部先算的 `daily` 与后算的 `session` 也会不一致 —— 详见本决策后面的
+> 「修订（2026-09-25）」一节。该节同时给出稳定窗口的适用边界。
+
 若某个未来版本不再支持 `--sections`，退化为两次调用，但必须在 `usage_imports` 里分别记录
 两次采集时间，并把对账结论明确标注为 **near-snapshot**（两次调用之间本地日志可能变化）。
 
@@ -134,7 +138,8 @@ JSON 原始十进制文本（serde_json RawValue，取到的是 21.1206150000000
 ```text
 totals == Σ(session rows)          逐项精确（input / output / cacheCreation / cacheRead / totalTokens / totalCost）
 daily  != session                  差值 100% 落在 agent=claude 一个 agent 上
-                                   codex / opencode / zcode 逐 token 相等
+                                   codex / opencode / zcode 逐 token 相等（**仅当加载期间数据不变**，
+                                   写入方活跃时不成立 —— 见「修订（2026-09-25）」）
                                    claude: daily 1,709,428 vs session 461,899（差 1,247,529 totalTokens）
 totals.unpricedModels = ["GLM-5.3-Flash"]  → cost 总数是下界，不是全量
 行 totalTokens vs 四类之和          221/222 相等；唯一例外是 opencode 的 +910（决策十一）
@@ -149,6 +154,42 @@ totals.unpricedModels = ["GLM-5.3-Flash"]  → cost 总数是下界，不是全�
 3. 时间戳无法推导的事件必须**被单独计数并解释**，不允许混进差值里蒙过去；
 4. 与 `daily` 的差异必须**归因到具体 agent**（当前版本：仅 claude），
    不允许出现「未知来源的差异」。
+
+### 修订（2026-09-25）：一次 invocation ≠ 冻结快照
+
+写 Task 8C（CI 修复）时实测到：**写入方活跃时**，同一次 ccusage 调用内部的 `daily` 与
+`session` 就已经不一致，因为两个分段是两次读取，中间数据仍在追加。数据源是本机 codex 的
+rollout 文件（`%USERPROFILE%\.codex\sessions\<date>\rollout-*.jsonl`，只追加）：
+
+```text
+同一份报告内部    codex daily - session = -166271 / -84090 / 0
+                  （第三次恰好为 0，因为那一刻写入暂停 —— 差异正好等于两次读取之间的增量）
+跨两次调用        totals.totalTokens 在 11.8s 内 +36920；另一次 87s 内 +968567
+                  行数不变、其中 3 个 rollout 行被上游改写（21178283 → 21875738 等）
+```
+
+因此「同快照」的适用范围必须按下面写：
+
+```text
+成立        totals == Σ(session rows)             同一次加载内部的算术恒等式（原实测依然有效）
+成立        daily vs session 差异逐 agent 归因    这是内部一致性检查，与数据是否在变无关
+不成立      codex daily == session「逐 token 相等」  需要「加载期间数据不变」，即冻结快照
+            （写入方活跃时它必然可能不成立；原始实测是在安静机器上得到的）
+```
+
+对**测试/对账**的边界（实现只落在测试侧，不碰生产代码）：
+
+- 要比较 `daily` 与 `session` 的真机对账，取数必须落在**稳定窗口**：
+  `--until <UTC 今天-2 天> -z UTC`。`-2 天` 保证任何时区下上界距现在都 ≥24 小时，
+  `-z UTC` 让日期分组不依赖机器时区。**代价**：不覆盖进行中的那一天。
+- 只需要「两次导入是同一份数据」（幂等）的测试**不加**这个上界：replay 同一份输出就够了；
+  加上界反而会丢掉今天的覆盖，甚至让「源头每个 key 都在库里」的逐 key 检查空转通过。
+- 想连进行中的那天一起覆盖，只有**冻结数据副本**一条路（复制数据目录并让 ccusage 指向副本），
+  v0.1 不做。
+
+落点：`src-tauri/tests/common/mod.rs` 的 `ReplaySections`（真实跑一次 + 按**完整命令**匹配后
+replay；`--version` / detect 探针仍走真实 runner）与 `CaptureWindow`（`Full` / `StablePast`），
+三个真机用例按各自需要选窗口。
 
 ## 决策八：绝不伪造 hub session
 
@@ -238,9 +279,13 @@ ccusage 同时存在 focused 文档里展示的 `sessionId` 语义，因此 adap
 ## Evidence
 
 - `fixtures/ccusage/README.md`：两轮真实取证（单模式 + `--sections` 单次调用）的原始结构。
-- `src-tauri/tests/real_ccusage_import.rs`：真实机器上跑 `--sections` 单次调用 → 导入 →
+- `src-tauri/tests/real_ccusage_import.rs`：真实机器上跑 `--sections` → 导入 →
   与同快照 `totals` 逐项对账 → 打印每一条差异的归因（含 910 与金额残差）。
+  该用例按「修订（2026-09-25）」使用稳定窗口，因此对账覆盖的是已结束的日期。
 - 迁移 0006 / 0007 的裸 `Connection` 迁移测试；`usage::key` 的碰撞测试。
+- 单次调用内部 `daily` 与 `session` 不一致的实测（`-166271 / -84090 / 0`）与跨调用增量
+  （11.8s / +36920）记录在「修订（2026-09-25）」一节，测试侧的固定与窗口选择见
+  `src-tauri/tests/common/mod.rs`。
 
 ## Revisit Conditions
 
@@ -248,3 +293,5 @@ ccusage 同时存在 focused 文档里展示的 `sessionId` 语义，因此 adap
 - 接入 `provider_reported` token（Harness 原生 usage）→ 重新审视 Token Truth 择优查询，
   但本 ADR 的来源列不变。
 - 需要非 USD 来源 → `currency_source` 已预留，但需要新的换算与取整契约。
+- ccusage 的 `--until` 若支持**带时刻**的粒度（现在只有 `YYYY-MM-DD`），稳定窗口的代价
+  （丢掉最近 ≥24 小时）可以压到几秒；届时应重估「冻结数据副本」那条路是否还需要。
