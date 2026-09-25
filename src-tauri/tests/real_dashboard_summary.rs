@@ -8,6 +8,10 @@
 //! 4. 渲染路径**结构上**不可能起进程：`summary()` 只接 `&Connection`。
 //!
 //! 本机没有 ccusage 时明确跳过，不伪装通过。
+//!
+//! 同理，**ccusage 可用不等于这台机器有真实用量**：GitHub runner 上 `npx` 能装好 ccusage，
+//! 但 home 里没有数据，导入会**合法地**得到 0 条记录。那种机器上明确跳过，有真实数据的
+//! 机器上则必须完整跑完下面每一条对账断言。
 
 use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
@@ -38,6 +42,17 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
 
     let database = Database::open(&database_file).expect("打开数据库");
     let outcome = adapter.import(database.connection()).expect("真机导入");
+    if outcome.import.records_seen == 0 {
+        // 「ccusage 可用」不等于「这台机器有真实用量」（见文件头）：CI runner 上导入合法地
+        // 得到 0 条记录，此时对账断言无意义 —— 明确跳过，不伪装通过。
+        eprintln!(
+            "跳过：ccusage 可用，但本机没有真实用量数据（records_seen = 0）——\
+             对账断言只在有真实数据的机器上有意义"
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(&directory);
+        return;
+    }
     let now = harness_hub_lib::clock::now_rfc3339();
 
     let window = range_bounds(database.connection(), UsageRange::All, &now, 480).expect("窗口");
@@ -47,7 +62,10 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
         all.event_count, outcome.import.records_seen,
         "库里的事件数必须等于刚导入的记录数"
     );
-    assert!(all.event_count > 0, "真机上一定有 usage");
+    assert!(
+        all.event_count > 0,
+        "前提已由上面的「有真实数据」守卫保证：库里必须有事件"
+    );
 
     // ---- 1. 与独立手写 SQL 交叉验证 -----------------------------------
     let (sql_tokens, sql_cost, sql_events, sql_sessions): (i64, Option<i64>, i64, i64) = database

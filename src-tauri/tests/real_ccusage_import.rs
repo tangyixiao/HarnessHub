@@ -11,6 +11,10 @@
 //! 7. 历史事件全部 `hub_session_id IS NULL`（不伪造 Harness Hub 会话）。
 //!
 //! 本机没有 ccusage 时测试会**明确跳过**并打印原因，而不是伪装通过。
+//!
+//! 同理，**ccusage 可用不等于这台机器有真实用量**：GitHub runner 上 `npx` 能装好 ccusage，
+//! 但 home 里没有 Claude/Codex 数据，导入会**合法地**得到 0 条记录。那种机器上也明确跳过，
+//! 有真实数据的机器上则必须完整跑完下面每一条对账断言。
 
 use std::collections::BTreeMap;
 
@@ -57,7 +61,18 @@ fn real_ccusage_import_reconciles_against_its_own_totals() {
     let reconciliation = outcome.reconciliation;
 
     assert_eq!(outcome.import.status, ImportStatus::Succeeded);
-    assert!(outcome.import.records_seen > 0, "真实机器上一定有 usage");
+    if outcome.import.records_seen == 0 {
+        // 「ccusage 可用」不等于「这台机器有真实用量」（见文件头）。CI 实测：session / daily
+        // 都是空数组、totals 全 0，导入合法地得到 0 条记录。这里既不能断言「一定有 usage」，
+        // 也不能伪装成对账通过 —— 明确跳过，并说清跳过的正是对账本身。
+        eprintln!(
+            "跳过：ccusage 可用，但本机没有真实用量数据（records_seen = 0）——\
+             对账断言只在有真实数据的机器上有意义"
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(&directory);
+        return;
+    }
     assert_eq!(
         outcome.import.records_inserted, outcome.import.records_seen,
         "首次导入必须全部插入"
