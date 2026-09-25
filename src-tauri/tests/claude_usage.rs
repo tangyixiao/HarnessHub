@@ -17,6 +17,12 @@
 //!
 //! 用真机库的**副本**，因此不会改动用户的真实数据库，且可重复执行。
 //! 本机没有 ccusage / 没有应用数据库时明确跳过。
+//!
+//! 源头只真实取数**一次**（`common::ReplaySections::capture_once`，`CaptureWindow::Full`
+//! ＝全量、不加日期上界），两次导入都 replay 这一份：ccusage 的统计来自活的 rollout 文件，
+//! 不固定输出的话「重复导入必须幂等」比的是两份不同的数据（实测同一批 262 行里有 18 行被上游
+//! 改写、汇总 +43214）。**这条刻意不加稳定窗口**：它需要看到**今天**的 Claude key，
+//! 否则「源头每个 key 都进了库」会在库里已有记录时空转通过。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -26,10 +32,10 @@ use harness_hub_lib::harness::probe::SystemHostProbe;
 use harness_hub_lib::usage::adapter::{CcusageAdapter, UsageSourceAdapter};
 use harness_hub_lib::usage::importer::UsageImporter;
 use harness_hub_lib::usage::key::{stable_source_key, KeyDimensions};
-use harness_hub_lib::usage::runner::{
-    session_report_arguments, CommandRunner, SystemCommandRunner,
-};
+use harness_hub_lib::usage::runner::SystemCommandRunner;
 use harness_hub_lib::usage::summary::{range_bounds, summary, UsageRange};
+
+mod common;
 
 fn app_database_path() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
@@ -39,8 +45,12 @@ fn app_database_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// 源头侧：ccusage 报告里 claude 的 key → (model, tokens, cost 原文) 映射。
-fn source_claude_keys() -> Option<(serde_json::Value, BTreeSet<String>)> {
+/// 源头侧：真实跑**一次** ccusage，返回 `(报告, claude key 集合, replayer)`。
+///
+/// 第三个返回值是关键：ccusage 的统计来自活的 rollout 文件（本机 codex 会话在持续追加），
+/// **每次调用**同一个 key 的数值都会变大，所以后面的两次导入必须 replay 这一次的输出，
+/// 否则「重复导入必须幂等」比的就成了两份不同的数据。
+fn source_claude_keys() -> Option<(serde_json::Value, BTreeSet<String>, common::ReplaySections)> {
     let executor = SystemCommandRunner::new();
     let probe = SystemHostProbe::new();
     let adapter = CcusageAdapter::new(&probe, &executor, None);
@@ -52,10 +62,12 @@ fn source_claude_keys() -> Option<(serde_json::Value, BTreeSet<String>)> {
         return None;
     }
 
-    let runner = harness_hub_lib::usage::runner::resolve_runner(&probe, None)?;
-    let command = runner.with_arguments(&session_report_arguments());
-    let output: harness_hub_lib::usage::runner::CommandOutput =
-        CommandRunner::run(&executor, &command).expect("调用 ccusage");
+    // 全量取数（**不加**日期上界）：这条用例只需要 replay 来保证「两次导入是同一份数据」，
+    // 加历史上界会丢掉今天的 Claude key，而库里已经可能已有 Claude 记录 ——
+    // 那样「源头每个 key 都在库里」的逐 key 检查就会**空转通过**。
+    let (replayer, output) =
+        common::ReplaySections::capture_once(&probe, &executor, common::CaptureWindow::Full)
+            .expect("detect 说可用就一定能解析出 runner");
     assert_eq!(output.exit_code, 0, "ccusage 必须成功：{}", output.stderr);
 
     let report: serde_json::Value = serde_json::from_str(&output.stdout).expect("合法 JSON");
@@ -77,7 +89,7 @@ fn source_claude_keys() -> Option<(serde_json::Value, BTreeSet<String>)> {
             }));
         }
     }
-    Some((report, keys))
+    Some((report, keys, replayer))
 }
 
 fn db_claude_keys(connection: &rusqlite::Connection) -> BTreeSet<String> {
@@ -98,7 +110,7 @@ fn claude_usage_lands_through_the_existing_pipeline() {
         eprintln!("跳过：找不到 Harness Hub 应用数据库");
         return;
     };
-    let Some((report, source_keys)) = source_claude_keys() else {
+    let Some((report, source_keys, replayer)) = source_claude_keys() else {
         return;
     };
     eprintln!("源头 claude key 数 = {}", source_keys.len());
@@ -132,9 +144,12 @@ fn claude_usage_lands_through_the_existing_pipeline() {
     );
 
     // === 走现有生产导入路径（refresh_usage 调的就是它）===
+    //
+    // 两次导入都 replay `source_claude_keys()` 里那一次真实运行的输出：
+    // 这样「重复导入必须幂等」比的是**同一份数据**（同一个稳定快照），而不是两次调用之间
+    // 已经变过的数据（活的 rollout 文件会让同 key 的数值持续变大）。
     let probe = SystemHostProbe::new();
-    let executor = SystemCommandRunner::new();
-    let outcome = CcusageAdapter::new(&probe, &executor, None)
+    let outcome = CcusageAdapter::new(&probe, &replayer, None)
         .import(db.connection())
         .expect("导入");
     eprintln!(
@@ -274,7 +289,7 @@ fn claude_usage_lands_through_the_existing_pipeline() {
         .totals()
         .expect("首次汇总");
     let first_keys = db_claude_keys(db.connection());
-    let second = CcusageAdapter::new(&probe, &executor, None)
+    let second = CcusageAdapter::new(&probe, &replayer, None)
         .import(db.connection())
         .expect("二次导入");
     let second_totals = UsageImporter::new(db.connection())

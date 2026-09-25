@@ -8,28 +8,46 @@
 //! 4. 渲染路径**结构上**不可能起进程：`summary()` 只接 `&Connection`。
 //!
 //! 本机没有 ccusage 时明确跳过，不伪装通过。
+//!
+//! 同理，**ccusage 可用不等于这台机器有真实用量**：GitHub runner 上 `npx` 能装好 ccusage，
+//! 但 home 里没有数据，导入会**合法地**得到 0 条记录。跳过条件与 `real_ccusage_import.rs`
+//! 共用同一条规则（`common::precondition`）：报告本身为空才算「机器没有数据」；
+//! 报告里有行却一条都没导入是 adapter 丢行，必须失败。
+//!
+//! 取数同样由 `common::ReplaySections::capture_once` 固定：真实跑一次，导入 replay 同一份，
+//! 库里的行与拿来判定的报告因此同源。窗口是 `CaptureWindow::Full`（全量，含今天）——
+//! 这条比的是「库 vs 自己的 SQL」，不需要 `daily` 与 `session` 自洽，加历史上界只会丢覆盖。
 
 use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
 use harness_hub_lib::usage::adapter::{CcusageAdapter, UsageSourceAdapter};
-use harness_hub_lib::usage::runner::{resolve_runner, SystemCommandRunner};
+use harness_hub_lib::usage::runner::SystemCommandRunner;
 use harness_hub_lib::usage::summary::{range_bounds, summary, UsageRange};
 use harness_hub_lib::usage::SourceStatus;
+
+mod common;
 
 #[test]
 fn the_dashboard_summary_matches_an_independent_sql_query() {
     let probe = SystemHostProbe::new();
     let executor = SystemCommandRunner::new();
-    let adapter = CcusageAdapter::new(&probe, &executor, None);
+    let detector = CcusageAdapter::new(&probe, &executor, None);
 
-    if adapter.detect().status != SourceStatus::Available {
+    if detector.detect().status != SourceStatus::Available {
         eprintln!("跳过：本机没有可用的 ccusage runner");
         return;
     }
-    assert!(
-        resolve_runner(&probe, None).is_some(),
-        "detect 说可用就必须能解析出 runner"
-    );
+
+    // 与 `real_ccusage_import.rs` 一样：真实跑**一次**，导入 replay 同一份输出 ——
+    // 否则库里的行会来自另一次调用，跨快照比较没有意义。
+    // 但这条用**全量**（`CaptureWindow::Full`）：它比的是「库 vs 自己的 SQL」，
+    // 不需要 `daily` 与 `session` 自洽，加历史上界只会丢掉今天的真实覆盖。
+    let (replayer, raw) =
+        common::ReplaySections::capture_once(&probe, &executor, common::CaptureWindow::Full)
+            .expect("detect 说可用就必须能解析出 runner");
+    assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
+    let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
+    let adapter = CcusageAdapter::new(&probe, &replayer, None);
 
     let directory = std::env::temp_dir().join(format!("hh-dashboard-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("临时目录");
@@ -38,6 +56,24 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
 
     let database = Database::open(&database_file).expect("打开数据库");
     let outcome = adapter.import(database.connection()).expect("真机导入");
+    match common::precondition(&report, outcome.import.records_seen) {
+        common::Precondition::NoDataInSource => {
+            eprintln!(
+                "跳过：ccusage 可用，但来源报告本身是空的（session/daily 都没有行）——\
+                 对账断言只在有真实数据的机器上有意义"
+            );
+            drop(database);
+            let _ = std::fs::remove_dir_all(&directory);
+            return;
+        }
+        common::Precondition::SourceHadRowsButNothingImported => panic!(
+            "来源报告里有行，导入却得到 0 条：adapter 丢行（不是机器没有数据）。\
+             报告 session/daily 行数 = {}/{}",
+            report["session"].as_array().map_or(0, Vec::len),
+            report["daily"].as_array().map_or(0, Vec::len)
+        ),
+        common::Precondition::Proceed => {}
+    }
     let now = harness_hub_lib::clock::now_rfc3339();
 
     let window = range_bounds(database.connection(), UsageRange::All, &now, 480).expect("窗口");
@@ -47,7 +83,10 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
         all.event_count, outcome.import.records_seen,
         "库里的事件数必须等于刚导入的记录数"
     );
-    assert!(all.event_count > 0, "真机上一定有 usage");
+    assert!(
+        all.event_count > 0,
+        "前提已由上面的「有真实数据」守卫保证：库里必须有事件"
+    );
 
     // ---- 1. 与独立手写 SQL 交叉验证 -----------------------------------
     let (sql_tokens, sql_cost, sql_events, sql_sessions): (i64, Option<i64>, i64, i64) = database
