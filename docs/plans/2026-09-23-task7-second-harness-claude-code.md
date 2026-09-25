@@ -194,11 +194,29 @@ pnpm verify / format:check / python:test 全绿
 shim 被杀后子进程仍持有 PTY」。7B 的 kill 验收必须把这件事**单独测出来**，
 而不是拿这次的现象当结论。清理用 `taskkill /F /T /PID`（定向树杀，绝不安杀所有 node）。
 
-### 7B 仍然欠的验收（尚未完成）
+### 7B 收口状态（2026-09-25 复核）
+
+上一条「仍然欠的验收」写于 2026-09-23 spike 之后，**已被后续真机验收完成**，现按证据改写：
 
 ```text
-claude@local → ClaudeCodeAdapter.build_launch_spec → 现有 TerminalRuntime
-  → created → running + pid → 真实 TUI → GUI 输入 → 后续输出 → resize → kill/natural exit
-  → orphan recovery 对 Claude 同样成立
-能力翻转：launch / terminal 仍需上述真机证据后才置 true（当前仍为 false）
+链路                        证据
+启动                       7B 最终 GUI 验收（真实按钮 → running+pid → 首屏显示 cwd）
+输入输出                   7B 最终 GUI 验收（xterm 输入 → Claude → 答案 585987 只出现在提交之后）
+resize / reflow            7B.1 最后一块（ShowWindow → viewport → xterm → TUI 横线 136→196）
+结束·用户主动              7B 最终 GUI 验收（user_killed + 真实退出码 1 + 零 ghost）
+结束·自然退出              claude_lifecycle S2（headless 真机）
+孤儿恢复（host_shutdown/lost）claude_lifecycle S3/S4 + 7D-B 步骤 6（真实 GUI 强杀重启收敛）
+启动失败不假装 running      real_claude_terminal::a_missing_claude_binary_never_produces_a_running_session
+能力翻转                    launch / terminal / usage 已为 true，并由 the_capability_matrix_… 锁死
+```
+
+证据原文见 `tests/e2e/README.md` 的「Task 7B 最终 GUI 验收」「Task 7B.1」两节。
+
+现在的**真实**缺口（不是「整条 7B」，而是这两条 GUI 侧的单点 + 一条工具链限制）：
+
+```text
+A  自然退出只在 headless 观测过（S2）；真实 GUI 里让 Claude 自己退出（/exit）尚无证据
+B  真实 GUI 的孤儿恢复来自 7D-B 的**双会话**轮次；Claude **单独**会话的 GUI 收敛尚无独立证据
+C  GUI 取证驱动（cdp.mjs / dbdump.py）在仓库外 D:\HarnessHub-E2E，验收无法从仓库复现
+   （属于「把 GUI 验收固化进仓库」，本 Task 不动，已在 e2e 记录里如实标注）
 ```
