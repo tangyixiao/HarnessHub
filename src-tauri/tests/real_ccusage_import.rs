@@ -18,6 +18,16 @@
 //!
 //! 跳过条件由报告**本身**决定（`common::precondition`）：报告 `session`/`daily` 都没有行
 //! 才算「机器没有数据」；报告里有行却一条都没导入是 adapter 丢行，必须失败而不是跳过。
+//!
+//! 取数由 `common::ReplaySections` 固定成**一份稳定快照**：ccusage 的统计来自活的 rollout 文件，
+//! 两次调用之间同一个 key 的数值会变大，所以报告与后续 import 必须复用同一次真实运行的输出。
+//! 快照本身还带上界 `--until <UTC 今天-2 天> -z UTC`（见 `common::stable_window_arguments`）：
+//! 进行中的日期在被读取期间还在增长，连单次调用内部的 `daily` 与 `session` 都会不一致。
+//! 断言没有放宽，也没有新增跳过：`[2]` 逐类 token、`[4]` codex 两口径、`[5]` 幂等在稳定快照下
+//! 变成**精确**成立。
+//!
+//! **覆盖边界（必须如实读）**：对账针对的是「已结束的日期」，不含最近 ≥24 小时。这样做的代价是
+//! 不再覆盖进行中的那一天；收益是同一份快照真的稳定。若本机只有最近两天的用量，报告为空 → 跳过。
 
 use std::collections::BTreeMap;
 
@@ -25,9 +35,7 @@ use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
 use harness_hub_lib::usage::adapter::{CcusageAdapter, UsageSourceAdapter};
 use harness_hub_lib::usage::importer::UsageImporter;
-use harness_hub_lib::usage::runner::{
-    resolve_runner, session_report_arguments, CommandRunner, SystemCommandRunner,
-};
+use harness_hub_lib::usage::runner::{resolve_runner, SystemCommandRunner};
 use harness_hub_lib::usage::{ImportStatus, SourceStatus};
 
 mod common;
@@ -36,9 +44,9 @@ mod common;
 fn real_ccusage_import_reconciles_against_its_own_totals() {
     let probe = SystemHostProbe::new();
     let executor = SystemCommandRunner::new();
-    let adapter = CcusageAdapter::new(&probe, &executor, None);
+    let detector = CcusageAdapter::new(&probe, &executor, None);
 
-    let source = adapter.detect();
+    let source = detector.detect();
     if source.status != SourceStatus::Available {
         eprintln!(
             "跳过：本机没有可用的 ccusage runner（{}）",
@@ -49,11 +57,16 @@ fn real_ccusage_import_reconciles_against_its_own_totals() {
     let runner = resolve_runner(&probe, None).expect("detect 说可用就一定能解析出 runner");
     eprintln!("runner：{:?} → {}", runner.kind, runner.command.describe());
 
-    // 先自己跑一次，拿原始 JSON 做「逐 agent 归因」；随后 import 会再跑一次。
-    let command = runner.with_arguments(&session_report_arguments());
-    let raw = executor.run(&command).expect("调用 ccusage");
+    // 真实跑**一次**，之后的 import（对账 + 幂等）全部复用这一份输出。
+    //
+    // 为什么必须复用：ccusage 的统计来自活的 rollout 文件（本机 codex 会话在持续追加），
+    // 每次调用都会重新推导，同一个 key 的数值在两次调用之间会变大（实测 12s 内 +36920 token）。
+    // 「同快照对账」要的是同一份数据，所以让被比较的双方由构造保证来自同一个快照。
+    let (replayer, raw) = common::ReplaySections::capture_once(&probe, &executor)
+        .expect("detect 说可用就一定能解析出 runner");
     assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
     let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
+    let adapter = CcusageAdapter::new(&probe, &replayer, None);
 
     let directory = std::env::temp_dir().join(format!("hh-usage-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("临时目录");

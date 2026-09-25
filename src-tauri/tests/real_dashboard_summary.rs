@@ -13,13 +13,15 @@
 //! 但 home 里没有数据，导入会**合法地**得到 0 条记录。跳过条件与 `real_ccusage_import.rs`
 //! 共用同一条规则（`common::precondition`）：报告本身为空才算「机器没有数据」；
 //! 报告里有行却一条都没导入是 adapter 丢行，必须失败。
+//!
+//! 取数同样由 `common::ReplaySections::capture_once` 固定成一份稳定快照（真实跑一次 +
+//! `--until <UTC 今天-2 天> -z UTC`），导入 replay 它，库里的行与拿来判定的报告因此同源。
+//! 覆盖边界：对账针对已结束的日期，不含最近 ≥24 小时。
 
 use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
 use harness_hub_lib::usage::adapter::{CcusageAdapter, UsageSourceAdapter};
-use harness_hub_lib::usage::runner::{
-    resolve_runner, session_report_arguments, CommandRunner, SystemCommandRunner,
-};
+use harness_hub_lib::usage::runner::SystemCommandRunner;
 use harness_hub_lib::usage::summary::{range_bounds, summary, UsageRange};
 use harness_hub_lib::usage::SourceStatus;
 
@@ -29,25 +31,21 @@ mod common;
 fn the_dashboard_summary_matches_an_independent_sql_query() {
     let probe = SystemHostProbe::new();
     let executor = SystemCommandRunner::new();
-    let adapter = CcusageAdapter::new(&probe, &executor, None);
+    let detector = CcusageAdapter::new(&probe, &executor, None);
 
-    if adapter.detect().status != SourceStatus::Available {
+    if detector.detect().status != SourceStatus::Available {
         eprintln!("跳过：本机没有可用的 ccusage runner");
         return;
     }
-    assert!(
-        resolve_runner(&probe, None).is_some(),
-        "detect 说可用就必须能解析出 runner"
-    );
 
-    // 与 `real_ccusage_import.rs` 一样先取一次**来源报告**：前提判定要看报告本身是否为空，
-    // 不能只看「导入了 0 条」（那会把 adapter 丢行一起吞掉）。这一次调用同时保证下面的
-    // 独立 SQL 对账有真实数据可比。
-    let runner = resolve_runner(&probe, None).expect("上面已断言可解析");
-    let command = runner.with_arguments(&session_report_arguments());
-    let raw = executor.run(&command).expect("调用 ccusage");
+    // 与 `real_ccusage_import.rs` 一样：真实跑**一次**并固定成一份稳定快照。
+    // 前提判定要看报告本身是否为空（不能只看「导入了 0 条」，那会把 adapter 丢行一起吞掉），
+    // 而导入必须 replay 同一份输出 —— 否则库里的行会来自另一次调用，跨快照比较没有意义。
+    let (replayer, raw) = common::ReplaySections::capture_once(&probe, &executor)
+        .expect("detect 说可用就必须能解析出 runner");
     assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
     let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
+    let adapter = CcusageAdapter::new(&probe, &replayer, None);
 
     let directory = std::env::temp_dir().join(format!("hh-dashboard-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&directory).expect("临时目录");
