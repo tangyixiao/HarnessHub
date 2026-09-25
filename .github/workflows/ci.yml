@@ -47,7 +47,10 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      # `--nocapture` 是刻意的：真机 E2E 在 runner 上会**明确跳过**并打印原因，
+      # 不打开捕获时这些行看不到，日志里只剩「1 passed」，看起来像通过。
+      # 本仓库的验收文档（tests/e2e/README.md）本来也都是用 --nocapture 跑的。
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture
 
   python:
     name: Python sidecar（unittest）
