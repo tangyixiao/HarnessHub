@@ -5,8 +5,10 @@
 //! 1. **纯函数**：真机 E2E 的「这台机器到底有没有用量数据」前提判定。之所以共用，是因为
 //!    `real_ccusage_import.rs` 与 `real_dashboard_summary.rs` 必须遵守**同一条**规则；
 //!    两处各写一份一定会漂移。
-//! 2. **[`ReplaySections`]**：把目标 `sections` 命令的输出固定成**一份快照**，让真机 E2E
-//!    比的是同一份数据，而不是两次调用之间已经变过的数据（见该类型的文档）。
+//! 2. **[`ReplaySections`]**：真实跑一次目标命令、把输出固定下来，后续导入 replay 同一份，
+//!    让「同快照对账」「重复导入必须幂等」比的是同一份数据（见该类型的文档）。
+//!    窗口由调用方选（[`CaptureWindow`]）：**只有**需要比较 `daily` 与 `session` 的真机对账
+//!    才用 `StablePast`；其余测试用 `Full`，避免丢掉今天的真实覆盖、或让逐 key 检查空转通过。
 //!
 //! 二者都只动测试侧，不碰生产代码。
 
@@ -70,51 +72,79 @@ pub fn precondition(report: &Value, records_seen: u64) -> Precondition {
 pub struct ReplaySections {
     /// 非目标命令照常走它。
     inner: Box<dyn CommandRunner>,
-    /// 目标命令的参数尾巴（`session_report_arguments()`）。只看尾巴，不看 program：
-    /// 不同 runner（直接 ccusage / 托管 npx）前缀不同，参数尾巴才是稳定的部分。
-    sections_args: Vec<String>,
-    /// 第一次真实运行的结果；之后每次调用都返回它。
+    /// 捕获时确定的**完整**目标命令（program + 全部参数）。必须整条匹配，不能只看参数尾巴：
+    /// 换了可执行程序（例如真正的 `ccusage` 而不是托管的 `npx … ccusage@20.0.24`）或换了
+    /// runner 前缀时，那条命令的输出与这份捕获无关，绝不能拿旧输出顶替。
+    target: CommandSpec,
+    /// 第一次真实运行的结果；之后每次命中目标命令都返回它。
     captured: CommandOutput,
+}
+
+/// 捕获窗口：决定这次真实取数要不要加日期上界。
+///
+/// **只在需要比较 `daily` 与 `session` 的真机对账里用 [`Self::StablePast`]**；
+/// 其余测试用 [`Self::Full`]，因为它们只需要「同一份输出」（replay），
+/// 加了历史上界反而会丢掉今天的真实覆盖、甚至让逐 key 检查空转通过。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureWindow {
+    /// 全量取数：不加任何日期上界。
+    Full,
+    /// 稳定窗口：`--until <UTC 今天-2 天> -z UTC`（见 [`stable_window_arguments`]）。
+    StablePast,
+}
+
+impl CaptureWindow {
+    fn arguments(self, now_unix_seconds: u64) -> Vec<String> {
+        match self {
+            Self::Full => Vec::new(),
+            Self::StablePast => stable_window_arguments(now_unix_seconds),
+        }
+    }
 }
 
 impl ReplaySections {
     pub fn new(
         inner: Box<dyn CommandRunner>,
-        sections_args: Vec<String>,
+        target: CommandSpec,
         captured: CommandOutput,
     ) -> Self {
         Self {
             inner,
-            sections_args,
+            target,
             captured,
         }
     }
 
     /// 真实跑**一次**目标命令，返回 `(replayer, 那一次的输出)`：
-    /// 调用方用后者解析报告（报告与后续导入因此是同一份快照）。
+    /// 调用方用后者解析报告（报告与后续导入因此是同一份输出）。
     ///
-    /// 命令 = 生产报告参数 + [`stable_window_arguments`]：生产参数的窗口是「全部数据」，
-    /// 而**进行中的日期还在增长**，所以必须把上界切到至少 24 小时之前，这份快照本身
-    /// 才是稳定的（否则连单次调用内部的两个 section 都会互相不一致）。
+    /// 捕获命令 = 生产报告参数（+ 可选窗口参数）；而 **replay 的匹配目标始终是生产命令本身**
+    /// （runner 前缀 + `session_report_arguments()`），因为适配器导入时构造的就是它。
     pub fn capture_once(
         probe: &SystemHostProbe,
         real: &dyn CommandRunner,
+        window: CaptureWindow,
     ) -> Option<(Self, CommandOutput)> {
         let runner = resolve_runner(probe, None)?;
-        let mut arguments = session_report_arguments();
-        arguments.extend(stable_window_arguments(now_unix_seconds()));
-        let command = runner.with_arguments(&arguments);
-        let captured = real.run(&command).expect("调用 ccusage");
+        let target = runner.with_arguments(&session_report_arguments());
+        let mut capture_args = target.args.clone();
+        capture_args.extend(window.arguments(now_unix_seconds()));
+        let capture_spec = CommandSpec {
+            program: target.program.clone(),
+            args: capture_args,
+        };
+        let captured = real.run(&capture_spec).expect("调用 ccusage");
         let replayer = Self::new(
             Box::new(SystemCommandRunner::new()),
-            session_report_arguments(),
+            target,
             captured.clone(),
         );
         Some((replayer, captured))
     }
 
+    /// 整条命令相等才算命中（program + 全部参数）。
     fn is_target(&self, command: &CommandSpec) -> bool {
-        command.args.ends_with(self.sections_args.as_slice())
+        command == &self.target
     }
 }
 
@@ -207,10 +237,26 @@ mod tests {
         );
     }
 
-    /// 只 replay 目标 `sections` 命令；其他命令**必须**仍然走真实 runner ——
-    /// 否则 `--version` / 可用性探测的结论也被固定住了，测试就变成自证。
+    /// 窗口只影响**取数命令**：`Full` 不许偷偷加上界（否则会丢掉今天的真实覆盖，
+    /// 甚至让逐 key 检查空转通过）。
     #[test]
-    fn only_the_target_sections_command_is_replayed() {
+    fn only_the_stable_window_adds_the_historical_cutoff() {
+        assert!(
+            CaptureWindow::Full.arguments(1_700_000_000).is_empty(),
+            "Full 必须是不加任何日期上界的全量取数"
+        );
+        assert_eq!(
+            CaptureWindow::StablePast.arguments(1_700_000_000),
+            vec!["--until", "2023-11-12", "-z", "UTC"],
+            "只有 StablePast 才切上界"
+        );
+    }
+
+    /// 只 replay **完整等于**目标命令的那一条；其他命令（含换了 runner / 可执行程序的）
+    /// **必须**仍然走真实 runner —— 否则 `--version`、可用性探测、甚至另一条 runner 的输出
+    /// 都会被固定住，测试就变成自证或错认。
+    #[test]
+    fn only_the_exact_target_command_is_replayed() {
         use harness_hub_lib::usage::runner::{
             session_report_arguments, CommandOutput, CommandRunner, CommandSpec,
         };
@@ -239,13 +285,6 @@ mod tests {
             stdout: SECTIONS.to_string(),
             stderr: String::new(),
         };
-        let replay = ReplaySections::new(
-            Box::new(Stub {
-                calls: Arc::clone(&calls),
-            }),
-            session_report_arguments(),
-            captured.clone(),
-        );
 
         // 目标命令：runner 前缀 + 报告参数（与生产 `import` 构造出来的完全一致）
         let mut args = vec!["--yes".to_string(), "ccusage@20.0.24".to_string()];
@@ -254,10 +293,18 @@ mod tests {
             program: "npx".to_string(),
             args,
         };
+        let replay = ReplaySections::new(
+            Box::new(Stub {
+                calls: Arc::clone(&calls),
+            }),
+            target.clone(),
+            captured.clone(),
+        );
+
         assert_eq!(
             replay.run(&target).expect("replay"),
             captured,
-            "目标命令必须 replay 那份快照"
+            "完整等于目标命令必须 replay"
         );
         assert_eq!(
             replay.run(&target).expect("replay"),
@@ -270,19 +317,58 @@ mod tests {
             "目标命令不得碰到真实 runner"
         );
 
-        let other = CommandSpec {
+        // ① 换了可执行程序、但参数尾巴一样 —— 绝不能拿旧输出顶替
+        let other_program = CommandSpec {
+            program: "ccusage".to_string(),
+            args: target.args.clone(),
+        };
+        assert_eq!(
+            replay.run(&other_program).expect("delegate").stdout,
+            "DELEGATED",
+            "换了 program 的命令必须走真实 runner"
+        );
+
+        // ② 同一个程序、但 runner 前缀不同（例如别的版本）—— 同样不能命中
+        let mut other_prefix_args = vec!["--yes".to_string(), "ccusage@20.0.25".to_string()];
+        other_prefix_args.extend(session_report_arguments());
+        let other_prefix = CommandSpec {
+            program: target.program.clone(),
+            args: other_prefix_args,
+        };
+        assert_eq!(
+            replay.run(&other_prefix).expect("delegate").stdout,
+            "DELEGATED",
+            "runner 前缀不同的命令必须走真实 runner"
+        );
+
+        // ③ 目标命令 + 额外参数（例如捕获时带的窗口参数）也不再命中
+        let mut windowed_args = target.args.clone();
+        windowed_args.extend(["--until".to_string(), "2023-11-12".to_string()]);
+        let windowed = CommandSpec {
+            program: target.program.clone(),
+            args: windowed_args,
+        };
+        assert_eq!(
+            replay.run(&windowed).expect("delegate").stdout,
+            "DELEGATED",
+            "带额外参数的命令与目标命令不同，必须走真实 runner"
+        );
+
+        // ④ 完全无关的命令（`--version`）
+        let version = CommandSpec {
             program: "npx".to_string(),
             args: vec!["--version".to_string()],
         };
         assert_eq!(
-            replay.run(&other).expect("delegate").stdout,
+            replay.run(&version).expect("delegate").stdout,
             "DELEGATED",
             "非目标命令必须委托给真实 runner"
         );
+
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "非目标命令必须走真实 runner"
+            4,
+            "四个非目标命令都必须走真实 runner"
         );
     }
 }

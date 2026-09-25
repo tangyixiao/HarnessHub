@@ -18,10 +18,11 @@
 //! 用真机库的**副本**，因此不会改动用户的真实数据库，且可重复执行。
 //! 本机没有 ccusage / 没有应用数据库时明确跳过。
 //!
-//! 源头只真实取数**一次**（`common::ReplaySections::capture_once`，带稳定窗口
-//! `--until <UTC 今天-2 天> -z UTC`），两次导入都 replay 这一份：ccusage 的统计来自活的
-//! rollout 文件，不固定快照的话「重复导入必须幂等」比的是两份不同的数据（实测同一批 262 行里
-//! 有 18 行被上游改写、汇总 +43214）。覆盖边界：对账针对已结束的日期，不含最近 ≥24 小时。
+//! 源头只真实取数**一次**（`common::ReplaySections::capture_once`，`CaptureWindow::Full`
+//! ＝全量、不加日期上界），两次导入都 replay 这一份：ccusage 的统计来自活的 rollout 文件，
+//! 不固定输出的话「重复导入必须幂等」比的是两份不同的数据（实测同一批 262 行里有 18 行被上游
+//! 改写、汇总 +43214）。**这条刻意不加稳定窗口**：它需要看到**今天**的 Claude key，
+//! 否则「源头每个 key 都进了库」会在库里已有记录时空转通过。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -61,10 +62,12 @@ fn source_claude_keys() -> Option<(serde_json::Value, BTreeSet<String>, common::
         return None;
     }
 
-    // `capture_once` 自带稳定窗口（`--until <UTC 今天-2 天> -z UTC`）：进行中的日期
-    // 在被读取期间还在增长，不切上界的话连单次调用内部的 daily/session 都会互相不一致。
-    let (replayer, output) = common::ReplaySections::capture_once(&probe, &executor)
-        .expect("detect 说可用就一定能解析出 runner");
+    // 全量取数（**不加**日期上界）：这条用例只需要 replay 来保证「两次导入是同一份数据」，
+    // 加历史上界会丢掉今天的 Claude key，而库里已经可能已有 Claude 记录 ——
+    // 那样「源头每个 key 都在库里」的逐 key 检查就会**空转通过**。
+    let (replayer, output) =
+        common::ReplaySections::capture_once(&probe, &executor, common::CaptureWindow::Full)
+            .expect("detect 说可用就一定能解析出 runner");
     assert_eq!(output.exit_code, 0, "ccusage 必须成功：{}", output.stderr);
 
     let report: serde_json::Value = serde_json::from_str(&output.stdout).expect("合法 JSON");

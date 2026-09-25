@@ -19,15 +19,19 @@
 //! 跳过条件由报告**本身**决定（`common::precondition`）：报告 `session`/`daily` 都没有行
 //! 才算「机器没有数据」；报告里有行却一条都没导入是 adapter 丢行，必须失败而不是跳过。
 //!
-//! 取数由 `common::ReplaySections` 固定成**一份稳定快照**：ccusage 的统计来自活的 rollout 文件，
+//! 取数由 `common::ReplaySections` 固定成**同一份输出**：ccusage 的统计来自活的 rollout 文件，
 //! 两次调用之间同一个 key 的数值会变大，所以报告与后续 import 必须复用同一次真实运行的输出。
-//! 快照本身还带上界 `--until <UTC 今天-2 天> -z UTC`（见 `common::stable_window_arguments`）：
-//! 进行中的日期在被读取期间还在增长，连单次调用内部的 `daily` 与 `session` 都会不一致。
+//! 这条用例是**唯一**需要稳定窗口（`CaptureWindow::StablePast` → `--until <UTC 今天-2 天> -z UTC`）
+//! 的：它要比较同一份报告内部的 `daily` 与 `session`，而进行中的日期在被读取期间还在增长，
+//! 连单次调用内部的两个 section 都会互相不一致（实测同一份报告里 codex daily 比 session
+//! 少 166271 / 84090，写入暂停时恰好 0）。
 //! 断言没有放宽，也没有新增跳过：`[2]` 逐类 token、`[4]` codex 两口径、`[5]` 幂等在稳定快照下
 //! 变成**精确**成立。
 //!
-//! **覆盖边界（必须如实读）**：对账针对的是「已结束的日期」，不含最近 ≥24 小时。这样做的代价是
-//! 不再覆盖进行中的那一天；收益是同一份快照真的稳定。若本机只有最近两天的用量，报告为空 → 跳过。
+//! **覆盖边界（必须如实读）**：这条对账针对「已结束的日期」，不含最近 ≥24 小时；代价是不再覆盖
+//! 进行中的那一天，收益是同一份报告真的自洽。若本机只有最近两天的用量，报告为空 → 跳过。
+//! 其余两条真机用例（`claude_usage` / `real_dashboard_summary`）用 `CaptureWindow::Full`：
+//! 它们只需要 replay，不能因此丢掉今天的覆盖。
 
 use std::collections::BTreeMap;
 
@@ -61,9 +65,13 @@ fn real_ccusage_import_reconciles_against_its_own_totals() {
     //
     // 为什么必须复用：ccusage 的统计来自活的 rollout 文件（本机 codex 会话在持续追加），
     // 每次调用都会重新推导，同一个 key 的数值在两次调用之间会变大（实测 12s 内 +36920 token）。
-    // 「同快照对账」要的是同一份数据，所以让被比较的双方由构造保证来自同一个快照。
-    let (replayer, raw) = common::ReplaySections::capture_once(&probe, &executor)
-        .expect("detect 说可用就一定能解析出 runner");
+    // 「同快照对账」要的是同一份数据，所以让被比较的双方由构造保证来自同一份输出。
+    //
+    // 这条用例**需要**稳定窗口（`StablePast`）：它要比较同一份报告里的 `daily` 与 `session`，
+    // 而进行中的日期在被读取期间还在增长，连单次调用内部的两个 section 都会互相不一致。
+    let (replayer, raw) =
+        common::ReplaySections::capture_once(&probe, &executor, common::CaptureWindow::StablePast)
+            .expect("detect 说可用就一定能解析出 runner");
     assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
     let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
     let adapter = CcusageAdapter::new(&probe, &replayer, None);

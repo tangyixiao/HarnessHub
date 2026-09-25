@@ -14,9 +14,9 @@
 //! 共用同一条规则（`common::precondition`）：报告本身为空才算「机器没有数据」；
 //! 报告里有行却一条都没导入是 adapter 丢行，必须失败。
 //!
-//! 取数同样由 `common::ReplaySections::capture_once` 固定成一份稳定快照（真实跑一次 +
-//! `--until <UTC 今天-2 天> -z UTC`），导入 replay 它，库里的行与拿来判定的报告因此同源。
-//! 覆盖边界：对账针对已结束的日期，不含最近 ≥24 小时。
+//! 取数同样由 `common::ReplaySections::capture_once` 固定：真实跑一次，导入 replay 同一份，
+//! 库里的行与拿来判定的报告因此同源。窗口是 `CaptureWindow::Full`（全量，含今天）——
+//! 这条比的是「库 vs 自己的 SQL」，不需要 `daily` 与 `session` 自洽，加历史上界只会丢覆盖。
 
 use harness_hub_lib::db::Database;
 use harness_hub_lib::harness::probe::SystemHostProbe;
@@ -38,11 +38,13 @@ fn the_dashboard_summary_matches_an_independent_sql_query() {
         return;
     }
 
-    // 与 `real_ccusage_import.rs` 一样：真实跑**一次**并固定成一份稳定快照。
-    // 前提判定要看报告本身是否为空（不能只看「导入了 0 条」，那会把 adapter 丢行一起吞掉），
-    // 而导入必须 replay 同一份输出 —— 否则库里的行会来自另一次调用，跨快照比较没有意义。
-    let (replayer, raw) = common::ReplaySections::capture_once(&probe, &executor)
-        .expect("detect 说可用就必须能解析出 runner");
+    // 与 `real_ccusage_import.rs` 一样：真实跑**一次**，导入 replay 同一份输出 ——
+    // 否则库里的行会来自另一次调用，跨快照比较没有意义。
+    // 但这条用**全量**（`CaptureWindow::Full`）：它比的是「库 vs 自己的 SQL」，
+    // 不需要 `daily` 与 `session` 自洽，加历史上界只会丢掉今天的真实覆盖。
+    let (replayer, raw) =
+        common::ReplaySections::capture_once(&probe, &executor, common::CaptureWindow::Full)
+            .expect("detect 说可用就必须能解析出 runner");
     assert_eq!(raw.exit_code, 0, "ccusage 必须成功：{}", raw.stderr);
     let report: serde_json::Value = serde_json::from_str(&raw.stdout).expect("合法 JSON");
     let adapter = CcusageAdapter::new(&probe, &replayer, None);
