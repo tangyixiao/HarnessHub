@@ -991,3 +991,76 @@ Task 8B 的本地交付我认可。7 条 review 修正都有对应实现和证�
 3. spec §6 L1–L7 的已知限制随本次验收一并接受；其中 L1（分配前 race 只能 best-effort
    压到最小）是**能力边界**，不是待办缺陷。
 ```
+
+---
+
+## 2026-09-27 — Task 7B GUI 生命周期补证（部分通过）
+
+环境：当前分支 `task-7b/claude-terminal-acceptance`，真实 WebView2 页面与
+`D:\HarnessHub-E2E\claude-terminal`。这轮用 `pnpm exec vite --port 3300 --strictPort`
+加 `src-tauri/target/debug/harness-hub.exe` 启动桌面端，并设置 WebView2 CDP 端口 9222。
+桌面 exe 的修改时间为 2026-09-25 19:58；本轮没有重新编译，因此以下是**该二进制**
+的真机验收，不能宣称当前源码通过了重新构建。通过 `cdp.mjs` 点击真实页面的导航、
+Harness 选择、cwd 输入和按钮；`dbdump.py` 用 Python 标准库读取 SQLite/WAL 的副本。
+两个辅助脚本均在仓库外 `D:\HarnessHub-E2E`，仓库目前不能独立复现这轮 GUI 驱动。
+
+### Claude 单独会话强杀重启：通过
+
+在同一桌面实例里，先通过 Terminal 页结束第一条空白 Claude 会话，再启动唯一一条
+Claude 会话（无 Codex 并行）。强杀前后与重启后的原始观测：
+
+```text
+GUI before : 运行中 · Claude Code · cwd D:\HarnessHub-E2E\claude-terminal
+             · pid 12696 · session ecd7f2c6-7094-444e-81e2-9bd2aa3cbaaa
+DB before  : status=running, termination_reason=null, exit_code=null,
+             pid=12696, ended_at=null, running=1
+action     : 验证 PID 36876 对应当前 harness-hub.exe 后，Stop-Process -Id 36876 -Force
+DB killed  : 同一 session 仍为 running；running=1；pid 12696 不再存在
+restart log: 启动收敛：1 条遗留 running 会话被标记为 lost
+DB after   : status=unknown, termination_reason=lost, exit_code=null,
+             pid=12696, ended_at=2026-09-27T12:58:36Z, running=0
+GUI after  : 新 WebView2 页面加载 Dashboard，显示 Tauri 运行时已连接
+```
+
+此前一条通过 GUI「结束会话」结束的 Claude 行保持 `exited/user_killed/1`，没有被重启收敛
+覆盖。这条证据覆盖**单独 Claude 会话的孤儿恢复**，不覆盖首屏、交互或自然退出。
+
+### GUI `/exit`：未通过，发现空白终端
+
+重启前后共两次从 GUI 启动 Claude，均得到 `running + pid`，但 `.xterm-rows` 只有一个
+空格；在运行期间，进程树只观察到 `cmd.exe /c D:\npm-global\claude.cmd`，未观察到常驻
+`claude.exe` 子进程，无法确认 Claude 聊天界面已就绪。两条会话均经真实 GUI「结束会话」
+清理，数据库分别记为 `exited/user_killed/1`，本轮结束时 `running=0`。因此**没有**把
+`/exit` 输入空白终端，也没有把 headless 成功误写成 GUI 成功。
+
+作为对照，直接运行旧的 `claude_lifecycle-82fc955c09dd34c1.exe` 单项测试得到：
+
+```text
+S2 首屏 2102 bytes，聊天界面 = false
+S2 natural_exit: exit_code=Some(0)
+test s2_claude_can_exit_naturally ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out
+```
+
+该测试程序构建于 2026-09-25 14:26，说明 headless 的 `/exit` 路径仍可走通，不能替代
+本轮缺失的 GUI 证据。
+
+本轮源码 Gate 的实际输出（文档改动后）：
+
+```text
+pnpm format:check   All matched files use Prettier code style!             exit 0
+pnpm lint           0 errors, 4 warnings（既有 react-refresh warning）     exit 0
+pnpm typecheck      tsc --noEmit                                           exit 0
+pnpm test           6 files / 124 tests passed                            exit 0
+pnpm build          1907 modules transformed; built in 1.73s             exit 0
+pnpm python:test    Ran 12 tests ... OK                                   exit 0
+git diff --check    no output                                             exit 0
+pnpm rust:fmt:check error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+pnpm rust:test      error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+pnpm rust:clippy    error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+```
+
+Rust toolchain 当时未安装。用 minimal profile 从官方 `static.rust-lang.org` 安装两次，
+分别在 rustc / rust-std 下载时因 TLS 提前断开而回滚；按 Rustup 官方文档改用临时 curl
+后端重试，仍因 SSL handshake 失败而回滚。因此 Rust 三项均**未执行到编译/检查阶段**，
+本轮不宣称全部 Gate 通过。

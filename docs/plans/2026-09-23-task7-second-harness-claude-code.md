@@ -212,11 +212,17 @@ resize / reflow            7B.1 最后一块（ShowWindow → viewport → xterm
 
 证据原文见 `tests/e2e/README.md` 的「Task 7B 最终 GUI 验收」「Task 7B.1」两节。
 
-现在的**真实**缺口（不是「整条 7B」，而是这两条 GUI 侧的单点 + 一条工具链限制）：
+2026-09-25 时的缺口清单；B 的更新状态见下方 2026-09-27 复核：
 
 ```text
 A  自然退出只在 headless 观测过（S2）；真实 GUI 里让 Claude 自己退出（/exit）尚无证据
-B  真实 GUI 的孤儿恢复来自 7D-B 的**双会话**轮次；Claude **单独**会话的 GUI 收敛尚无独立证据
+B  Claude **单独**会话的 GUI 强杀重启收敛已于 2026-09-27 取证；见 tests/e2e/README.md
 C  GUI 取证驱动（cdp.mjs / dbdump.py）在仓库外 D:\HarnessHub-E2E，验收无法从仓库复现
    （属于「把 GUI 验收固化进仓库」，本 Task 不动，已在 e2e 记录里如实标注）
 ```
+
+2026-09-27 复核：A 仍缺真实 GUI `/exit` 证据。本轮 GUI 的 Claude 会话进入 running，
+但 xterm 为空，观察到 `claude.cmd` 的 `cmd.exe` 而没有常驻的 `claude.exe` 子进程；
+两次启动均如此。独立的 `claude_lifecycle::s2_claude_can_exit_naturally` 预编译测试
+仍可完成 `/exit`，所以不能把 headless 结果当作 GUI 通过。B 的新证据只覆盖孤儿收敛，
+不覆盖 Claude TUI 的启动或交互。
