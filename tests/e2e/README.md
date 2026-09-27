@@ -1033,6 +1033,11 @@ GUI after  : 新 WebView2 页面加载 Dashboard，显示 Tauri 运行时已连�
 清理，数据库分别记为 `exited/user_killed/1`，本轮结束时 `running=0`。因此**没有**把
 `/exit` 输入空白终端，也没有把 headless 成功误写成 GUI 成功。
 
+补充排查：改用 Tauri 通常的 `D:\HarnessHub\src-tauri` 作为桌面 exe 的启动工作目录后，
+第三次 GUI 启动仍只有空白 xterm 与 `claude.cmd` 的 `cmd.exe`（session
+`feb23af0-b664-4f08-b087-0a25589ce703`，pid 11492）。工作目录差异不能解释本轮现象。
+该会话也由 GUI 按钮结束，数据库记录 `exited/user_killed/1`，`running=0`。
+
 作为对照，直接运行旧的 `claude_lifecycle-82fc955c09dd34c1.exe` 单项测试得到：
 
 ```text
@@ -1064,3 +1069,7 @@ Rust toolchain 当时未安装。用 minimal profile 从官方 `static.rust-lang
 分别在 rustc / rust-std 下载时因 TLS 提前断开而回滚；按 Rustup 官方文档改用临时 curl
 后端重试，仍因 SSL handshake 失败而回滚。因此 Rust 三项均**未执行到编译/检查阶段**，
 本轮不宣称全部 Gate 通过。
+
+PR #3 的远端 CI 于本轮补充排查前，对提交 `89423ac` 报告前端、Rust、Python 三项
+job 全部通过（run `36321429736`）。这是远端 CI 证据，不等于本机 Windows Rust Gate
+或本轮 GUI `/exit` 通过。
