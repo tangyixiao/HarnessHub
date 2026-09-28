@@ -1038,6 +1038,13 @@ GUI after  : 新 WebView2 页面加载 Dashboard，显示 Tauri 运行时已连�
 `feb23af0-b664-4f08-b087-0a25589ce703`，pid 11492）。工作目录差异不能解释本轮现象。
 该会话也由 GUI 按钮结束，数据库记录 `exited/user_killed/1`，`running=0`。
 
+2026-09-28 对照：用**同一个预编译桌面 exe**、同一 WebView2/CDP 路径启动 Codex，
+cwd 为 `D:\HarnessHub-E2E\codex-concurrent`，得到 `running`（session
+`cdd82af5-b33a-4928-8c9f-6f9d868f67fe`，pid 40368），但 xterm 仍只有一个空格，
+进程树只观察到 `cmd.exe /c D:\npm-global\codex.cmd`。经 GUI「结束会话」后，DB 为
+`exited/user_killed/1`，全库 `running=0`。空白不限于 Claude；当前仅能定位到这份
+预编译桌面程序或其运行环境，**不能**据此断言现行源码的 Claude 适配器有缺陷。
+
 作为对照，直接运行旧的 `claude_lifecycle-82fc955c09dd34c1.exe` 单项测试得到：
 
 ```text

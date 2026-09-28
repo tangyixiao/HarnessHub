@@ -226,3 +226,7 @@ C  GUI 取证驱动（cdp.mjs / dbdump.py）在仓库外 D:\HarnessHub-E2E，验
 两次启动均如此。独立的 `claude_lifecycle::s2_claude_can_exit_naturally` 预编译测试
 仍可完成 `/exit`，所以不能把 headless 结果当作 GUI 通过。B 的新证据只覆盖孤儿收敛，
 不覆盖 Claude TUI 的启动或交互。
+
+2026-09-28 对照：同一预编译桌面 exe 的 Codex GUI 启动也出现空白 xterm，停在
+`cmd.exe /c codex.cmd`；所以本轮不能把空白归因于 Claude 适配器。先用能从当前源码
+重新构建的 Windows 桌面程序复现，再判断是否有产品缺陷。
