@@ -64,8 +64,8 @@ pub const DATABASE_FILE_NAME: &str = "harness-hub.sqlite3";
 /// 注册顺序即 UI 展示顺序（`HarnessRegistry` 用 `Vec` 持有适配器，顺序确定，
 /// 不依赖 HashMap 迭代顺序）。
 ///
-/// 只注册**已实现适配器**的 Harness（ADR-0022）：Codex 是完整纵向链路，
-/// Claude Code 在 Task 7A 只有 detection。
+/// 只注册**已实现适配器**的 Harness（ADR-0022）：Codex 与 Claude Code 都已是完整纵向链路
+/// （detect / launch / terminal / usage），能力矩阵由各自 adapter 的 `capabilities()` 零宣称地给出。
 ///
 /// `pub` 是为了让集成测试用**生产组合**（而不是测试里重造一份注册表）验证
 /// 「两个 Harness 同时 reconcile」这类事实。

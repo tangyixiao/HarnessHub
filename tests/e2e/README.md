@@ -1126,4 +1126,6 @@ pnpm rust:clippy    Finished `dev` profile                                      
 ```
 
 本轮 `two_harness_concurrency` 3/3 通过。测试把误提交 marker 的回车改为退格，避免
-将隔离 marker 当作真实 Codex prompt 提交；测试仍验证 Codex 在输入与 resize 后保持运行并继续输出。
+将隔离 marker 当作真实 Codex prompt 提交；测试仍验证 Codex 在输入与 resize 之后保持
+`running`、PID 存活。「继续产出」这一步只打印诊断值（`[5 diagnostic]` / `codex_alive_output`），
+**没有**写成断言，因此此处不把它当作业已断言的结论。

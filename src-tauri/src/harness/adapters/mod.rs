@@ -10,7 +10,7 @@
 //!
 //! 「能检测到」不算支持，「可稳定回归」才算。
 //!
-//! 当前已实现：`codex`（完整纵向链路）、`claude_code`（Task 7A 起，先做 detection）。
+//! 当前已实现：`codex`（完整纵向链路）、`claude_code`（Task 7B 起 detect / launch / terminal / usage）。
 
 pub mod claude_code;
 pub mod codex;
