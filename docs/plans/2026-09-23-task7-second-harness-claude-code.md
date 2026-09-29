@@ -50,12 +50,12 @@ period 是**裸 UUID**（不含日期），时间只能来自 metadata.lastActiv
 在写任何代码之前，对全仓做了 `codex|Codex|CODEX` 审计（`src-tauri/src` 240 处、`src/` 51 处）。
 **生产代码路径上只有 4 处，全部是合法的，没有一处是 `if harness_id == "codex"`**：
 
-| 位置                                                              | 性质                                                    | 结论                                                                                    |
-| ----------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `lib.rs` `build_harness_registry()`                               | **组合根**：必须有地方注册适配器                        | 加 Claude = 多一行 `registry.register(...)`                                             |
-| `harness/probe.rs` / `launch.rs` / `store.rs` / `adapter.rs` 注释 | 文档举例（「Windows 上 codex 有三种 shim」）            | 代码本身与 Harness 无关（`candidate_paths(dir, name)`）                                 |
-| `usage/ccusage.rs` `day_from_period`                              | 行为与 Harness 无关：period 长得像日期就解析，否则 NULL | Claude 的裸 UUID 已有测试覆盖（`leaves_occurred_at_null_when_it_can_never_be_derived`） |
-| `src/features/harnesses/HarnessesPage.tsx:150`                    | UI 文案「当前注册表中只有 Codex」                       | **注册 Claude 后这句会变成错的**，必须改（唯一的前端生产改动）                          |
+| 位置                                                              | 性质                                                    | 结论                                                                                 |
+| ----------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `lib.rs` `build_harness_registry()`                               | **组合根**：必须有地方注册适配器                        | 加 Claude = 多一行 `registry.register(...)`                                          |
+| `harness/probe.rs` / `launch.rs` / `store.rs` / `adapter.rs` 注释 | 文档举例（「Windows 上 codex 有三种 shim」）            | 代码本身与 Harness 无关（`candidate_paths(dir, name)`）                              |
+| `usage/ccusage.rs` `day_from_period`                              | 行为与 Harness 无关：period 长得像日期就解析，否则 NULL | Claude 的裸 UUID 已有测试覆盖（`leaves_occurred_at_null_when_it_cannot_be_derived`） |
+| `src/features/harnesses/HarnessesPage.tsx:150`                    | UI 文案「当前注册表中只有 Codex」                       | **注册 Claude 后这句会变成错的**，必须改（唯一的前端生产改动）                       |
 
 其余 280+ 处全是测试夹具与注释。`harness/adapters/mod.rs` 的注释里本来就写着
 `codex.rs`、`claude_code.rs`、`gemini_cli.rs`、`opencode.rs`。
