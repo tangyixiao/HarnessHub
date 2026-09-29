@@ -991,3 +991,139 @@ Task 8B 的本地交付我认可。7 条 review 修正都有对应实现和证�
 3. spec §6 L1–L7 的已知限制随本次验收一并接受；其中 L1（分配前 race 只能 best-effort
    压到最小）是**能力边界**，不是待办缺陷。
 ```
+
+---
+
+## 2026-09-27 — Task 7B GUI 生命周期补证（部分通过）
+
+环境：当前分支 `task-7b/claude-terminal-acceptance`，真实 WebView2 页面与
+`D:\HarnessHub-E2E\claude-terminal`。这轮用 `pnpm exec vite --port 3300 --strictPort`
+加 `src-tauri/target/debug/harness-hub.exe` 启动桌面端，并设置 WebView2 CDP 端口 9222。
+桌面 exe 的修改时间为 2026-09-25 19:58；本轮没有重新编译，因此以下是**该二进制**
+的真机验收，不能宣称当前源码通过了重新构建。通过 `cdp.mjs` 点击真实页面的导航、
+Harness 选择、cwd 输入和按钮；`dbdump.py` 用 Python 标准库读取 SQLite/WAL 的副本。
+两个辅助脚本均在仓库外 `D:\HarnessHub-E2E`，仓库目前不能独立复现这轮 GUI 驱动。
+
+### Claude 单独会话强杀重启：通过
+
+在同一桌面实例里，先通过 Terminal 页结束第一条空白 Claude 会话，再启动唯一一条
+Claude 会话（无 Codex 并行）。强杀前后与重启后的原始观测：
+
+```text
+GUI before : 运行中 · Claude Code · cwd D:\HarnessHub-E2E\claude-terminal
+             · pid 12696 · session ecd7f2c6-7094-444e-81e2-9bd2aa3cbaaa
+DB before  : status=running, termination_reason=null, exit_code=null,
+             pid=12696, ended_at=null, running=1
+action     : 验证 PID 36876 对应当前 harness-hub.exe 后，Stop-Process -Id 36876 -Force
+DB killed  : 同一 session 仍为 running；running=1；pid 12696 不再存在
+restart log: 启动收敛：1 条遗留 running 会话被标记为 lost
+DB after   : status=unknown, termination_reason=lost, exit_code=null,
+             pid=12696, ended_at=2026-09-27T12:58:36Z, running=0
+GUI after  : 新 WebView2 页面加载 Dashboard，显示 Tauri 运行时已连接
+```
+
+此前一条通过 GUI「结束会话」结束的 Claude 行保持 `exited/user_killed/1`，没有被重启收敛
+覆盖。这条证据覆盖**单独 Claude 会话的孤儿恢复**，不覆盖首屏、交互或自然退出。
+
+### 2026-09-27/28 预编译桌面程序 GUI `/exit`：未通过，发现空白终端
+
+重启前后共两次从 GUI 启动 Claude，均得到 `running + pid`，但 `.xterm-rows` 只有一个
+空格；在运行期间，进程树只观察到 `cmd.exe /c D:\npm-global\claude.cmd`，未观察到常驻
+`claude.exe` 子进程，无法确认 Claude 聊天界面已就绪。两条会话均经真实 GUI「结束会话」
+清理，数据库分别记为 `exited/user_killed/1`，本轮结束时 `running=0`。因此**没有**把
+`/exit` 输入空白终端，也没有把 headless 成功误写成 GUI 成功。
+
+补充排查：改用 Tauri 通常的 `D:\HarnessHub\src-tauri` 作为桌面 exe 的启动工作目录后，
+第三次 GUI 启动仍只有空白 xterm 与 `claude.cmd` 的 `cmd.exe`（session
+`feb23af0-b664-4f08-b087-0a25589ce703`，pid 11492）。工作目录差异不能解释本轮现象。
+该会话也由 GUI 按钮结束，数据库记录 `exited/user_killed/1`，`running=0`。
+
+2026-09-28 对照：用**同一个预编译桌面 exe**、同一 WebView2/CDP 路径启动 Codex，
+cwd 为 `D:\HarnessHub-E2E\codex-concurrent`，得到 `running`（session
+`cdd82af5-b33a-4928-8c9f-6f9d868f67fe`，pid 40368），但 xterm 仍只有一个空格，
+进程树只观察到 `cmd.exe /c D:\npm-global\codex.cmd`。经 GUI「结束会话」后，DB 为
+`exited/user_killed/1`，全库 `running=0`。空白不限于 Claude；当前仅能定位到这份
+预编译桌面程序或其运行环境，**不能**据此断言现行源码的 Claude 适配器有缺陷。
+
+作为对照，直接运行旧的 `claude_lifecycle-82fc955c09dd34c1.exe` 单项测试得到：
+
+```text
+S2 首屏 2102 bytes，聊天界面 = false
+S2 natural_exit: exit_code=Some(0)
+test s2_claude_can_exit_naturally ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out
+```
+
+该测试程序构建于 2026-09-25 14:26，说明 headless 的 `/exit` 路径仍可走通，不能替代
+当时缺失的 GUI 证据。
+
+此前验收回合（2026-09-27/28）的本机源码 Gate 输出：
+
+```text
+pnpm format:check   All matched files use Prettier code style!             exit 0
+pnpm lint           0 errors, 4 warnings（既有 react-refresh warning）     exit 0
+pnpm typecheck      tsc --noEmit                                           exit 0
+pnpm test           6 files / 124 tests passed                            exit 0
+pnpm build          1907 modules transformed; built in 1.73s             exit 0
+pnpm python:test    Ran 12 tests ... OK                                   exit 0
+git diff --check    no output                                             exit 0
+pnpm rust:fmt:check error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+pnpm rust:test      error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+pnpm rust:clippy    error: toolchain 'stable-x86_64-pc-windows-msvc' is not installed
+```
+
+Rust toolchain 当时未安装。用 minimal profile 从官方 `static.rust-lang.org` 安装两次，
+分别在 rustc / rust-std 下载时因 TLS 提前断开而回滚；按 Rustup 官方文档改用临时 curl
+后端重试，仍因 SSL handshake 失败而回滚。因此 Rust 三项均**未执行到编译/检查阶段**，
+本轮不宣称全部 Gate 通过。
+
+PR #3 的远端 CI 于本轮补充排查前，对提交 `89423ac` 报告前端、Rust、Python 三项
+job 全部通过（run `36321429736`）。这是远端 CI 证据，不等于本机 Windows Rust Gate；
+当前源码 GUI `/exit` 的独立证据见下节。
+
+### 2026-09-29 当前源码 GUI `/exit`：通过
+
+为排除旧预编译 exe 的影响，本轮从当前工作树重新构建并启动 Tauri dev 桌面端：
+
+```text
+command : pnpm tauri dev --config D:\HarnessHub-E2E\7b2-tauri-override.json
+env     : WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222
+build   : cargo Finished `dev` profile; launched D:\HarnessHub\src-tauri\target\debug\harness-hub.exe
+GUI     : 真实 WebView 页面 → Terminal → 选择 claude@local → cwd 输入 → 点击「启动」
+```
+
+这次 xterm 显示 Claude Code v2.1.126 的 `Welcome back!` 欢迎界面与 cwd；进程树为
+`harness-hub.exe (15260) → cmd.exe (5260) → claude.exe (19060)`。在 xterm 输入
+`/exit`，确认页面回显命令及 `Exit the CLI` 候选后按 Enter。真实 GUI 会话随即结束，
+进程查询中 `claude.exe` 与 shim `cmd.exe` 均已消失，桌面宿主仍运行。
+
+```text
+DB before: hub_session_id=b3c01949-b246-4ca6-9210-b45fc58047e1
+           status=running, termination_reason=null, exit_code=null, pid=5260
+           cwd=D:\HarnessHub-E2E\claude-terminal, running=1
+DB after : 同一 session status=exited, termination_reason=natural_exit, exit_code=0
+           started_at=2026-09-29T09:27:14Z, ended_at=2026-09-29T09:30:54Z
+           全库 running=0；Claude 与 cmd shim 均不在进程列表
+```
+
+该结果证明当前源码构建下真实 GUI 的启动、Claude TUI 首屏和 `/exit` 自然退出均通过；
+它不改变 2026-09-27/28 对旧预编译二进制的空白观察。GUI 驱动 `cdp.mjs`、
+`cdp-input.mjs` 与只读 SQLite/WAL 快照脚本 `dbdump.py` 仍保存在仓库外
+`D:\HarnessHub-E2E`，因此这轮 GUI 操作目前不能从仓库独立复现。
+
+当前工作树的本机 Gate 实际输出：
+
+```text
+pnpm format:check   All matched files use Prettier code style!                     exit 0
+pnpm rust:fmt:check cargo fmt --all -- --check                                      exit 0
+pnpm lint           0 errors, 4 warnings（routes.tsx / DashboardPage.tsx 既有规则）  exit 0
+pnpm typecheck      tsc --noEmit                                                   exit 0
+pnpm test           6 files / 124 tests passed                                     exit 0
+pnpm rust:test      287 unit + 53 integration tests passed                        exit 0
+pnpm python:test    Ran 12 tests ... OK                                             exit 0
+pnpm build          1907 modules transformed; built in 3.94s                       exit 0
+pnpm rust:clippy    Finished `dev` profile                                         exit 0
+```
+
+本轮 `two_harness_concurrency` 3/3 通过。测试把误提交 marker 的回车改为退格，避免
+将隔离 marker 当作真实 Codex prompt 提交；测试仍验证 Codex 在输入与 resize 后保持运行并继续输出。

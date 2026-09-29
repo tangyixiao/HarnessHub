@@ -1,15 +1,23 @@
-//! Claude Code 适配器（Task 7A：只做 detection / installation）。
+//! Claude Code 适配器（Task 7A 起：detection / installation；7B / 7C 依次补 terminal 与 usage）。
 //!
-//! **零宣称**：本 Task 只证明「能检测到、版本读得到、数据目录找得到」。
-//! `capabilities` 全部为 `false` —— 即使 `build_launch_spec` 已经能生成结构化 spec，
-//! 也**不能**据此打勾：`launch` 要等 7B 的真实 spawn + lifecycle，`terminal` 要等
-//! 真实 xterm 双向交互（ADR-0005）。
+//! **零宣称**（ADR-0005）：每个能力都必须先拿到**指定的真机证据**才允许翻 true。
+//! 当前 `launch` / `terminal` / `usage` 均为 `true`，各自的证据是：
+//!
+//! ```text
+//! launch     7B 真机 GUI：真实「启动」按钮 → created → running + pid → Claude 首屏显示 cwd
+//! terminal   7B 真机 GUI：xterm 输入 → Claude → 输出（答案 585987 只出现在提交之后）
+//!            ＋ 7B.1 真机 GUI resize/reflow（ShowWindow → TUI 按新宽度重绘）
+//! usage      7C：真机 ccusage 的 claude 记录经现有 importer 逐 key 入库（tests/claude_usage.rs）
+//! 仍未翻     resume / replay / tool_calls / subagents / live_state / worktree
+//! ```
+//!
+//! 证据与逐条结论见 `tests/e2e/README.md` 的「Task 7B 最终 GUI 验收」「Task 7B.1」两节；
+//! 矩阵由 `src-tauri/tests/two_harness_inventory.rs::the_capability_matrix_is_exactly_what_has_been_accepted` 锁死。
 //!
 //! 平台差异复用通用地基，不新增 Claude 专用逻辑：
 //! `harness::probe::candidate_paths`（Windows `.cmd`/`.exe` 优先、无扩展名最后）与
 //! `harness::launch::program_for`（`.ps1` → pwsh）。本机实测 Claude 与 Codex 一样是
-//! `.cmd` / `.ps1` / 无扩展名三件套，因此这套顺序应可直接吃下 —— 真机 E2E 会确认选中的
-//! 到底是哪一个。
+//! `.cmd` / `.ps1` / 无扩展名三件套，真机 E2E 已确认选中的是 `.cmd`。
 //!
 //! 权限语义（ADR-0003）：这里的 `data_paths` 只是**路径发现**，不是内容读取。
 //! 本适配器不解析 `settings.json`、不读 `history.jsonl`、不碰任何用户数据。

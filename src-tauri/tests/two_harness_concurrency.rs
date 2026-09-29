@@ -669,15 +669,25 @@ fn codex_and_claude_run_at_the_same_time_in_different_directories() {
 
     note("codex 仍可 write / resize / output");
     let codex_bytes_before = both.streams.len(&codex_id);
-    both.input.send(&codex_id, b"\r".to_vec());
+    // 上面的隔离 marker 仍在 Codex composer 里；只退格修改它，不能提交测试 marker 为 prompt。
+    both.input.send(&codex_id, b"\x7f".to_vec());
     both.runtime
         .resize(&codex_id, 140, 50)
         .expect("codex 仍必须可 resize");
     let codex_alive_output = both.pump_until(Duration::from_secs(10), || {
         both.streams.len(&codex_id) > codex_bytes_before
     });
+    let codex_after_write = both.record(&codex_id);
+    eprintln!(
+        "[5 diagnostic] codex status={:?} reason={:?} exit={:?} pid_alive={} output_bytes={}",
+        codex_after_write.status,
+        codex_after_write.termination_reason,
+        codex_after_write.exit_code,
+        pid_alive(codex_pid),
+        both.streams.len(&codex_id)
+    );
     assert_eq!(
-        both.record(&codex_id).status,
+        codex_after_write.status,
         SessionStatus::Running,
         "write/resize 之后 codex 仍必须 running"
     );
