@@ -204,15 +204,16 @@ shim 被杀后子进程仍持有 PTY」。7B 的 kill 验收必须把这件事**
 输入输出                   7B 最终 GUI 验收（xterm 输入 → Claude → 答案 585987 只出现在提交之后）
 resize / reflow            7B.1 最后一块（ShowWindow → viewport → xterm → TUI 横线 136→196）
 结束·用户主动              7B 最终 GUI 验收（user_killed + 真实退出码 1 + 零 ghost）
-结束·自然退出              claude_lifecycle S2（headless 真机）
+结束·自然退出              当前源码真实 GUI `/exit`（本文件下方 2026-09-29 记录）+ claude_lifecycle S2（headless 真机）
 孤儿恢复（host_shutdown/lost）claude_lifecycle S3/S4 + 7D-B 步骤 6（真实 GUI 强杀重启收敛）
 启动失败不假装 running      real_claude_terminal::a_missing_claude_binary_never_produces_a_running_session
 能力翻转                    launch / terminal / usage 已为 true，并由 the_capability_matrix_… 锁死
 ```
 
-证据原文见 `tests/e2e/README.md` 的「Task 7B 最终 GUI 验收」「Task 7B.1」两节。
+证据原文见 `tests/e2e/README.md` 的「Task 7B 最终 GUI 验收」「Task 7B.1」及
+「2026-09-29 当前源码 GUI `/exit`」各节。
 
-2026-09-25 时的缺口清单；B 的更新状态见下方 2026-09-27 复核：
+2026-09-25 时的历史缺口清单；A/B 的后续状态见下方 2026-09-29 复核：
 
 ```text
 A  自然退出只在 headless 观测过（S2）；真实 GUI 里让 Claude 自己退出（/exit）尚无证据
@@ -230,3 +231,14 @@ C  GUI 取证驱动（cdp.mjs / dbdump.py）在仓库外 D:\HarnessHub-E2E，验
 2026-09-28 对照：同一预编译桌面 exe 的 Codex GUI 启动也出现空白 xterm，停在
 `cmd.exe /c codex.cmd`；所以本轮不能把空白归因于 Claude 适配器。先用能从当前源码
 重新构建的 Windows 桌面程序复现，再判断是否有产品缺陷。
+
+### 2026-09-29 复核：当前源码 GUI 自然退出通过
+
+从当前工作树重新构建并启动 Tauri dev 桌面端后，通过真实 Terminal 页面选择
+`claude@local`、输入 cwd 并启动。Claude Code v2.1.126 的欢迎界面出现在 xterm 中；
+进程树包含 `harness-hub.exe → cmd.exe → claude.exe`。经 xterm 输入 `/exit` 并提交后，
+会话 `b3c01949-b246-4ca6-9210-b45fc58047e1` 由 `running` 收敛为
+`exited/natural_exit/0`，数据库全库 `running=0`，Claude 与 shim 进程均已退出。
+这覆盖 7B 所缺的**当前源码构建下 GUI 启动、首屏和自然退出**；旧预编译 exe 的
+2026-09-27/28 空白观察仍作为历史事实保留。原始 GUI 与 SQLite 快照证据见
+`tests/e2e/README.md`。GUI 脚本仍在仓库外 `D:\HarnessHub-E2E`，不声称可从仓库独立复现。
