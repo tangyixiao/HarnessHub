@@ -35,6 +35,7 @@ use tauri::Manager;
 use crate::db::Database;
 use crate::harness::adapters::claude_code::ClaudeCodeAdapter;
 use crate::harness::adapters::codex::CodexAdapter;
+use crate::harness::adapters::gemini_cli::GeminiCliAdapter;
 use crate::harness::inventory::reconcile_harnesses;
 use crate::harness::probe::SystemHostProbe;
 use crate::harness::registry::HarnessRegistry;
@@ -64,8 +65,8 @@ pub const DATABASE_FILE_NAME: &str = "harness-hub.sqlite3";
 /// 注册顺序即 UI 展示顺序（`HarnessRegistry` 用 `Vec` 持有适配器，顺序确定，
 /// 不依赖 HashMap 迭代顺序）。
 ///
-/// 只注册**已实现适配器**的 Harness（ADR-0022）：Codex 与 Claude Code 都已是完整纵向链路
-/// （detect / launch / terminal / usage），能力矩阵由各自 adapter 的 `capabilities()` 零宣称地给出。
+/// 只注册**已实现适配器**的 Harness（ADR-0022）：Codex 与 Claude Code 提供
+/// detect / launch / terminal / usage；Gemini CLI 仅检测，能力矩阵为全 false。
 ///
 /// `pub` 是为了让集成测试用**生产组合**（而不是测试里重造一份注册表）验证
 /// 「两个 Harness 同时 reconcile」这类事实。
@@ -77,6 +78,12 @@ pub fn build_harness_registry() -> HarnessRegistry {
     registry.register(Box::new(ClaudeCodeAdapter::new(Arc::new(
         SystemHostProbe::new(),
     ))));
+    registry.register(Box::new(GeminiCliAdapter::new(
+        Arc::new(SystemHostProbe::new()),
+        std::env::var_os("GEMINI_CLI_HOME")
+            .filter(|root| !root.is_empty())
+            .map(std::path::PathBuf::from),
+    )));
     registry
 }
 

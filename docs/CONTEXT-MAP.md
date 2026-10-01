@@ -36,6 +36,10 @@
 
 ## 层与依赖方向（不可反向依赖）
 
+Gemini 检测入口：`src-tauri/src/harness/adapters/gemini_cli.rs`；组合根在 `lib.rs` 注入
+`GEMINI_CLI_HOME`。共享 IPC fixture 在 `fixtures/gemini/`，真机检测测试为
+`src-tauri/tests/gemini_detection.rs`。Terminal 按 capability 过滤检测阶段适配器。
+
 ```text
 src/features/*  →  src/components/*  →  src/lib/*
 src/features/*  →  src/lib/ipc.ts  →  Tauri IPC  →  src-tauri/src/commands.rs

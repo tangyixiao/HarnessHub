@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import geminiSummary from '../../../fixtures/gemini/summary.json';
 
 import { HarnessesPage } from '@/features/harnesses/HarnessesPage';
 
@@ -60,6 +61,17 @@ const INSTALLED_CODEX = {
 };
 
 describe('HarnessesPage', () => {
+  it('Gemini 已安装时显示版本和路径，但不宣称运行能力', async () => {
+    stubHarnesses([geminiSummary]);
+    render(<HarnessesPage />);
+    expect(await screen.findByText('Gemini CLI')).toBeInTheDocument();
+    expect(screen.getByText('0.59.0')).toBeInTheDocument();
+    expect(screen.getByText('D:/npm-global/gemini.cmd')).toBeInTheDocument();
+    expect(screen.getByText('已安装')).toBeInTheDocument();
+    for (const capability of Object.keys(geminiSummary.capabilities)) {
+      expect(screen.getByTestId(`capability-${capability}`)).toHaveTextContent('—');
+    }
+  });
   it('展示真实检测到的版本、binary 路径与数据目录', async () => {
     stubHarnesses([INSTALLED_CODEX]);
 

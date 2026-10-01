@@ -88,5 +88,7 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   已实现：Codex detect、PTY 会话（created → running → 终态）、内置 Terminal、
   ccusage 使用量导入（幂等 + 同快照对账，见 ADR-0011）、
   Dashboard 只读投影（Token / 已知成本下界 / 两个会话数，见 ADR-0012）。
-  尚未实现：Claude / Gemini / OpenCode 适配器、Project Registry、Activity Timeline。
+  Claude Code 已完成 detect / launch / terminal / usage（证据见 Task 7 计划与 E2E 记录）。
+  Gemini CLI 已接入安装、版本与数据目录检测；其九项能力仍为 false，Terminal 不提供启动入口。
+  尚未实现：Gemini 生命周期与 Usage、OpenCode 适配器、Project Registry、Activity Timeline。
 - 实施计划见 `docs/plans/`。

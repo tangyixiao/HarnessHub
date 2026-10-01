@@ -79,7 +79,17 @@ const INSTALLED = {
   installed: true,
   binaryPath: 'D:/npm-global/codex.cmd',
   version: '0.152.1',
-  capabilities: {},
+  capabilities: {
+    launch: true,
+    terminal: true,
+    resume: false,
+    usage: true,
+    replay: false,
+    toolCalls: false,
+    subagents: false,
+    liveState: false,
+    worktree: false,
+  },
   dataPaths: [],
 };
 
@@ -351,6 +361,50 @@ const setCwdInput = (value: string) =>
   });
 
 describe('TerminalPage multi-harness 启动语义', () => {
+  it('只有 detection 阶段的已安装 Harness 时不提供启动入口', async () => {
+    listHarnesses.mockResolvedValue({
+      ok: true,
+      data: [
+        {
+          ...INSTALLED,
+          id: 'gemini',
+          displayName: 'Gemini CLI',
+          installationId: 'gemini@local',
+          capabilities: { ...INSTALLED.capabilities, launch: false, terminal: false, usage: false },
+        },
+      ],
+    });
+    render(<TerminalPage />);
+    await settle();
+    expect(screen.queryByRole('button', { name: '启动' })).not.toBeInTheDocument();
+    expect(screen.getByText('没有可用于启动终端的已安装 Harness')).toBeInTheDocument();
+    expect(startTerminal).not.toHaveBeenCalled();
+  });
+
+  it.each(['launch', 'terminal'] as const)(
+    '已安装但缺少 %s 能力的 Harness 不进入启动选择器',
+    async (capability) => {
+      const detectionOnly = {
+        ...INSTALLED,
+        id: 'gemini',
+        displayName: 'Gemini CLI',
+        installationId: 'gemini@local',
+        capabilities: { ...INSTALLED.capabilities, [capability]: false },
+      };
+      listHarnesses.mockResolvedValue({ ok: true, data: [detectionOnly, INSTALLED] });
+      render(<TerminalPage />);
+      await settle();
+
+      expect(screen.queryByRole('option', { name: /Gemini CLI/ })).not.toBeInTheDocument();
+      expect((screen.getByLabelText('启动的 Harness') as HTMLSelectElement).value).toBe(
+        'codex@local',
+      );
+      await clickLaunch();
+      await settle();
+      expect(startTerminal.mock.calls[0]?.[0]).toMatchObject({ installationId: 'codex@local' });
+    },
+  );
+
   it('0 个已安装 → 不调用 start_terminal，并如实报错', async () => {
     listHarnesses.mockResolvedValue({ ok: true, data: [] });
 

@@ -1,13 +1,13 @@
-//! Task 7A：第二个 Harness 接入后的清单同步证据。
+//! Task 7A 起的清单同步证据；2026-10-01 扩展生产注册表至 Gemini 检测阶段。
 //!
 //! 这里刻意用**生产组合根** `build_harness_registry()`（而不是在测试里重造一份注册表），
 //! 才能验证「Core 不需要为第二个 Harness 改动」这件事本身。
 //!
 //! 覆盖四件事：
-//! 1. 注册表持有两个适配器，顺序确定（`Vec`，不是 HashMap）；
-//! 2. 真正空库 → 生产注册表 → reconcile → 两个 definition + 两个 installation；
-//! 3. 已有 Codex 的库再加 Claude：**不需要 migration**、不覆盖旧数据、不重复插入；
-//! 4. 真机检测：两个 Harness 都真的被认出来（不装则明确跳过）。
+//! 1. 注册表持有三个适配器，顺序确定（`Vec`，不是 HashMap）；
+//! 2. 真正空库 → 生产注册表 → reconcile → 三个 definition + 三个 installation；
+//! 3. 已有 Codex 的库再加 Harness：不覆盖旧数据、不重复插入；
+//! 4. 原有 Codex/Claude 真机检测与矩阵保留；Gemini 真机证据见 gemini_detection.rs。
 
 use harness_hub_lib::db::migrations::{apply_pending, latest_version};
 use harness_hub_lib::db::Database;
@@ -68,7 +68,7 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
             .collect()
     };
 
-    assert_eq!(ids(&registry), vec!["codex", "claude"]);
+    assert_eq!(ids(&registry), vec!["codex", "claude", "gemini"]);
     assert_eq!(
         ids(&registry),
         ids(&registry),
@@ -76,9 +76,10 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
     );
 
     let summaries = registry.summaries(LOCAL_TARGET_ID);
-    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries.len(), 3);
     assert_eq!(summaries[0].display_name, "Codex");
     assert_eq!(summaries[1].display_name, "Claude Code");
+    assert_eq!(summaries[2].display_name, "Gemini CLI");
     // 展示名由适配器声明，注册表只透传（前后端只有一份名字来源）。
     assert_eq!(
         summaries[1].installation_id.as_deref(),
@@ -88,26 +89,27 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
 }
 
 #[test]
-fn a_cold_database_reconciles_both_harnesses() {
+fn a_cold_database_reconciles_all_registered_harnesses() {
     let db = Database::open_in_memory().expect("空库");
     ensure_local_target(db.connection()).expect("runtime target");
 
     let reconciled = reconcile_with_production_registry(&db);
 
-    assert_eq!(reconciled, vec!["codex", "claude"]);
-    assert_eq!(definition_ids(&db), vec!["claude", "codex"]);
+    assert_eq!(reconciled, vec!["codex", "claude", "gemini"]);
+    assert_eq!(definition_ids(&db), vec!["claude", "codex", "gemini"]);
     assert_eq!(
         installation_ids(&db),
         vec![
             installation_id("claude", LOCAL_TARGET_ID),
-            installation_id("codex", LOCAL_TARGET_ID)
+            installation_id("codex", LOCAL_TARGET_ID),
+            installation_id("gemini", LOCAL_TARGET_ID)
         ]
     );
 }
 
-/// 已有 Codex 的库再加 Claude：不覆盖旧数据、不重复插入。
+/// 已有 Codex 的库再加 Claude/Gemini：不覆盖旧数据、不重复插入。
 #[test]
-fn adding_claude_preserves_the_existing_codex_installation() {
+fn adding_harnesses_preserves_the_existing_codex_installation() {
     let db = Database::open_in_memory().expect("库");
     ensure_local_target(db.connection()).expect("runtime target");
 
@@ -140,12 +142,15 @@ fn adding_claude_preserves_the_existing_codex_installation() {
         )
         .expect("旧安装");
 
-    // 现在把 Claude 也同步进来（真实启动时发生的事）。
+    // 现在把其余已注册适配器也同步进来（真实启动时发生的事）。
     reconcile_with_production_registry(&db);
 
-    assert_eq!(definition_ids(&db), vec!["claude", "codex"]);
-    assert_eq!(installation_ids(&db), vec!["claude@local", "codex@local"]);
-    assert_eq!(installation_count(&db), 2, "不得重复插入");
+    assert_eq!(definition_ids(&db), vec!["claude", "codex", "gemini"]);
+    assert_eq!(
+        installation_ids(&db),
+        vec!["claude@local", "codex@local", "gemini@local"]
+    );
+    assert_eq!(installation_count(&db), 3, "不得重复插入");
 
     let after: (Option<String>, String) = db
         .connection()
@@ -157,13 +162,13 @@ fn adding_claude_preserves_the_existing_codex_installation() {
         .expect("旧安装");
     assert_eq!(
         after.0, before.0,
-        "Codex 的 binary 不得被 Claude 的同步覆盖"
+        "Codex 的 binary 不得被其它 Harness 的同步覆盖"
     );
     assert_eq!(after.1, before.1, "first_detected_at 必须保持首次发现时间");
 
     // 再同步一次：仍然不重复（幂等）。
     reconcile_with_production_registry(&db);
-    assert_eq!(installation_count(&db), 2);
+    assert_eq!(installation_count(&db), 3);
 }
 
 /// 加第二个 Harness **不需要** schema 变更。
