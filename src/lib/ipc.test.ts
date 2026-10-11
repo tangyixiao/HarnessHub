@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import codebuddySummary from '../../fixtures/codebuddy/summary.json';
 import geminiSummary from '../../fixtures/gemini/summary.json';
 
 import {
@@ -152,6 +153,9 @@ const CODEX_PAYLOAD = {
 describe('normalizeHarnessSummary', () => {
   it('Gemini fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
     expect(normalizeHarnessSummary(geminiSummary)).toEqual(geminiSummary);
+  });
+  it('CodeBuddy fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
+    expect(normalizeHarnessSummary(codebuddySummary)).toEqual(codebuddySummary);
   });
   it('字段残缺的 payload 补全 false 安全默认值，不渲染假支持', () => {
     const incomplete = normalizeHarnessSummary({ id: 'gemini', installed: true });

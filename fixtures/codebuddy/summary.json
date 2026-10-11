@@ -1,0 +1,20 @@
+{
+  "id": "codebuddy",
+  "displayName": "CodeBuddy",
+  "installationId": "codebuddy@local",
+  "installed": true,
+  "binaryPath": "D:/npm-global/codebuddy.cmd",
+  "version": "2.161.0",
+  "capabilities": {
+    "launch": false,
+    "terminal": false,
+    "resume": false,
+    "usage": false,
+    "replay": false,
+    "toolCalls": false,
+    "subagents": false,
+    "liveState": false,
+    "worktree": false
+  },
+  "dataPaths": []
+}

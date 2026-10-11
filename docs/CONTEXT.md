@@ -92,5 +92,8 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   Gemini CLI 已完成 detect / launch / terminal：headless 真机 lifecycle 证据齐全
   （spike + real_gemini_terminal + gemini_lifecycle S1-S4，见 tests/e2e/README.md），
   本机认证被 Google 拒绝（readiness 边界，ADR-0005），chat 级往返证据待认证恢复后补强。
-  尚未实现：Gemini Usage、OpenCode 适配器、Project Registry、Activity Timeline。
+  CodeBuddy 已完成检测阶段（安装 / 版本 / 数据目录，能力全 false，见
+  docs/specs/2026-10-11-codebuddy-detection-design.md）。
+  尚未实现：Gemini Usage、CodeBuddy 生命周期、OpenCode 适配器、Project Registry、
+  Activity Timeline。
 - 实施计划见 `docs/plans/`。
