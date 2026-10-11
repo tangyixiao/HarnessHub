@@ -2,15 +2,16 @@
 
 /*
  * Harness Hub 设计令牌。
- * 刻意保持小集合：骨架阶段只需要"可读、稳定、深色优先"。
+ * 刻意保持小集合：可读、稳定、深色优先。
+ * 表面三层拉开对比；accent 只有一个蓝，状态色独立（ok/warn/error）。
  */
 @theme {
-  --color-surface-base: oklch(0.19 0.012 265);
-  --color-surface-raised: oklch(0.24 0.014 265);
-  --color-surface-overlay: oklch(0.28 0.016 265);
-  --color-border-subtle: oklch(0.34 0.014 265);
+  --color-surface-base: oklch(0.17 0.014 265);
+  --color-surface-raised: oklch(0.22 0.016 265);
+  --color-surface-overlay: oklch(0.27 0.018 265);
+  --color-border-subtle: oklch(0.32 0.016 265);
   --color-content-primary: oklch(0.97 0.004 265);
-  --color-content-muted: oklch(0.72 0.012 265);
+  --color-content-muted: oklch(0.71 0.014 265);
   --color-accent: oklch(0.72 0.14 250);
   --color-accent-strong: oklch(0.64 0.17 250);
   --color-signal-ok: oklch(0.75 0.15 155);
@@ -28,6 +29,13 @@
   body {
     margin: 0;
     background-color: var(--color-surface-base);
+    /* 极淡的顶部辉光：给纯深色底一点纵深，不参与任何交互 */
+    background-image: radial-gradient(
+      56rem 22rem at 18% -8%,
+      color-mix(in oklab, var(--color-accent) 7%, transparent),
+      transparent 70%
+    );
+    background-attachment: fixed;
     color: var(--color-content-primary);
     font-family:
       'Segoe UI Variable',
@@ -42,5 +50,31 @@
 
   ::selection {
     background-color: color-mix(in oklab, var(--color-accent) 35%, transparent);
+  }
+
+  /* 细滚动条：桌面端主内容区几乎必然滚动，系统默认滚动条太重 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-subtle) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-border-subtle);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-content-muted);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
   }
 }

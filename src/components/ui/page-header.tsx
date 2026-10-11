@@ -13,8 +13,12 @@ export function PageHeader({ title, description, actions, className }: PageHeade
   return (
     <header className={cn('flex items-start justify-between gap-4 pb-6', className)}>
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-content-primary">{title}</h1>
-        {description ? <p className="mt-1 text-sm text-content-muted">{description}</p> : null}
+        <h1 className="text-[22px] font-semibold leading-7 tracking-tight text-content-primary">
+          {title}
+        </h1>
+        {description ? (
+          <p className="mt-1 max-w-3xl text-[13px] text-content-muted">{description}</p>
+        ) : null}
       </div>
       {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </header>

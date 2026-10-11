@@ -292,7 +292,7 @@ export function TerminalPage() {
             启动的 Harness
             <select
               aria-label="启动的 Harness"
-              className="rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
+              className="rounded-lg border border-border-subtle bg-surface-base/60 px-2.5 py-1.5 text-xs text-content-primary transition-colors focus:border-accent/60 focus:outline-none"
               value={selectedInstallationId ?? ''}
               disabled={busy}
               onChange={(event) => setSelectedInstallationId(event.target.value)}
@@ -309,7 +309,7 @@ export function TerminalPage() {
             工作目录（可选）
             <input
               aria-label="工作目录（可选）"
-              className="w-80 rounded border border-border-subtle bg-transparent px-2 py-1 text-xs text-content-primary"
+              className="w-80 rounded-lg border border-border-subtle bg-surface-base/60 px-2.5 py-1.5 font-mono text-xs text-content-primary transition-colors placeholder:text-content-muted/60 focus:border-accent/60 focus:outline-none"
               placeholder="留空 = 不指定（sessions.cwd 记为 NULL）"
               value={selectedCwd}
               disabled={busy}
@@ -322,14 +322,20 @@ export function TerminalPage() {
           </Button>
 
           {phase.kind === 'running' ? (
-            <span>
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/12 px-2.5 py-1.5 font-mono text-[11px] text-accent">
+              <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-accent" />
               运行中 · {activeHarness?.displayName ?? ''}
               {activeCwd ? ` · cwd ${activeCwd}` : ''}
               {phase.session.pid !== null ? ` · pid ${phase.session.pid}` : ''}
               {` · session ${phase.session.hubSessionId}`}
             </span>
           ) : null}
-          {phase.kind === 'ended' ? <span>已结束 · {phase.status}</span> : null}
+          {phase.kind === 'ended' ? (
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface-overlay/50 px-2.5 py-1.5 font-mono text-[11px] text-content-muted">
+              <span aria-hidden className="size-1.5 rounded-full bg-content-muted" />
+              已结束 · {phase.status}
+            </span>
+          ) : null}
         </div>
       ) : null}
 
@@ -375,7 +381,7 @@ export function TerminalPage() {
       <div
         ref={containerRef}
         data-testid="terminal-container"
-        className="h-[480px] overflow-hidden rounded-md border border-border-subtle bg-[#16181d] p-1"
+        className="h-[480px] overflow-hidden rounded-xl border border-border-subtle bg-[#14161b] p-1.5 shadow-[inset_0_2px_8px_rgba(0,0,0,0.45)]"
       />
     </div>
   );

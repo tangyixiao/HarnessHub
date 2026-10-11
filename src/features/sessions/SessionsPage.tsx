@@ -20,11 +20,20 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 };
 
 const STATUS_STYLE: Record<SessionStatus, string> = {
-  created: 'border-signal-warn/40 bg-signal-warn/10 text-signal-warn',
-  running: 'border-accent/40 bg-accent/10 text-accent',
-  exited: 'border-signal-ok/40 bg-signal-ok/10 text-signal-ok',
-  failed: 'border-signal-error/40 bg-signal-error/10 text-signal-error',
+  created: 'border-signal-warn/40 bg-signal-warn/15 text-signal-warn',
+  running: 'border-accent/40 bg-accent/15 text-accent',
+  exited: 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok',
+  failed: 'border-signal-error/40 bg-signal-error/15 text-signal-error',
   unknown: 'border-border-subtle bg-surface-overlay/40 text-content-muted',
+};
+
+/** 终态着色的语义点：绿色=正常结束、红=失败、灰=未知，运行中用 accent。 */
+const STATUS_DOT: Record<SessionStatus, string> = {
+  created: 'bg-signal-warn',
+  running: 'bg-accent',
+  exited: 'bg-signal-ok',
+  failed: 'bg-signal-error',
+  unknown: 'bg-content-muted',
 };
 
 const TERMINATION_LABEL: Record<TerminationReason, string> = {
@@ -162,18 +171,27 @@ function SessionCard({ session }: { session: SessionRecord }) {
     <section aria-label={session.hubSessionId}>
       <Card>
         <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <CardTitle>{session.harnessId || '（未知 Harness）'}</CardTitle>
-            <CardDescription className="break-all font-mono">
-              {session.hubSessionId}
-            </CardDescription>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span
+              aria-hidden
+              className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-surface-overlay text-sm font-semibold uppercase text-content-muted ring-1 ring-border-subtle"
+            >
+              {(session.harnessId || '?').slice(0, 1)}
+            </span>
+            <div className="min-w-0">
+              <CardTitle>{session.harnessId || '（未知 Harness）'}</CardTitle>
+              <CardDescription className="truncate font-mono text-[11px]">
+                {session.hubSessionId}
+              </CardDescription>
+            </div>
           </div>
           <span
             className={cn(
-              'shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium',
+              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium',
               STATUS_STYLE[session.status],
             )}
           >
+            <span aria-hidden className={cn('size-1.5 rounded-full', STATUS_DOT[session.status])} />
             {STATUS_LABEL[session.status]}
           </span>
         </div>
