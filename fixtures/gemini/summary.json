@@ -6,8 +6,8 @@
   "binaryPath": "D:/npm-global/gemini.cmd",
   "version": "0.59.0",
   "capabilities": {
-    "launch": false,
-    "terminal": false,
+    "launch": true,
+    "terminal": true,
     "resume": false,
     "usage": false,
     "replay": false,

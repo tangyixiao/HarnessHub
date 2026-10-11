@@ -1,7 +1,31 @@
-//! Gemini CLI 的检测阶段：只探测 binary、版本与现存数据目录。
+//! Gemini CLI 适配器：检测（2026-10-01 起）+ 终端生命周期（2026-10-11 起）。
 //!
-//! launch / terminal / usage 尚未实现，能力矩阵保持全 false。
-//! 不读取用户配置、认证或 Session 内容；环境配置根由组合根显式注入。
+//! **零宣称**（ADR-0005）：每个能力都必须先拿到**指定的真机证据**才允许翻 true。
+//! 当前 `launch` / `terminal` 为 `true`，证据是：
+//!
+//! ```text
+//! launch     headless 真机：gemini@local → 现有 TerminalRuntime → running + 真实 pid
+//!            （tests/real_gemini_terminal.rs [1]；binary 缺失时启动失败不假装 running）
+//! terminal   headless 真机：真实 TUI 字节（bracketed paste）、DSR 闭环、方向键 ↓ 产生
+//!            1 万+ 字节重绘、resize 不掉线、kill → user_killed + 真实退出码
+//!            （real_gemini_terminal [2]-[6]）+ 四条状态链 user_killed / natural_exit
+//!            （Ctrl+C×2）/ host_shutdown / lost（tests/gemini_lifecycle.rs）
+//! 仍未翻     usage / resume / replay / tool_calls / subagents / live_state / worktree
+//! ```
+//!
+//! 本机认证被 Google 服务端拒绝（「client is no longer supported … migrate to
+//! Antigravity」，2026-10-11 实测），chat 级往返证据暂时不可达 —— 按 ADR-0005
+//! 这是 **readiness** 问题（v0.1 尚未实现该维度），不得回写 capability；
+//! 认证恢复后由 GUI 轮补强证据。GUI 验收记录见 tests/e2e/README.md。
+//!
+//! 平台差异复用通用地基，不新增 Gemini 专用逻辑：
+//! `harness::probe::candidate_paths`（Windows `.cmd` 优先）与
+//! `harness::launch::program_for`（`.ps1` → pwsh）。本机实测 Gemini 是
+//! `.cmd` / 无扩展名两件套，真机 E2E 确认选中的是 `.cmd`。
+//!
+//! 权限语义（ADR-0003）：`data_paths` 只是**路径发现**。本适配器不读取
+//! `settings.json` / `oauth_creds.json` / 会话内容；工作区信任弹窗保持
+//! Gemini 自己的安全语义，Hub 不注入 `--skip-trust` 之类的绕过参数。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +34,7 @@ use crate::error::{Error, Result};
 use crate::harness::adapter::{
     DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest,
 };
-use crate::harness::launch::LaunchSpec;
+use crate::harness::launch::{program_for, LaunchSpec};
 use crate::harness::probe::HostProbe;
 
 pub const GEMINI_ID: &str = "gemini";
@@ -66,14 +90,39 @@ impl HarnessAdapter for GeminiCliAdapter {
         }
     }
 
+    /// `launch` / `terminal` 已翻为 `true`：headless 真机 lifecycle 证据齐（见模块注释
+    /// 与 tests/e2e/README.md）。其余能力未实现，保持 `false`（ADR-0005 零宣称）。
     fn capabilities(&self) -> HarnessCapabilities {
-        HarnessCapabilities::default()
+        HarnessCapabilities {
+            launch: true,
+            terminal: true,
+            ..HarnessCapabilities::default()
+        }
     }
 
-    fn build_launch_spec(&self, _request: LaunchRequest) -> Result<LaunchSpec> {
-        Err(Error::InvalidInput(
-            "Gemini CLI 启动尚未实现：当前仅支持安装检测".into(),
-        ))
+    fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
+        let binary = self.probe.find_executable(GEMINI_ID).ok_or_else(|| {
+            Error::InvalidInput("Gemini CLI 未安装：PATH 中找不到可执行文件".to_string())
+        })?;
+
+        // 平台差异交给通用地基：`.ps1` 需要 pwsh 宿主，`.cmd` 直接执行。
+        // 默认零参数：工作区信任等策略由 Gemini 自己的 TUI 呈现，Hub 不替用户决定。
+        let (program, mut args) = program_for(&binary);
+        args.extend(request.args);
+
+        let cwd = if request.cwd.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(request.cwd))
+        };
+
+        Ok(LaunchSpec {
+            program,
+            args,
+            cwd,
+            env: Vec::new(),
+            runtime_target_id: request.runtime_target_id,
+        })
     }
 }
 
@@ -81,7 +130,7 @@ impl HarnessAdapter for GeminiCliAdapter {
 mod tests {
     use super::*;
     use crate::error::Error;
-    use crate::harness::adapter::{HarnessAdapter, HarnessCapabilities, LaunchRequest};
+    use crate::harness::adapter::{HarnessAdapter, LaunchRequest};
     use crate::harness::registry::HarnessRegistry;
     use crate::test_support::FakeHostProbe;
     use std::path::PathBuf;
@@ -214,21 +263,104 @@ mod tests {
         assert!(missing_override.data_paths.is_empty());
     }
 
+    /// 能力矩阵只包含**已经拿到真机证据**的能力（ADR-0005 零宣称），且与
+    /// 机器是否安装无关（capability 是代码的静态事实）。
+    ///
+    /// `launch` / `terminal` 为 true：headless 真机 spawn + lifecycle（S1-S4）
+    /// 见模块注释；usage 与其余能力未验收，不得为 true。
     #[test]
-    fn capabilities_are_unimplemented_regardless_of_installation() {
+    fn capabilities_claim_only_terminal_lifecycle_evidence() {
         for probe in [installed(), FakeHostProbe::new()] {
-            let adapter = GeminiCliAdapter::new(Arc::new(probe), None);
-            assert_eq!(adapter.capabilities(), HarnessCapabilities::default());
-            let result = adapter.build_launch_spec(LaunchRequest {
+            let capabilities = GeminiCliAdapter::new(Arc::new(probe), None).capabilities();
+            assert!(
+                capabilities.launch,
+                "Gemini 已通过 headless 真机 spawn + lifecycle"
+            );
+            assert!(
+                capabilities.terminal,
+                "Gemini 已通过真实 TUI 字节 + DSR + resize + 终态取证"
+            );
+            for (name, value) in [
+                ("usage", capabilities.usage),
+                ("resume", capabilities.resume),
+                ("replay", capabilities.replay),
+                ("tool_calls", capabilities.tool_calls),
+                ("subagents", capabilities.subagents),
+                ("live_state", capabilities.live_state),
+                ("worktree", capabilities.worktree),
+            ] {
+                assert!(!value, "{name} 尚未验收，不得为 true");
+            }
+        }
+    }
+
+    /// 能生成 spec ≠ 顺带宣称别的能力：能力矩阵只随验收证据变化。
+    #[test]
+    fn building_a_launch_spec_does_not_claim_extra_capabilities() {
+        let adapter = GeminiCliAdapter::new(Arc::new(installed()), None);
+
+        let spec = adapter
+            .build_launch_spec(LaunchRequest {
+                project_id: None,
+                cwd: "D:/work".into(),
+                args: vec!["--skip-trust".into()],
+                runtime_target_id: "local".into(),
+            })
+            .expect("spec");
+
+        assert_eq!(spec.program, PathBuf::from("D:/npm-global/gemini.cmd"));
+        assert_eq!(spec.args, vec!["--skip-trust".to_string()]);
+        assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
+        assert_eq!(spec.runtime_target_id, "local");
+        let capabilities = adapter.capabilities();
+        assert!(
+            !capabilities.usage && !capabilities.resume,
+            "spec 与 usage / resume 无关"
+        );
+    }
+
+    /// `.ps1` shim 走通用地基（pwsh 宿主），Gemini 不新增平台专用分支。
+    #[test]
+    fn a_ps1_shim_is_hosted_by_pwsh_through_the_shared_helper() {
+        let adapter = GeminiCliAdapter::new(
+            Arc::new(FakeHostProbe::new().with_binary(
+                "gemini",
+                "D:/npm-global/gemini.ps1",
+                "0.63.0",
+            )),
+            None,
+        );
+
+        let spec = adapter
+            .build_launch_spec(LaunchRequest {
                 project_id: None,
                 cwd: String::new(),
                 args: vec![],
                 runtime_target_id: "local".into(),
-            });
-            assert!(
-                matches!(result, Err(Error::InvalidInput(message)) if message.contains("尚未实现"))
-            );
-        }
+            })
+            .expect("spec");
+
+        assert_eq!(spec.program, PathBuf::from("pwsh"));
+        assert!(spec.args.contains(&"-File".to_string()), "{:?}", spec.args);
+        assert!(
+            spec.args.contains(&"D:/npm-global/gemini.ps1".to_string()),
+            "{:?}",
+            spec.args
+        );
+    }
+
+    #[test]
+    fn launch_spec_is_rejected_when_gemini_is_not_installed() {
+        let error = GeminiCliAdapter::new(Arc::new(FakeHostProbe::new()), None)
+            .build_launch_spec(LaunchRequest {
+                project_id: None,
+                cwd: String::new(),
+                args: vec![],
+                runtime_target_id: "local".into(),
+            })
+            .expect_err("没装就必须报错");
+
+        assert!(error.to_string().contains("Gemini CLI"), "{error}");
     }
 
     #[test]

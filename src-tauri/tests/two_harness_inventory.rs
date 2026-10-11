@@ -279,6 +279,12 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
     assert!(claude.terminal, "claude terminal 已有真机 GUI 往返证据");
     assert!(claude.usage, "claude usage 已有真机逐 key 对账证据");
 
+    // Gemini CLI：headless 真机 spawn + lifecycle（spike / real_gemini_terminal /
+    // gemini_lifecycle S1-S4），GUI 验收见 tests/e2e/README.md
+    let gemini = capabilities("gemini");
+    assert!(gemini.launch, "gemini launch 已有真机证据");
+    assert!(gemini.terminal, "gemini terminal 已有真机 lifecycle 证据");
+
     for (name, value) in [
         ("codex.resume", codex.resume),
         ("codex.replay", codex.replay),
@@ -292,6 +298,13 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("claude.subagents", claude.subagents),
         ("claude.live_state", claude.live_state),
         ("claude.worktree", claude.worktree),
+        ("gemini.usage", gemini.usage),
+        ("gemini.resume", gemini.resume),
+        ("gemini.replay", gemini.replay),
+        ("gemini.tool_calls", gemini.tool_calls),
+        ("gemini.subagents", gemini.subagents),
+        ("gemini.live_state", gemini.live_state),
+        ("gemini.worktree", gemini.worktree),
     ] {
         assert!(!value, "{name} 尚未验收，不得为 true");
     }

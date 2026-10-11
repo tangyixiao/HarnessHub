@@ -4,14 +4,21 @@ use harness_hub_lib::harness::adapter::HarnessCapabilities;
 use harness_hub_lib::runtime::local::LOCAL_TARGET_ID;
 
 #[test]
-fn the_real_machine_detects_gemini_without_claiming_runtime_support() {
+fn the_real_machine_detects_gemini_with_terminal_lifecycle_capabilities() {
     let summary = build_harness_registry()
         .summaries(LOCAL_TARGET_ID)
         .into_iter()
         .find(|summary| summary.id == "gemini")
         .expect("Gemini 已注册");
     assert_eq!(summary.installation_id.as_deref(), Some("gemini@local"));
-    assert_eq!(summary.capabilities, HarnessCapabilities::default());
+    // launch / terminal 由 headless 真机 lifecycle 证据支撑（ADR-0005 的静态事实，
+    // 与本机是否装了 Gemini 无关）；usage 与其余能力仍未验收。
+    let expected = HarnessCapabilities {
+        launch: true,
+        terminal: true,
+        ..HarnessCapabilities::default()
+    };
+    assert_eq!(summary.capabilities, expected);
     if !summary.installed {
         eprintln!("SKIP: Gemini CLI 不在本机 PATH 上；不算真机检测通过");
         return;
@@ -31,5 +38,8 @@ fn the_real_machine_detects_gemini_without_claiming_runtime_support() {
         );
     }
     assert!(version.chars().next().is_some_and(|ch| ch.is_ascii_digit()));
-    eprintln!("Gemini: installed=true binary={binary} version={version} data={:?}; capabilities=all false", summary.data_paths);
+    eprintln!(
+        "Gemini: installed=true binary={binary} version={version} data={:?}; capabilities=launch+terminal",
+        summary.data_paths
+    );
 }

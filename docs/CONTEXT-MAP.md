@@ -38,7 +38,8 @@
 
 Gemini 检测入口：`src-tauri/src/harness/adapters/gemini_cli.rs`；组合根在 `lib.rs` 注入
 `GEMINI_CLI_HOME`。共享 IPC fixture 在 `fixtures/gemini/`，真机检测测试为
-`src-tauri/tests/gemini_detection.rs`。Terminal 按 capability 过滤检测阶段适配器。
+`src-tauri/tests/gemini_detection.rs`；终端生命周期证据为 `gemini_pty_spike.rs`、
+`real_gemini_terminal.rs`、`gemini_lifecycle.rs`。Terminal 按 capability 过滤检测阶段适配器。
 
 ```text
 src/features/*  →  src/components/*  →  src/lib/*

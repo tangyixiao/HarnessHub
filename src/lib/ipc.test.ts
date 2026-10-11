@@ -150,10 +150,22 @@ const CODEX_PAYLOAD = {
 };
 
 describe('normalizeHarnessSummary', () => {
-  it('Gemini detection 使用与 Rust 相同的 fixture，未实现能力保持 false', () => {
+  it('Gemini fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
     expect(normalizeHarnessSummary(geminiSummary)).toEqual(geminiSummary);
+  });
+  it('字段残缺的 payload 补全 false 安全默认值，不渲染假支持', () => {
     const incomplete = normalizeHarnessSummary({ id: 'gemini', installed: true });
-    expect(incomplete?.capabilities).toEqual(geminiSummary.capabilities);
+    expect(incomplete?.capabilities).toEqual({
+      launch: false,
+      terminal: false,
+      resume: false,
+      usage: false,
+      replay: false,
+      toolCalls: false,
+      subagents: false,
+      liveState: false,
+      worktree: false,
+    });
     expect(incomplete?.installationId).toBeNull();
   });
   it('保留合法 payload 的全部字段', () => {
