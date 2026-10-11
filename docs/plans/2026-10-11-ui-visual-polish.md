@@ -62,3 +62,16 @@
   `a_job_contains_the_child_and_its_descendants` 偶发失败 —— job 活跃进程计数
   3≠2 的环境瞬态，单测与全量复跑均通过）；v2 截图 `ui-v2-*.png`。
 - 提交 + PR + 合并。
+
+## 第三轮：Harness 身份色 + 时间线 hover（ui/harness-identity-colors）
+
+- TDD 新增 `src/lib/harness-colors.ts` + 测试（3 条）：已知 id（codex/claude/
+  gemini/zcode/opencode）手工固定色相（220/55/290/160/130），同一 id 永远同色；
+  未知 id 一律中性灰，不猜色相。身份色是**次级编码** —— 名称永远并行显示
+  （符合研究依据里「先文字后颜色」的规则）。
+- 应用：Dashboard「Harness 分布」行首加身份色点（Model/Project 分布保持中性）；
+  Sessions 与 Harnesses 的首字母头像按身份色着色；时间线行加 `title` hover
+  明细（渐进披露）。
+- 门禁全绿：`pnpm test` 133（+3）、format / lint（0 errors）/ typecheck /
+  build / diff --check；Rust 未触碰。v3 截图 `ui-v3-*.png`。
+- 提交 + PR + 合并。

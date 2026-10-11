@@ -1,6 +1,8 @@
 import { CircleDollarSign, History, RefreshCw, SquareTerminal, Zap } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
+import { harnessIdentity } from '@/lib/harness-colors';
+
 import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
@@ -204,7 +206,11 @@ export function DashboardPage() {
           {summary && summary.timeline.length > 0 ? (
             <ul className="mt-4 space-y-2.5 text-xs">
               {summary.timeline.slice(-14).map((bucket) => (
-                <li key={bucket.day} className="flex items-center gap-3">
+                <li
+                  key={bucket.day}
+                  className="flex items-center gap-3"
+                  title={`${bucket.day} · ${formatTokens(bucket.totalTokens)} tokens · ${formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}`}
+                >
                   <span className="w-24 shrink-0 font-mono text-[11px] text-content-muted">
                     {bucket.day}
                   </span>
@@ -235,6 +241,7 @@ export function DashboardPage() {
           description="按上报的 agent 分组（分母是全部事件）。"
           buckets={summary?.byHarness ?? []}
           emptyHint="没有 Harness 维度的数据。"
+          identity="harness"
         />
 
         <BreakdownCard
@@ -273,11 +280,14 @@ function BreakdownCard({
   description,
   buckets,
   emptyHint,
+  identity,
 }: {
   title: string;
   description: string;
   buckets: UsageBucket[];
   emptyHint: string;
+  /** "harness" = 用 Harness 身份色作次级编码；其余维度保持中性 */
+  identity?: 'harness';
 }) {
   return (
     <Card>
@@ -293,22 +303,38 @@ function BreakdownCard({
             </tr>
           </thead>
           <tbody className="divide-y divide-border-subtle/60">
-            {buckets.slice(0, 8).map((bucket) => (
-              <tr key={bucket.key} className="transition-colors duration-150 hover:bg-white/[0.03]">
-                <td
-                  className="truncate py-2 pr-2 font-medium text-content-primary"
-                  title={bucket.key}
+            {buckets.slice(0, 8).map((bucket) => {
+              const tone = identity === 'harness' ? harnessIdentity(bucket.key) : null;
+
+              return (
+                <tr
+                  key={bucket.key}
+                  className="transition-colors duration-150 hover:bg-white/[0.03]"
                 >
-                  {bucket.key}
-                </td>
-                <td className="py-2 text-right tabular-nums text-content-secondary">
-                  {formatTokens(bucket.totalTokens)}
-                </td>
-                <td className="py-2 text-right tabular-nums text-content-muted">
-                  {formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}
-                </td>
-              </tr>
-            ))}
+                  <td
+                    className="truncate py-2 pr-2 font-medium text-content-primary"
+                    title={bucket.key}
+                  >
+                    <span className="flex items-center gap-2">
+                      {tone ? (
+                        <span
+                          aria-hidden
+                          className="size-2 shrink-0 rounded-full"
+                          style={{ backgroundColor: tone.fg }}
+                        />
+                      ) : null}
+                      <span className="truncate">{bucket.key}</span>
+                    </span>
+                  </td>
+                  <td className="py-2 text-right tabular-nums text-content-secondary">
+                    {formatTokens(bucket.totalTokens)}
+                  </td>
+                  <td className="py-2 text-right tabular-nums text-content-muted">
+                    {formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       ) : (

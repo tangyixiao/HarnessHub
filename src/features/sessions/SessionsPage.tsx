@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
+import { harnessIdentity } from '@/lib/harness-colors';
 import { cn } from '@/lib/utils';
 import {
   NOT_IN_TAURI,
@@ -167,6 +168,8 @@ export function SessionsPage() {
 }
 
 function SessionCard({ session }: { session: SessionRecord }) {
+  const identity = harnessIdentity(session.harnessId ?? '');
+
   return (
     <section aria-label={session.hubSessionId}>
       <Card>
@@ -174,7 +177,12 @@ function SessionCard({ session }: { session: SessionRecord }) {
           <div className="flex min-w-0 items-center gap-2.5">
             <span
               aria-hidden
-              className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-sm font-semibold uppercase text-content-secondary ring-1 ring-white/[0.06]"
+              className="flex size-8 shrink-0 items-center justify-center rounded-md border text-sm font-semibold uppercase"
+              style={{
+                color: identity.fg,
+                backgroundColor: identity.bg,
+                borderColor: identity.ring,
+              }}
             >
               {(session.harnessId || '?').slice(0, 1)}
             </span>
