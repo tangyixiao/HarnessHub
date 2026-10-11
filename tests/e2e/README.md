@@ -1129,3 +1129,53 @@ pnpm rust:clippy    Finished `dev` profile                                      
 将隔离 marker 当作真实 Codex prompt 提交；测试仍验证 Codex 在输入与 resize 之后保持
 `running`、PID 存活。「继续产出」这一步只打印诊断值（`[5 diagnostic]` / `codex_alive_output`），
 **没有**写成断言，因此此处不把它当作业已断言的结论。
+
+## 2026-10-11 — Gemini CLI 终端生命周期（headless 全通过；GUI 机制通过、TUI 渲染被环境阻塞）
+
+计划：`docs/plans/2026-10-11-gemini-terminal-lifecycle.md`；分支 `codex/gemini-detection`。
+
+### spike / headless 真机：通过
+
+```text
+cargo test --test gemini_pty_spike -- --nocapture      1 passed（五段观察，见计划「实测结论」）
+cargo test --test real_gemini_terminal -- --nocapture  2 passed
+  [1] spawn ok: session=427b52df-… pid=30408
+  [2][3] bytes=2820 dsr_answered=1 bracketed_paste=1
+  [4] 方向键 ↓ 新字节 = 10622（对话框重绘，headless 输入→输出往返）
+  [5] resize ok；[6] kill ok: reason=UserKilled exit_code=1
+cargo test --test gemini_lifecycle -- --nocapture      4 passed
+  S1 user_killed exit_code=1；S2 natural_exit exit_code=0（Ctrl+C×2）
+  S3 host_shutdown；S4 lost（幂等）；全程零 ghost running
+```
+
+### GUI（真实 Terminal 页面，当前源码构建，CDP 驱动真实点击/按键）：机制通过、TUI 渲染阻塞
+
+```text
+下拉框    gemini@local|Gemini CLI 出现（能力翻转前被过滤，翻转后自动进入）
+选择/cwd  UI → IPC → LaunchSpec → PTY：DB cwd = D:\HarnessHub-E2E\gemini-terminal
+启动      运行中 · Gemini CLI · pid 13688 · session 908353c7-b3da-4859-b7e2-02d883dff177
+TUI       xterm 空白：shim `cmd.exe /c D:\npm-global\gemini.cmd`（pid 13688）停在
+          node 启动前，无输出、不退出
+结束会话  按钮点击 → UI「已结束 · 用户主动结束 · 退出码 1」
+DB        status=exited, termination_reason=user_killed, exit_code=1, cwd 正确
+          （dbdump.py 只读快照，原始截图 gemini-gui-1~7 在 D:\HarnessHub-E2E）
+```
+
+**阻塞归因：环境现象，非 Gemini 缺陷。** 同一构建、同一页面、同一驱动的
+**Claude 对照**同样空白：`cmd.exe /c D:\npm-global\claude.cmd`（pid 12040）
+无 node 子进程、无输出；与 2026-09-27/28 记录的空白终端现象同型（当时同样
+未归因产品缺陷）。claude 的两个 GUI 会话在 DB 里分别留下 `user_killed` 与
+（强杀应用后）`lost` 收敛记录，收敛路径正常。今天三轮（Start-Process 直启 exe、
+`pnpm tauri dev`、再次直启）均复现；09-29 成功轮与本轮之间的机器差异
+（WebView2 运行时升级至 154、ZCode 宿主会话）未逐一排查，留待健康环境复核。
+
+### 能力翻转的依据（ADR-0005 裁决）
+
+`launch` / `terminal` 翻 true 的证据 = spike + headless lifecycle（全链路）+
+GUI 机制（下拉、选择、cwd 传递、启动、终止按钮、状态机、DB 收敛）。
+TUI 渲染阻塞是跨 Harness 环境故障（Claude 同型复现），按 ADR-0005 规则 2
+只影响 readiness，不得回写 capability。本机 Gemini 认证另被 Google 服务端
+拒绝（「client is no longer supported … migrate to Antigravity」，0.63.0 实测），
+chat 级往返证据在认证恢复 + 健康环境 GUI 轮后补强。
+若审阅者不认可此裁决，回滚 `gemini_cli.rs` 的 `capabilities()` 与
+`fixtures/gemini/summary.json` 即可，其余证据不受影响。

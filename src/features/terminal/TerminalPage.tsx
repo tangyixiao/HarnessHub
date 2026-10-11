@@ -218,7 +218,13 @@ export function TerminalPage() {
       }
 
       // **不得按 Harness 名字分支**：只认 DTO（installed / installationId / displayName）。
-      const choices = listed.data.filter((item) => item.installed && item.installationId !== null);
+      const choices = listed.data.filter(
+        (item) =>
+          item.installed &&
+          item.installationId !== null &&
+          item.capabilities.launch &&
+          item.capabilities.terminal,
+      );
       setInstalledHarnesses(choices);
 
       if (choices.length === 0) {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import geminiSummary from '../../fixtures/gemini/summary.json';
 
 import {
   NOT_IN_TAURI,
@@ -149,6 +150,24 @@ const CODEX_PAYLOAD = {
 };
 
 describe('normalizeHarnessSummary', () => {
+  it('Gemini fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
+    expect(normalizeHarnessSummary(geminiSummary)).toEqual(geminiSummary);
+  });
+  it('字段残缺的 payload 补全 false 安全默认值，不渲染假支持', () => {
+    const incomplete = normalizeHarnessSummary({ id: 'gemini', installed: true });
+    expect(incomplete?.capabilities).toEqual({
+      launch: false,
+      terminal: false,
+      resume: false,
+      usage: false,
+      replay: false,
+      toolCalls: false,
+      subagents: false,
+      liveState: false,
+      worktree: false,
+    });
+    expect(incomplete?.installationId).toBeNull();
+  });
   it('保留合法 payload 的全部字段', () => {
     expect(normalizeHarnessSummary(CODEX_PAYLOAD)).toEqual(CODEX_PAYLOAD);
   });
