@@ -30,7 +30,7 @@ export function PlaceholderCard({
       <div className="flex items-center gap-2.5">
         <span
           aria-hidden
-          className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-surface-overlay text-content-muted ring-1 ring-border-subtle"
+          className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-content-muted ring-1 ring-white/[0.06]"
         >
           <Icon className="size-4" />
         </span>

@@ -292,7 +292,7 @@ export function TerminalPage() {
             启动的 Harness
             <select
               aria-label="启动的 Harness"
-              className="rounded-lg border border-border-subtle bg-surface-base/60 px-2.5 py-1.5 text-xs text-content-primary transition-colors focus:border-accent/60 focus:outline-none"
+              className="rounded-md border border-border-subtle bg-white/[0.03] px-2.5 py-1.5 text-xs text-content-primary transition-colors duration-150 focus:border-accent/60 focus:outline-none"
               value={selectedInstallationId ?? ''}
               disabled={busy}
               onChange={(event) => setSelectedInstallationId(event.target.value)}
@@ -309,7 +309,7 @@ export function TerminalPage() {
             工作目录（可选）
             <input
               aria-label="工作目录（可选）"
-              className="w-80 rounded-lg border border-border-subtle bg-surface-base/60 px-2.5 py-1.5 font-mono text-xs text-content-primary transition-colors placeholder:text-content-muted/60 focus:border-accent/60 focus:outline-none"
+              className="w-80 rounded-md border border-border-subtle bg-white/[0.03] px-2.5 py-1.5 font-mono text-xs text-content-primary transition-colors duration-150 placeholder:text-content-muted/60 focus:border-accent/60 focus:outline-none"
               placeholder="留空 = 不指定（sessions.cwd 记为 NULL）"
               value={selectedCwd}
               disabled={busy}
@@ -322,7 +322,7 @@ export function TerminalPage() {
           </Button>
 
           {phase.kind === 'running' ? (
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/12 px-2.5 py-1.5 font-mono text-[11px] text-accent">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/12 px-2.5 py-1.5 font-mono text-[11px] text-accent">
               <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-accent" />
               运行中 · {activeHarness?.displayName ?? ''}
               {activeCwd ? ` · cwd ${activeCwd}` : ''}
@@ -331,7 +331,7 @@ export function TerminalPage() {
             </span>
           ) : null}
           {phase.kind === 'ended' ? (
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface-overlay/50 px-2.5 py-1.5 font-mono text-[11px] text-content-muted">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-white/[0.03] px-2.5 py-1.5 font-mono text-[11px] text-content-muted">
               <span aria-hidden className="size-1.5 rounded-full bg-content-muted" />
               已结束 · {phase.status}
             </span>

@@ -103,14 +103,14 @@ export function DashboardPage() {
 
       {/* 范围选择器：分段控件（仍是 Button + aria-pressed，行为不变） */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="inline-flex items-center gap-0.5 rounded-lg border border-border-subtle bg-surface-raised/60 p-1">
+        <div className="inline-flex items-center gap-0.5 rounded-md border border-border-subtle bg-white/[0.03] p-0.5">
           {RANGES.map((item) => (
             <Button
               key={item.kind}
               size="sm"
               variant={item.kind === range ? 'secondary' : 'ghost'}
               aria-pressed={item.kind === range}
-              className={item.kind === range ? 'bg-surface-overlay shadow-sm' : ''}
+              className={item.kind === range ? 'bg-white/[0.08] text-content-primary' : ''}
               onClick={() => setRange(item.kind)}
             >
               {item.label}
@@ -119,7 +119,7 @@ export function DashboardPage() {
         </div>
         <span className="flex-1" />
         <Button variant="secondary" onClick={() => void onRefreshUsage()} disabled={refreshing}>
-          <RefreshCw aria-hidden className={refreshing ? 'size-4 animate-spin' : 'size-4'} />
+          <RefreshCw aria-hidden className={refreshing ? 'size-3.5 animate-spin' : 'size-3.5'} />
           {refreshing ? '正在读取用量…' : '刷新用量'}
         </Button>
       </div>
@@ -210,7 +210,7 @@ export function DashboardPage() {
                   </span>
                   <span className="flex-1">
                     <span
-                      className="block h-2 rounded-full bg-gradient-to-r from-accent-strong to-accent"
+                      className="block h-1.5 rounded-full bg-accent/85"
                       style={{
                         width: `${barWidth(bucket.totalTokens, summary.totals.totalTokens)}%`,
                       }}
@@ -294,11 +294,16 @@ function BreakdownCard({
           </thead>
           <tbody className="divide-y divide-border-subtle/60">
             {buckets.slice(0, 8).map((bucket) => (
-              <tr key={bucket.key} className="transition-colors hover:bg-surface-overlay/30">
-                <td className="truncate py-2 pr-2 font-medium" title={bucket.key}>
+              <tr key={bucket.key} className="transition-colors duration-150 hover:bg-white/[0.03]">
+                <td
+                  className="truncate py-2 pr-2 font-medium text-content-primary"
+                  title={bucket.key}
+                >
                   {bucket.key}
                 </td>
-                <td className="py-2 text-right tabular-nums">{formatTokens(bucket.totalTokens)}</td>
+                <td className="py-2 text-right tabular-nums text-content-secondary">
+                  {formatTokens(bucket.totalTokens)}
+                </td>
                 <td className="py-2 text-right tabular-nums text-content-muted">
                   {formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}
                 </td>
@@ -329,15 +334,16 @@ function KpiCard({
   return (
     <Card data-testid={testId}>
       <div className="flex items-start justify-between gap-2">
-        <CardTitle>{title}</CardTitle>
+        <CardTitle className="text-content-secondary">{title}</CardTitle>
+        {/* 中性章：accent 留给交互态，不装饰 */}
         <span
           aria-hidden
-          className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-accent ring-1 ring-accent/20"
+          className="flex size-7 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-content-muted ring-1 ring-white/[0.06]"
         >
-          <Icon className="size-4" />
+          <Icon className="size-3.5" />
         </span>
       </div>
-      <p className="mt-1.5 text-[26px] font-semibold leading-8 tracking-tight text-content-primary tabular-nums">
+      <p className="mt-1.5 text-[26px] font-semibold leading-8 tracking-[-0.02em] text-content-primary tabular-nums">
         {value}
       </p>
       {hint ? <p className="mt-1.5 text-[11px] leading-4 text-content-muted">{hint}</p> : null}
@@ -347,7 +353,7 @@ function KpiCard({
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-border-subtle/70 bg-surface-base/50 px-3 py-2.5">
+    <div className="rounded-md border border-border-subtle/60 bg-white/[0.02] px-3 py-2.5">
       <dt className="text-[11px] text-content-muted">{label}</dt>
       <dd className="mt-0.5 truncate font-medium text-content-primary tabular-nums" title={value}>
         {value}

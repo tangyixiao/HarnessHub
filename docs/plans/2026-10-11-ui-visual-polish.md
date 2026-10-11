@@ -41,6 +41,24 @@
   文案 / aria-label / testid / 路由 / IPC 调用零变更。
 - Task 4：门禁全绿（2026-10-11 实测）：format / rust fmt / lint（0 errors /
   4 既有 warnings）/ typecheck / `pnpm test`（130）/ `rust:test`（20 个 binary
-  全 ok，0 失败）/ python（OK）/ build（4.06s）/ clippy / `git diff --check`。
-  before/after 七页截图：`D:\HarnessHub-E2E\ui-before-*.png` /
-  `ui-after-*.png`（仓库外）。
+  全 ok，0 失败；期间 S2 暴露一次偶发超时 —— Ctrl+C 早于 Ink 初始化被吞，已按
+  「等画面静默 + 补发一对」修固并复测通过）/ python（OK）/ build / clippy /
+  `git diff --check`。before/after 七页截图：`D:\HarnessHub-E2E\ui-before-*.png`
+  / `ui-after-*.png`（仓库外）。PR #6 已合并（f8dcd55）。
+
+## 第二轮：依据设计规范的修订（ui/linear-refinement）
+
+按用户要求先研究再改。研究依据与修订决策见 spec 的「研究依据」与「设计决策
+（修订版）」两节；要点：
+
+- accent 从装饰性使用（KPI 章 / 头像全蓝）收敛回交互态；KPI 图标章与 Harness /
+  Session 头像改为中性白透明章。
+- 卡片从「投影 + 内高光」改为 Linear 式「hairline 描边 + 亮度分层」；表面
+  令牌更暗、降饱和；新增 `content-secondary` 文字层级。
+- accent 从蓝 250° 微移至 indigo 268°（Linear #5e6ad2 同族）；主按钮改
+  accent 实底 + 白字 + hover 提亮；ghost/secondary 白透明底。
+- 圆角整体降档：按钮/输入 6px、卡片 8px、药丸 full；时间线改纯色 accent 条。
+- 门禁复跑全绿（`pnpm test` 130；首轮 `rust:test` 出现一次
+  `a_job_contains_the_child_and_its_descendants` 偶发失败 —— job 活跃进程计数
+  3≠2 的环境瞬态，单测与全量复跑均通过）；v2 截图 `ui-v2-*.png`。
+- 提交 + PR + 合并。
