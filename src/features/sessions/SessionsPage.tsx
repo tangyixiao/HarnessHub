@@ -20,11 +20,11 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 };
 
 const STATUS_STYLE: Record<SessionStatus, string> = {
-  created: 'border-signal-warn/40 bg-signal-warn/15 text-signal-warn',
-  running: 'border-accent/40 bg-accent/15 text-accent',
-  exited: 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok',
-  failed: 'border-signal-error/40 bg-signal-error/15 text-signal-error',
-  unknown: 'border-border-subtle bg-surface-overlay/40 text-content-muted',
+  created: 'border-signal-warn/30 bg-signal-warn/12 text-signal-warn',
+  running: 'border-accent/30 bg-accent/12 text-accent',
+  exited: 'border-signal-ok/30 bg-signal-ok/12 text-signal-ok',
+  failed: 'border-signal-error/30 bg-signal-error/12 text-signal-error',
+  unknown: 'border-border-subtle bg-white/[0.03] text-content-muted',
 };
 
 /** 终态着色的语义点：绿色=正常结束、红=失败、灰=未知，运行中用 accent。 */
@@ -174,7 +174,7 @@ function SessionCard({ session }: { session: SessionRecord }) {
           <div className="flex min-w-0 items-center gap-2.5">
             <span
               aria-hidden
-              className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-surface-overlay text-sm font-semibold uppercase text-content-muted ring-1 ring-border-subtle"
+              className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-sm font-semibold uppercase text-content-secondary ring-1 ring-white/[0.06]"
             >
               {(session.harnessId || '?').slice(0, 1)}
             </span>
@@ -187,7 +187,7 @@ function SessionCard({ session }: { session: SessionRecord }) {
           </div>
           <span
             className={cn(
-              'flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium',
+              'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium',
               STATUS_STYLE[session.status],
             )}
           >

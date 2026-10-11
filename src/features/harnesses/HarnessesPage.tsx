@@ -182,7 +182,7 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
           <div className="flex items-center gap-2.5">
             <span
               aria-hidden
-              className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-sm font-semibold uppercase text-accent ring-1 ring-accent/25"
+              className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-sm font-semibold uppercase text-content-secondary ring-1 ring-white/[0.06]"
             >
               {summary.displayName.slice(0, 1)}
             </span>
@@ -216,9 +216,9 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
                   title={supported ? `${label}：已实现` : `${label}：当前未支持（实现尚未落地）`}
                   aria-label={`${label}：${supported ? '已实现' : '当前未支持'}`}
                   className={cn(
-                    'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors',
+                    'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors duration-150',
                     supported
-                      ? 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok'
+                      ? 'border-signal-ok/30 bg-signal-ok/12 text-signal-ok'
                       : 'border-border-subtle text-content-muted',
                   )}
                 >
@@ -238,10 +238,10 @@ function StatusPill({ installed }: { installed: boolean }) {
   return (
     <span
       className={cn(
-        'flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium',
+        'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium',
         installed
-          ? 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok'
-          : 'border-signal-warn/40 bg-signal-warn/15 text-signal-warn',
+          ? 'border-signal-ok/30 bg-signal-ok/12 text-signal-ok'
+          : 'border-signal-warn/30 bg-signal-warn/12 text-signal-warn',
       )}
     >
       <span
