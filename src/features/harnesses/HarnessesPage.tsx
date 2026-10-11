@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -119,7 +120,10 @@ export function HarnessesPage() {
 
       {state.kind === 'loading' ? (
         <Card>
-          <CardTitle>正在检测本机 Harness…</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Loader2 aria-hidden className="size-4 animate-spin text-accent" />
+            正在检测本机 Harness…
+          </CardTitle>
           <CardDescription>
             扫描 PATH 与已知数据目录，只读访问，不修改任何外部文件。
           </CardDescription>
@@ -175,9 +179,17 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
     <section aria-label={summary.displayName}>
       <Card>
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <CardTitle>{summary.displayName}</CardTitle>
-            <CardDescription>Harness ID：{summary.id}</CardDescription>
+          <div className="flex items-center gap-2.5">
+            <span
+              aria-hidden
+              className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-sm font-semibold uppercase text-accent ring-1 ring-accent/25"
+            >
+              {summary.displayName.slice(0, 1)}
+            </span>
+            <div>
+              <CardTitle>{summary.displayName}</CardTitle>
+              <CardDescription>Harness ID：{summary.id}</CardDescription>
+            </div>
           </div>
           <StatusPill installed={summary.installed} />
         </div>
@@ -204,9 +216,9 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
                   title={supported ? `${label}：已实现` : `${label}：当前未支持（实现尚未落地）`}
                   aria-label={`${label}：${supported ? '已实现' : '当前未支持'}`}
                   className={cn(
-                    'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]',
+                    'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors',
                     supported
-                      ? 'border-signal-ok/40 bg-signal-ok/10 text-content-primary'
+                      ? 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok'
                       : 'border-border-subtle text-content-muted',
                   )}
                 >
@@ -226,12 +238,16 @@ function StatusPill({ installed }: { installed: boolean }) {
   return (
     <span
       className={cn(
-        'shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium',
+        'flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium',
         installed
-          ? 'border-signal-ok/40 bg-signal-ok/10 text-signal-ok'
-          : 'border-signal-warn/40 bg-signal-warn/10 text-signal-warn',
+          ? 'border-signal-ok/40 bg-signal-ok/15 text-signal-ok'
+          : 'border-signal-warn/40 bg-signal-warn/15 text-signal-warn',
       )}
     >
+      <span
+        aria-hidden
+        className={cn('size-1.5 rounded-full', installed ? 'bg-signal-ok' : 'bg-signal-warn')}
+      />
       {installed ? '已安装' : '不可用'}
     </span>
   );

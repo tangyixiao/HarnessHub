@@ -1,3 +1,4 @@
+import { CircleDollarSign, History, RefreshCw, SquareTerminal, Zap } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -100,19 +101,25 @@ export function DashboardPage() {
         description="Token / 成本 / 会话数全部来自本机 SQLite；渲染时不调用 ccusage。"
       />
 
+      {/* 范围选择器：分段控件（仍是 Button + aria-pressed，行为不变） */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {RANGES.map((item) => (
-          <Button
-            key={item.kind}
-            variant={item.kind === range ? 'primary' : 'ghost'}
-            aria-pressed={item.kind === range}
-            onClick={() => setRange(item.kind)}
-          >
-            {item.label}
-          </Button>
-        ))}
+        <div className="inline-flex items-center gap-0.5 rounded-lg border border-border-subtle bg-surface-raised/60 p-1">
+          {RANGES.map((item) => (
+            <Button
+              key={item.kind}
+              size="sm"
+              variant={item.kind === range ? 'secondary' : 'ghost'}
+              aria-pressed={item.kind === range}
+              className={item.kind === range ? 'bg-surface-overlay shadow-sm' : ''}
+              onClick={() => setRange(item.kind)}
+            >
+              {item.label}
+            </Button>
+          ))}
+        </div>
         <span className="flex-1" />
         <Button variant="secondary" onClick={() => void onRefreshUsage()} disabled={refreshing}>
+          <RefreshCw aria-hidden className={refreshing ? 'size-4 animate-spin' : 'size-4'} />
           {refreshing ? '正在读取用量…' : '刷新用量'}
         </Button>
       </div>
@@ -135,6 +142,7 @@ export function DashboardPage() {
         <KpiCard
           testId="kpi-tokens"
           title="Tokens"
+          icon={Zap}
           value={totals ? formatTokens(totals.totalTokens) : '—'}
           hint={
             totals
@@ -145,6 +153,7 @@ export function DashboardPage() {
         <KpiCard
           testId="kpi-cost"
           title="Known Cost"
+          icon={CircleDollarSign}
           value={summary ? formatCost(summary.costMicrounits, summary.costIsLowerBound) : '—'}
           hint={
             summary?.costIsLowerBound
@@ -155,12 +164,14 @@ export function DashboardPage() {
         <KpiCard
           testId="kpi-usage-sessions"
           title="Usage Sessions"
+          icon={History}
           value={summary ? String(summary.usageSessions) : '—'}
           hint="来自外部用量历史的会话（不代表 Harness Hub 启动过）"
         />
         <KpiCard
           testId="kpi-managed-sessions"
           title="Managed Sessions"
+          icon={SquareTerminal}
           value={summary ? String(summary.managedSessions) : '—'}
           hint="Harness Hub 自己启动并管理过的会话"
         />
@@ -191,22 +202,24 @@ export function DashboardPage() {
             {summary?.range.timezoneOffsetMinutes ?? 0} 分钟）聚合。
           </CardDescription>
           {summary && summary.timeline.length > 0 ? (
-            <ul className="mt-4 space-y-2 text-xs">
+            <ul className="mt-4 space-y-2.5 text-xs">
               {summary.timeline.slice(-14).map((bucket) => (
                 <li key={bucket.day} className="flex items-center gap-3">
-                  <span className="w-24 shrink-0 text-content-muted">{bucket.day}</span>
+                  <span className="w-24 shrink-0 font-mono text-[11px] text-content-muted">
+                    {bucket.day}
+                  </span>
                   <span className="flex-1">
                     <span
-                      className="block h-2 rounded bg-accent"
+                      className="block h-2 rounded-full bg-gradient-to-r from-accent-strong to-accent"
                       style={{
                         width: `${barWidth(bucket.totalTokens, summary.totals.totalTokens)}%`,
                       }}
                     />
                   </span>
-                  <span className="w-28 shrink-0 text-right">
+                  <span className="w-28 shrink-0 text-right tabular-nums">
                     {formatTokens(bucket.totalTokens)}
                   </span>
-                  <span className="w-24 shrink-0 text-right">
+                  <span className="w-24 shrink-0 text-right tabular-nums text-content-muted">
                     {formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}
                   </span>
                 </li>
@@ -244,7 +257,7 @@ export function DashboardPage() {
         <CardDescription>
           数据全部来自本机 SQLite；上面的用量数字不依赖任何外部进程。
         </CardDescription>
-        <dl className="mt-4 grid grid-cols-2 gap-3 text-xs lg:grid-cols-4">
+        <dl className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Metric label="应用版本" value={app?.version ?? '—'} />
           <Metric label="Schema 版本" value={db ? String(db.schemaVersion) : '—'} />
           <Metric label="数据表数量" value={db ? String(db.tableCount) : '—'} />
@@ -273,20 +286,20 @@ function BreakdownCard({
       {buckets.length > 0 ? (
         <table className="mt-4 w-full text-xs">
           <thead>
-            <tr className="text-left text-content-muted">
-              <th className="font-normal">名称</th>
-              <th className="text-right font-normal">Tokens</th>
-              <th className="text-right font-normal">成本</th>
+            <tr className="text-left text-[11px] uppercase tracking-wider text-content-muted">
+              <th className="pb-2 font-normal">名称</th>
+              <th className="pb-2 text-right font-normal">Tokens</th>
+              <th className="pb-2 text-right font-normal">成本</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-border-subtle/60">
             {buckets.slice(0, 8).map((bucket) => (
-              <tr key={bucket.key}>
-                <td className="truncate pr-2" title={bucket.key}>
+              <tr key={bucket.key} className="transition-colors hover:bg-surface-overlay/30">
+                <td className="truncate py-2 pr-2 font-medium" title={bucket.key}>
                   {bucket.key}
                 </td>
-                <td className="text-right">{formatTokens(bucket.totalTokens)}</td>
-                <td className="text-right">
+                <td className="py-2 text-right tabular-nums">{formatTokens(bucket.totalTokens)}</td>
+                <td className="py-2 text-right tabular-nums text-content-muted">
                   {formatCost(bucket.costMicrounits, bucket.costIsLowerBound)}
                 </td>
               </tr>
@@ -305,26 +318,40 @@ function KpiCard({
   value,
   hint,
   testId,
+  icon: Icon,
 }: {
   title: string;
   value: string;
   hint?: string;
   testId: string;
+  icon: typeof Zap;
 }) {
   return (
     <Card data-testid={testId}>
-      <CardTitle>{title}</CardTitle>
-      <p className="mt-2 text-2xl font-semibold text-content-primary">{value}</p>
-      {hint ? <p className="mt-1 text-[11px] text-content-muted">{hint}</p> : null}
+      <div className="flex items-start justify-between gap-2">
+        <CardTitle>{title}</CardTitle>
+        <span
+          aria-hidden
+          className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent/12 text-accent ring-1 ring-accent/20"
+        >
+          <Icon className="size-4" />
+        </span>
+      </div>
+      <p className="mt-1.5 text-[26px] font-semibold leading-8 tracking-tight text-content-primary tabular-nums">
+        {value}
+      </p>
+      {hint ? <p className="mt-1.5 text-[11px] leading-4 text-content-muted">{hint}</p> : null}
     </Card>
   );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <dt className="text-content-muted">{label}</dt>
-      <dd className="mt-0.5 font-medium text-content-primary">{value}</dd>
+    <div className="rounded-lg border border-border-subtle/70 bg-surface-base/50 px-3 py-2.5">
+      <dt className="text-[11px] text-content-muted">{label}</dt>
+      <dd className="mt-0.5 truncate font-medium text-content-primary tabular-nums" title={value}>
+        {value}
+      </dd>
     </div>
   );
 }
