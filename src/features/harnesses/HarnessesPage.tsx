@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
+import { harnessIdentity } from '@/lib/harness-colors';
 import { cn } from '@/lib/utils';
 import {
   NOT_IN_TAURI,
@@ -175,6 +176,8 @@ export function HarnessesPage() {
 }
 
 function HarnessCard({ summary }: { summary: HarnessSummary }) {
+  const identity = harnessIdentity(summary.id);
+
   return (
     <section aria-label={summary.displayName}>
       <Card>
@@ -182,7 +185,12 @@ function HarnessCard({ summary }: { summary: HarnessSummary }) {
           <div className="flex items-center gap-2.5">
             <span
               aria-hidden
-              className="flex size-8 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-sm font-semibold uppercase text-content-secondary ring-1 ring-white/[0.06]"
+              className="flex size-8 shrink-0 items-center justify-center rounded-md border text-sm font-semibold uppercase"
+              style={{
+                color: identity.fg,
+                backgroundColor: identity.bg,
+                borderColor: identity.ring,
+              }}
             >
               {summary.displayName.slice(0, 1)}
             </span>
