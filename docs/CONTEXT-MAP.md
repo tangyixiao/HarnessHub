@@ -40,6 +40,10 @@ Gemini 检测入口：`src-tauri/src/harness/adapters/gemini_cli.rs`；组合根
 `GEMINI_CLI_HOME`。共享 IPC fixture 在 `fixtures/gemini/`，真机检测测试为
 `src-tauri/tests/gemini_detection.rs`；终端生命周期证据为 `gemini_pty_spike.rs`、
 `real_gemini_terminal.rs`、`gemini_lifecycle.rs`。Terminal 按 capability 过滤检测阶段适配器。
+CodeBuddy 检测入口：`src-tauri/src/harness/adapters/codebuddy.rs`（home 直发现，
+无 env 覆盖）；fixture 在 `fixtures/codebuddy/`，真机测试 `codebuddy_detection.rs`。
+Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
+Harnesses 三处永远同色，未知 id 中性灰）。
 
 ```text
 src/features/*  →  src/components/*  →  src/lib/*

@@ -68,7 +68,10 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
             .collect()
     };
 
-    assert_eq!(ids(&registry), vec!["codex", "claude", "gemini"]);
+    assert_eq!(
+        ids(&registry),
+        vec!["codex", "claude", "gemini", "codebuddy"]
+    );
     assert_eq!(
         ids(&registry),
         ids(&registry),
@@ -76,10 +79,11 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
     );
 
     let summaries = registry.summaries(LOCAL_TARGET_ID);
-    assert_eq!(summaries.len(), 3);
+    assert_eq!(summaries.len(), 4);
     assert_eq!(summaries[0].display_name, "Codex");
     assert_eq!(summaries[1].display_name, "Claude Code");
     assert_eq!(summaries[2].display_name, "Gemini CLI");
+    assert_eq!(summaries[3].display_name, "CodeBuddy");
     // 展示名由适配器声明，注册表只透传（前后端只有一份名字来源）。
     assert_eq!(
         summaries[1].installation_id.as_deref(),
@@ -95,12 +99,16 @@ fn a_cold_database_reconciles_all_registered_harnesses() {
 
     let reconciled = reconcile_with_production_registry(&db);
 
-    assert_eq!(reconciled, vec!["codex", "claude", "gemini"]);
-    assert_eq!(definition_ids(&db), vec!["claude", "codex", "gemini"]);
+    assert_eq!(reconciled, vec!["codex", "claude", "gemini", "codebuddy"]);
+    assert_eq!(
+        definition_ids(&db),
+        vec!["claude", "codebuddy", "codex", "gemini"]
+    );
     assert_eq!(
         installation_ids(&db),
         vec![
             installation_id("claude", LOCAL_TARGET_ID),
+            installation_id("codebuddy", LOCAL_TARGET_ID),
             installation_id("codex", LOCAL_TARGET_ID),
             installation_id("gemini", LOCAL_TARGET_ID)
         ]
@@ -145,12 +153,20 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
     // 现在把其余已注册适配器也同步进来（真实启动时发生的事）。
     reconcile_with_production_registry(&db);
 
-    assert_eq!(definition_ids(&db), vec!["claude", "codex", "gemini"]);
+    assert_eq!(
+        definition_ids(&db),
+        vec!["claude", "codebuddy", "codex", "gemini"]
+    );
     assert_eq!(
         installation_ids(&db),
-        vec!["claude@local", "codex@local", "gemini@local"]
+        vec![
+            "claude@local",
+            "codebuddy@local",
+            "codex@local",
+            "gemini@local"
+        ]
     );
-    assert_eq!(installation_count(&db), 3, "不得重复插入");
+    assert_eq!(installation_count(&db), 4, "不得重复插入");
 
     let after: (Option<String>, String) = db
         .connection()
@@ -168,7 +184,7 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
 
     // 再同步一次：仍然不重复（幂等）。
     reconcile_with_production_registry(&db);
-    assert_eq!(installation_count(&db), 3);
+    assert_eq!(installation_count(&db), 4);
 }
 
 /// 加第二个 Harness **不需要** schema 变更。

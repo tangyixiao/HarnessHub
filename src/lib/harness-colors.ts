@@ -25,6 +25,7 @@ const KNOWN_HUES: Record<string, number> = {
   gemini: 290, // 紫罗兰（Google 系）
   zcode: 160, // 青绿
   opencode: 130, // 草绿
+  codebuddy: 190, // 青蓝（腾讯系），与 codex 220 / zcode 160 错开
 };
 
 const NEUTRAL: Identity = {

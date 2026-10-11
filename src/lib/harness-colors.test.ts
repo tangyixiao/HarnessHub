@@ -4,7 +4,8 @@ import { harnessIdentity } from './harness-colors';
 
 describe('harnessIdentity', () => {
   it('已知 Harness 拿到固定身份色（同一 id 永远同色）', () => {
-    for (const id of ['codex', 'claude', 'gemini', 'zcode', 'opencode']) {
+    const KNOWN = ['codex', 'claude', 'gemini', 'zcode', 'opencode', 'codebuddy'];
+    for (const id of KNOWN) {
       const first = harnessIdentity(id);
       const second = harnessIdentity(id);
       expect(first).toEqual(second);
@@ -12,10 +13,8 @@ describe('harnessIdentity', () => {
       expect(first.fg).toContain('0.115');
     }
     // 不同 Harness 的色相必须不同
-    const hues = ['codex', 'claude', 'gemini', 'zcode', 'opencode'].map(
-      (id) => harnessIdentity(id).fg,
-    );
-    expect(new Set(hues).size).toBe(5);
+    const hues = KNOWN.map((id) => harnessIdentity(id).fg);
+    expect(new Set(hues).size).toBe(6);
   });
 
   it('未知 Harness 返回中性色（不猜色相）', () => {
