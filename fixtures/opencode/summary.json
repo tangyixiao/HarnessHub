@@ -1,0 +1,20 @@
+{
+  "id": "opencode",
+  "displayName": "OpenCode",
+  "installationId": "opencode@local",
+  "installed": true,
+  "binaryPath": "D:/Scoop/shims/opencode.exe",
+  "version": "1.18.23",
+  "capabilities": {
+    "launch": false,
+    "terminal": false,
+    "resume": false,
+    "usage": false,
+    "replay": false,
+    "toolCalls": false,
+    "subagents": false,
+    "liveState": false,
+    "worktree": false
+  },
+  "dataPaths": []
+}

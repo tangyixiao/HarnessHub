@@ -94,6 +94,8 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   本机认证被 Google 拒绝（readiness 边界，ADR-0005），chat 级往返证据待认证恢复后补强。
   CodeBuddy 已完成检测阶段（安装 / 版本 / 数据目录，能力全 false，见
   docs/specs/2026-10-11-codebuddy-detection-design.md）。
-  尚未实现：Gemini Usage、CodeBuddy 生命周期、OpenCode 适配器、Project Registry、
+  OpenCode 已完成检测阶段（安装 / 版本 / 四个 XDG 数据根，能力全 false，见
+  docs/specs/2026-10-12-opencode-detection-design.md）。
+  尚未实现：Gemini Usage、CodeBuddy 与 OpenCode 的生命周期、Project Registry、
   Activity Timeline。
 - 实施计划见 `docs/plans/`。
