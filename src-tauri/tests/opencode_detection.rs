@@ -8,15 +8,21 @@ use harness_hub_lib::harness::adapter::HarnessCapabilities;
 use harness_hub_lib::runtime::local::LOCAL_TARGET_ID;
 
 #[test]
-fn the_real_machine_detects_opencode_without_claiming_runtime_support() {
+fn the_real_machine_detects_opencode_with_terminal_lifecycle_capabilities() {
     let summary = build_harness_registry()
         .summaries(LOCAL_TARGET_ID)
         .into_iter()
         .find(|summary| summary.id == "opencode")
         .expect("OpenCode 已注册");
     assert_eq!(summary.installation_id.as_deref(), Some("opencode@local"));
-    // 检测阶段零宣称（ADR-0005）
-    assert_eq!(summary.capabilities, HarnessCapabilities::default());
+    // launch / terminal 由 headless 真机 lifecycle 证据支撑（ADR-0005 的静态事实，
+    // 见 docs/plans/2026-10-12-opencode-terminal-lifecycle.md）；其余七项仍未实现。
+    let expected = HarnessCapabilities {
+        launch: true,
+        terminal: true,
+        ..HarnessCapabilities::default()
+    };
+    assert_eq!(summary.capabilities, expected);
     if !summary.installed {
         eprintln!("SKIP: OpenCode CLI 不在本机 PATH 上；不算真机检测通过");
         return;
@@ -46,7 +52,7 @@ fn the_real_machine_detects_opencode_without_claiming_runtime_support() {
     }
 
     eprintln!(
-        "OpenCode: installed=true binary={binary} version={version} data={:?}; capabilities=all false",
+        "OpenCode: installed=true binary={binary} version={version} data={:?}; capabilities=launch+terminal",
         summary.data_paths
     );
 }

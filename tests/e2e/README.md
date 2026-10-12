@@ -1179,3 +1179,83 @@ TUI 渲染阻塞是跨 Harness 环境故障（Claude 同型复现），按 ADR-0
 chat 级往返证据在认证恢复 + 健康环境 GUI 轮后补强。
 若审阅者不认可此裁决，回滚 `gemini_cli.rs` 的 `capabilities()` 与
 `fixtures/gemini/summary.json` 即可，其余证据不受影响。
+
+## 2026-10-12 — OpenCode 终端生命周期（headless 全通过；GUI 机制通过、TUI 渲染被环境阻塞）
+
+计划：`docs/plans/2026-10-12-opencode-terminal-lifecycle.md`；分支 `feat/opencode-terminal-lifecycle`。
+
+### spike / headless 真机：通过
+
+```text
+cargo test --test opencode_pty_spike -- --nocapture          1 passed（三段观察，34s）
+  [1] 不应答任何查询        bytes=4     dsr=1 alt_screen=0 bracketed_paste=0
+  [2] 应答 DSR + 写 x       bytes=16508 dsr=1 alt_screen=1 bracketed_paste=11 mouse=3 clear=3
+  [3] 应答 DSR + Ctrl+C×2   bytes=16646 exited=Some(0)（?2004l / ?1049l / ?2031l 依次关闭）
+      已锁进断言的协议事实：不应答时只发 \x1b[6n 且整段 < 64 字节；
+      应答后含 \x1b[?1049h 与 \x1b[?2004h；Ctrl+C×2 含 \x1b[?2004l 与 \x1b[?1049l 且退出码 0
+cargo test --test real_opencode_terminal -- --nocapture      2 passed（8.95s）
+  [1] spawn ok: session=9ed5e6f4-… pid=51716
+  [2][3] bytes=3649 dsr_answered=1 alt_screen=1 bracketed_paste=11
+  [4] 已写入字符 x；新字节 = 8247（headless 输入→重绘往返）
+  [5] resize ok（累计 23737 bytes）；[6] kill ok: reason=UserKilled exit_code=1
+  [8] 缺失 binary：CreateProcessW … 系统找不到指定的路径。(os error 3)，不留 running
+cargo test --test opencode_lifecycle -- --nocapture          4 passed（20.37s）
+  S1 user_killed exit_code=1；S2 首屏 21514 bytes（bracketed_paste=12 alt_screen=1）→
+  natural_exit exit_code=0（Ctrl+C×2）；S3 host_shutdown status=Unknown；S4 lost（幂等）；
+  全程零 ghost running
+```
+
+原生 `.exe` 直跑已由 spike 证实，无需 shim 前置参数。首屏明文（spike 期间做过一次性
+FULL SCREEN dump，dump 代码未提交）：`]0;OpenCode` 标题、ASCII 大标题、输入框
+`Ask anything...`、模型行 `Build · Big Pickle OpenCode Zen`、`tab agents` / `ctrl+p commands`、
+底部 `D:\HarnessHub-E2E\opencode-terminal` 与 `1.18.23` ⇒ **正常欢迎界面**，不是崩溃。
+早先被误当作崩溃的 Bun 栈帧实为
+`MaxListenersExceededWarning: Possible EventTarget memory leak detected. 11 drain listeners
+added to [WriteStream]`（告警），另有一条本机 davinci-resolve MCP 的 `failed to getPrompt`。
+
+### GUI（真实 Terminal 页面，当前源码构建，CDP 驱动真实点击）：机制通过、TUI 渲染阻塞
+
+```text
+下拉框    ["Codex","Claude Code","Gemini CLI","OpenCode"]——翻转后 OpenCode 自动进入，
+          九项全 false 的 CodeBuddy 仍被过滤（与 TerminalPage 能力过滤断言一致）
+选择/cwd  UI → IPC → LaunchSpec → PTY：DB cwd = D:\HarnessHub-E2E\opencode-terminal
+启动      运行中 · OpenCode · pid 50816 · session d246dd2e-09e1-4e97-b932-8ea09fd0e209
+          （hold 轮复现：pid 24140 · session eff351d4-c605-4b3f-9717-532537a48133）
+TUI       xterm 零输出：`.xterm-rows` 31 行全空，容器已挂载 DOM renderer
+          （`xterm xterm-dom-renderer-owner-4`），故不是前端未订阅
+结束会话  按钮点击 → UI「已结束 · 用户主动结束 · 退出码 1」
+DB        status=exited, termination_reason=user_killed, exit_code=1, cwd 正确；全库 running=0
+```
+
+**阻塞归因：环境现象，非 OpenCode 缺陷。** 同一 app 实例、同一页面的 **Codex 对照**
+（已验收过 GUI 终端的 Harness）同样零输出：
+
+```text
+configured: {"select":"codex@local","cwd":"D:\\HarnessHub-E2E\\codex-control"}
+RUNNING: 运行中 · Codex · pid 44796 · session c5b574ef-2059-497f-bf01-a43e897bbce6
+non-empty rows after hold: 0
+```
+
+进程级取证：`cmd.exe /c D:\npm-global\codex.cmd`（pid 44796）**只有 1 个线程、无 node.exe
+子进程**；`D:\Scoop\shims\opencode.exe`（pid 24140）同样无子进程、CPU 0.015625s、
+WorkingSet 3.9MB、唯一线程 `Wait/Executive` ⇒ 子进程只拿到一个调度量子就阻塞在内核等待，
+尚未执行用户态代码。OpenCode 自己的日志 `~/.local/share/opencode/log/opencode.log` 在
+这两轮 GUI 启动期间**零新增**（长度与最后写入时间不变）⇒ 连 JS 都没跑起来。
+
+**同时刻 headless 对照（决定性）**：GUI 轮进行中直接运行已编译测试二进制
+`target\debug\deps\real_opencode_terminal-*.exe --nocapture` → 2 passed，真实 TUI 字节
+3649→23737。同一台机器、同一时刻、同一份生产 `TerminalRuntime` + `PortablePtyBackend`：
+headless 有真实 TUI 字节，GUI 侧零字节且子进程停在 node/Bun 启动之前 ⇒ 阻塞点不在 PTY
+后端。与 2026-10-11 Gemini 节记录的 `cmd.exe` 停在 node 启动前、Claude 对照同型，以及
+2026-09-27/28 空白终端现象同型；09-29 成功轮与本轮之间的机器差异（WebView2 运行时升级至
+154）未逐一排查，留待健康环境复核。
+
+### 能力翻转的依据（ADR-0005 裁决）
+
+`launch` / `terminal` 翻 true 的证据 = spike 协议事实 + headless 全链路（real terminal +
+四条 lifecycle）+ GUI 机制（下拉出现、选择、cwd 传递、启动、终止按钮、状态机、DB 收敛、
+零 ghost）。TUI 渲染阻塞是跨 Harness 环境故障（Codex 同实例对照同样零输出，且同时刻
+headless 正常），按 ADR-0005 规则 2 只影响 readiness，不得回写 capability。
+本机 `opencode auth list` = 0 credentials，chat 级往返不可达，同属 readiness。
+若审阅者不认可此裁决，回滚 `src-tauri/src/harness/adapters/opencode.rs` 的 `capabilities()`
+与 `fixtures/opencode/summary.json` 即可，其余证据不受影响。

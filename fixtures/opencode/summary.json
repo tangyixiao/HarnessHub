@@ -6,8 +6,8 @@
   "binaryPath": "D:/Scoop/shims/opencode.exe",
   "version": "1.18.23",
   "capabilities": {
-    "launch": false,
-    "terminal": false,
+    "launch": true,
+    "terminal": true,
     "resume": false,
     "usage": false,
     "replay": false,
