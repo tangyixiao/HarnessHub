@@ -9,13 +9,16 @@ import {
   finishSession,
   getAppInfo,
   getDbHealth,
+  getProjectSessions,
   getUsageSources,
   getUsageSummary,
   invokeCommand,
   isTauriRuntime,
   listHarnesses,
+  listProjects,
   listSessions,
   normalizeHarnessSummary,
+  normalizeProjectRecord,
   normalizeSessionRecord,
   normalizeUsageCapabilities,
   normalizeUsageImport,
@@ -24,6 +27,8 @@ import {
   normalizeUsageSummary,
   refreshHarnesses,
   refreshUsage,
+  registerProject,
+  removeProject,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -431,6 +436,124 @@ describe('session commands', () => {
       error: NOT_IN_TAURI,
     });
     await expect(finishSession('h1', 'natural_exit')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});
+
+describe('Project registry IPC（§20 第 14 步）', () => {
+  const PROJECT_PAYLOAD = {
+    id: 'proj-1',
+    name: 'demo',
+    repoRoot: 'D:/work/demo',
+    createdAt: '2026-10-12T00:00:00Z',
+    updatedAt: '2026-10-12T00:00:01Z',
+    lastOpenedAt: '2026-10-12T00:00:01Z',
+  };
+
+  it('normalizeProjectRecord 完整保留字段', () => {
+    expect(normalizeProjectRecord(PROJECT_PAYLOAD)).toEqual(PROJECT_PAYLOAD);
+  });
+
+  it('normalizeProjectRecord 拿不到 id 返回 null，缺字段补安全默认值', () => {
+    expect(normalizeProjectRecord({ name: '无 id' })).toBeNull();
+    expect(normalizeProjectRecord('not-an-object')).toBeNull();
+    expect(normalizeProjectRecord({ id: 'proj-1' })).toEqual({
+      id: 'proj-1',
+      name: '',
+      repoRoot: '',
+      createdAt: '',
+      updatedAt: '',
+      lastOpenedAt: null,
+    });
+  });
+
+  it('registerProject 传 path 与 name（Rust 侧 path / name）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROJECT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await registerProject('D:/work/demo', '工作仓库');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('register_project');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ path: 'D:/work/demo', name: '工作仓库' });
+    expect(result).toEqual({ ok: true, data: PROJECT_PAYLOAD });
+  });
+
+  it('registerProject 不传 name 时传 null', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROJECT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    await registerProject('D:/work/demo');
+
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ path: 'D:/work/demo', name: null });
+  });
+
+  it('listProjects 使用 list_projects 并按需传 limit', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [PROJECT_PAYLOAD]);
+    stubTauri(invokeSpy);
+
+    const result = await listProjects(10);
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('list_projects');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ limit: 10 });
+    expect(result).toEqual({ ok: true, data: [PROJECT_PAYLOAD] });
+
+    await listProjects();
+    // @tauri-apps/api 会把缺失的 args 补成 {}（同 listSessions 测试），断言「没有 limit 键」。
+    expect((invokeSpy.mock.calls[1]?.[1] as Record<string, unknown>)?.limit).toBeUndefined();
+  });
+
+  it('listProjects 后端返回非数组时按空列表处理', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => 'unexpected');
+    stubTauri(invokeSpy);
+
+    await expect(listProjects()).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('removeProject 传 projectId（Rust 侧 project_id）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
+    stubTauri(invokeSpy);
+
+    const result = await removeProject('proj-1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('remove_project');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ projectId: 'proj-1' });
+    expect(result).toEqual({ ok: true, data: true });
+  });
+
+  it('getProjectSessions 传 projectId 并归一化 session 记录', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      {
+        hubSessionId: 's1',
+        harnessId: 'codex',
+        runtimeTargetId: 'local',
+        status: 'exited',
+        launchMode: 'terminal',
+        startedAt: '2026-10-12T00:00:00Z',
+      },
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await getProjectSessions('proj-1', 10);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('get_project_sessions');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ projectId: 'proj-1', limit: 10 });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.hubSessionId).toBe('s1');
+      expect(result.data[0]?.projectId).toBeNull();
+    }
+  });
+
+  it('项目命令不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(registerProject('D:/work/demo')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(listProjects()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(removeProject('proj-1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(getProjectSessions('proj-1')).resolves.toEqual({
       ok: false,
       error: NOT_IN_TAURI,
     });

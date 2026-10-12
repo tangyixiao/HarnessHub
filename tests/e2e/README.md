@@ -1259,3 +1259,37 @@ headless 正常），按 ADR-0005 规则 2 只影响 readiness，不得回写 ca
 本机 `opencode auth list` = 0 credentials，chat 级往返不可达，同属 readiness。
 若审阅者不认可此裁决，回滚 `src-tauri/src/harness/adapters/opencode.rs` 的 `capabilities()`
 与 `fixtures/opencode/summary.json` 即可，其余证据不受影响。
+
+## 2026-10-12 — Project Registry（真机 repo root 解析 + 幂等登记 + 删除语义）
+
+### 真机测试（`src-tauri/tests/project_registry.rs`，1 passed / 0.10s）
+
+```
+resolved repo root: D:/HarnessHub
+registered: name=HarnessHub root=D:/HarnessHub
+test the_real_machine_resolves_this_repository_root_and_registers_it ... ok
+```
+
+覆盖点：
+
+- `SystemGitRootProbe` 用 `git -C <path> rev-parse --show-toplevel` 解析本仓库 root，
+  `D:\HarnessHub\src-tauri`（CARGO_MANIFEST_DIR 的父目录）→ `D:/HarnessHub`（git 原生正斜杠，不做额外归一化）。
+- 从子目录登记与从 root 登记解析到同一个 root，且复用同一条项目（`repo_root` UNIQUE 幂等，
+  两次 register 只产生一条记录）。
+- 缺省名取 root 最后一段：`D:/HarnessHub` → `HarnessHub`。
+- 删除后列表为空（FK 语义：session 保留但 `project_id` 置 NULL，项目级设置 CASCADE）。
+- 内存库 + `apply_pending` 从零迁移，只调生产代码填充前置状态（冷启动纪律）。
+
+### GUI 机制（dev app，override 3300 端口 + CDP 9222，2026-10-12 实测）
+
+- 登记 `D:\HarnessHub` → 卡片出现：name=`HarnessHub`、repo root=`D:/HarnessHub`、
+  最近打开=登记时间（首次两者相同）。
+- **重复登记同一路径（幂等 upsert 实证）**：再次登记后最近打开刷新
+  （`14:59:49 → 14:59:51`），登记时间保持 `14:59:49` 不变 —— `ON CONFLICT (repo_root)`
+  只 touch `last_opened_at`/`updated_at`，不重建行。
+- **只读 SQLite 快照（app 存活期，`mode=ro` URI）**：
+  `projects` 恰好一行 `id=90c65dd4-5b60-4a7a-8f25-55383d649b70`（UUID v4）、
+  `name=HarnessHub`、`repo_root=D:/HarnessHub`、
+  `created_at=updated_at=last_opened_at=2026-10-12T15:06:06Z`（RFC3339Z，与
+  `clock::now_rfc3339` 同形）；`sessions.project_id` 非空计数 0（当前无挂项目的 session）。
+- 删除 → 卡片消失、空态文案回归、`projects` 行数归零（session 保留但失去归属）。

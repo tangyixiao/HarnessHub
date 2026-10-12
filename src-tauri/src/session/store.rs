@@ -305,6 +305,23 @@ impl<'conn> SessionStore<'conn> {
         Ok(sessions)
     }
 
+    /// 某个项目下的最近会话（Project registry，§20 第 14 步）。
+    pub fn list_by_project(&self, project_id: &str, limit: u32) -> Result<Vec<SessionRecord>> {
+        let sql = format!(
+            "SELECT {SELECT_COLUMNS} FROM sessions
+             WHERE project_id = ?1
+             ORDER BY started_at DESC, hub_session_id ASC LIMIT ?2"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(params![project_id, i64::from(limit)], map_session_row)?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        Ok(sessions)
+    }
+
     pub fn count(&self) -> Result<i64> {
         let count = self
             .conn
