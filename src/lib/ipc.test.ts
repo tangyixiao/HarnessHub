@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import codebuddySummary from '../../fixtures/codebuddy/summary.json';
 import geminiSummary from '../../fixtures/gemini/summary.json';
+import opencodeSummary from '../../fixtures/opencode/summary.json';
 
 import {
   NOT_IN_TAURI,
@@ -156,6 +157,9 @@ describe('normalizeHarnessSummary', () => {
   });
   it('CodeBuddy fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
     expect(normalizeHarnessSummary(codebuddySummary)).toEqual(codebuddySummary);
+  });
+  it('OpenCode fixture 与 Rust serialization contract 共用同一份，字段逐一保留', () => {
+    expect(normalizeHarnessSummary(opencodeSummary)).toEqual(opencodeSummary);
   });
   it('字段残缺的 payload 补全 false 安全默认值，不渲染假支持', () => {
     const incomplete = normalizeHarnessSummary({ id: 'gemini', installed: true });

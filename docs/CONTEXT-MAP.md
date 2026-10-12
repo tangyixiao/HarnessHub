@@ -42,6 +42,10 @@ Gemini 检测入口：`src-tauri/src/harness/adapters/gemini_cli.rs`；组合根
 `real_gemini_terminal.rs`、`gemini_lifecycle.rs`。Terminal 按 capability 过滤检测阶段适配器。
 CodeBuddy 检测入口：`src-tauri/src/harness/adapters/codebuddy.rs`（home 直发现，
 无 env 覆盖）；fixture 在 `fixtures/codebuddy/`，真机测试 `codebuddy_detection.rs`。
+OpenCode 检测入口：`src-tauri/src/harness/adapters/opencode.rs`（按 XDG 规范解析
+data / config / state / cache 四个根，组合根 `lib.rs` 读一次环境注入
+`OpenCodeXdgRoots`，适配器本身不读环境）；fixture 在 `fixtures/opencode/`，
+真机测试 `opencode_detection.rs`。刻意不 shell out 到 `opencode debug paths`。
 Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
 Harnesses 三处永远同色，未知 id 中性灰）。
 

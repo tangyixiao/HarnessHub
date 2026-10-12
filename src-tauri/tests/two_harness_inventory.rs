@@ -1,13 +1,15 @@
-//! Task 7A 起的清单同步证据；2026-10-01 扩展生产注册表至 Gemini 检测阶段。
+//! Task 7A 起的清单同步证据；2026-10-12 扩展生产注册表至 OpenCode 检测阶段。
 //!
 //! 这里刻意用**生产组合根** `build_harness_registry()`（而不是在测试里重造一份注册表），
 //! 才能验证「Core 不需要为第二个 Harness 改动」这件事本身。
 //!
 //! 覆盖四件事：
-//! 1. 注册表持有三个适配器，顺序确定（`Vec`，不是 HashMap）；
-//! 2. 真正空库 → 生产注册表 → reconcile → 三个 definition + 三个 installation；
+//! 1. 注册表持有五个适配器，顺序确定（`Vec`，不是 HashMap）；
+//! 2. 真正空库 → 生产注册表 → reconcile → 五个 definition + 五个 installation；
 //! 3. 已有 Codex 的库再加 Harness：不覆盖旧数据、不重复插入；
-//! 4. 原有 Codex/Claude 真机检测与矩阵保留；Gemini 真机证据见 gemini_detection.rs。
+//! 4. 原有 Codex/Claude 真机检测与矩阵保留；Gemini / CodeBuddy / OpenCode
+//!    真机证据分别见 gemini_detection.rs / codebuddy_detection.rs /
+//!    opencode_detection.rs。
 
 use harness_hub_lib::db::migrations::{apply_pending, latest_version};
 use harness_hub_lib::db::Database;
@@ -70,7 +72,7 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
 
     assert_eq!(
         ids(&registry),
-        vec!["codex", "claude", "gemini", "codebuddy"]
+        vec!["codex", "claude", "gemini", "codebuddy", "opencode"]
     );
     assert_eq!(
         ids(&registry),
@@ -79,11 +81,12 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
     );
 
     let summaries = registry.summaries(LOCAL_TARGET_ID);
-    assert_eq!(summaries.len(), 4);
+    assert_eq!(summaries.len(), 5);
     assert_eq!(summaries[0].display_name, "Codex");
     assert_eq!(summaries[1].display_name, "Claude Code");
     assert_eq!(summaries[2].display_name, "Gemini CLI");
     assert_eq!(summaries[3].display_name, "CodeBuddy");
+    assert_eq!(summaries[4].display_name, "OpenCode");
     // 展示名由适配器声明，注册表只透传（前后端只有一份名字来源）。
     assert_eq!(
         summaries[1].installation_id.as_deref(),
@@ -99,10 +102,13 @@ fn a_cold_database_reconciles_all_registered_harnesses() {
 
     let reconciled = reconcile_with_production_registry(&db);
 
-    assert_eq!(reconciled, vec!["codex", "claude", "gemini", "codebuddy"]);
+    assert_eq!(
+        reconciled,
+        vec!["codex", "claude", "gemini", "codebuddy", "opencode"]
+    );
     assert_eq!(
         definition_ids(&db),
-        vec!["claude", "codebuddy", "codex", "gemini"]
+        vec!["claude", "codebuddy", "codex", "gemini", "opencode"]
     );
     assert_eq!(
         installation_ids(&db),
@@ -110,7 +116,8 @@ fn a_cold_database_reconciles_all_registered_harnesses() {
             installation_id("claude", LOCAL_TARGET_ID),
             installation_id("codebuddy", LOCAL_TARGET_ID),
             installation_id("codex", LOCAL_TARGET_ID),
-            installation_id("gemini", LOCAL_TARGET_ID)
+            installation_id("gemini", LOCAL_TARGET_ID),
+            installation_id("opencode", LOCAL_TARGET_ID)
         ]
     );
 }
@@ -155,7 +162,7 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
 
     assert_eq!(
         definition_ids(&db),
-        vec!["claude", "codebuddy", "codex", "gemini"]
+        vec!["claude", "codebuddy", "codex", "gemini", "opencode"]
     );
     assert_eq!(
         installation_ids(&db),
@@ -163,10 +170,11 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
             "claude@local",
             "codebuddy@local",
             "codex@local",
-            "gemini@local"
+            "gemini@local",
+            "opencode@local"
         ]
     );
-    assert_eq!(installation_count(&db), 4, "不得重复插入");
+    assert_eq!(installation_count(&db), 5, "不得重复插入");
 
     let after: (Option<String>, String) = db
         .connection()
@@ -184,7 +192,7 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
 
     // 再同步一次：仍然不重复（幂等）。
     reconcile_with_production_registry(&db);
-    assert_eq!(installation_count(&db), 4);
+    assert_eq!(installation_count(&db), 5);
 }
 
 /// 加第二个 Harness **不需要** schema 变更。
@@ -301,6 +309,10 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
     assert!(gemini.launch, "gemini launch 已有真机证据");
     assert!(gemini.terminal, "gemini terminal 已有真机 lifecycle 证据");
 
+    // OpenCode：本次仅检测阶段，一个能力都不宣称（ADR-0005 零宣称）。
+    // launch / terminal / usage 各自的真机证据另立计划。
+    let opencode = capabilities("opencode");
+
     for (name, value) in [
         ("codex.resume", codex.resume),
         ("codex.replay", codex.replay),
@@ -321,6 +333,15 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("gemini.subagents", gemini.subagents),
         ("gemini.live_state", gemini.live_state),
         ("gemini.worktree", gemini.worktree),
+        ("opencode.launch", opencode.launch),
+        ("opencode.terminal", opencode.terminal),
+        ("opencode.usage", opencode.usage),
+        ("opencode.resume", opencode.resume),
+        ("opencode.replay", opencode.replay),
+        ("opencode.tool_calls", opencode.tool_calls),
+        ("opencode.subagents", opencode.subagents),
+        ("opencode.live_state", opencode.live_state),
+        ("opencode.worktree", opencode.worktree),
     ] {
         assert!(!value, "{name} 尚未验收，不得为 true");
     }

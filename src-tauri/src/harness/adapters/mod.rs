@@ -11,10 +11,11 @@
 //! 「能检测到」不算支持，「可稳定回归」才算。
 //!
 //! 当前已实现：`codex`（完整纵向链路）、`claude_code`（Task 7B 起 detect / launch / terminal / usage）。
-//! `gemini_cli` 仅实现检测；`codebuddy` 仅实现检测；其余能力保持 false，
-//! Usage 解析与生命周期验收待后续任务。
+//! `gemini_cli` 仅实现检测；`codebuddy` 仅实现检测；`opencode` 仅实现检测；
+//! 其余能力保持 false，Usage 解析与生命周期验收待后续任务。
 
 pub mod claude_code;
 pub mod codebuddy;
 pub mod codex;
 pub mod gemini_cli;
+pub mod opencode;
