@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::harness::adapter::{
     DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest,
 };
-use crate::harness::launch::LaunchSpec;
+use crate::harness::launch::{program_for, LaunchSpec};
 use crate::harness::probe::HostProbe;
 
 pub const OPENCODE_ID: &str = "opencode";
@@ -144,15 +144,47 @@ impl HarnessAdapter for OpenCodeAdapter {
         }
     }
 
-    /// 检测阶段**一个能力都不宣称**（ADR-0005 零宣称）。
+    /// launch / terminal 已实现并有真机证据（ADR-0005 / ADR-0022）：
+    ///
+    /// - spike（`opencode_pty_spike.rs`）：原生 exe 在真实 PTY 里渲染完整 TUI
+    ///   首屏（alternate screen + bracketed paste + mouse），Ctrl+C×2 自然退出、码 0。
+    /// - headless（`real_opencode_terminal.rs`）：spawn → running + pid → 真实字节 →
+    ///   DSR 闭环 → 输入触发 11414 字节重绘 → resize → kill → user_killed + 退出码。
+    /// - 四条状态链（`opencode_lifecycle.rs`）：user_killed / natural_exit /
+    ///   host_shutdown / lost 全经生产收敛函数，零 ghost。
+    ///
+    /// 其余能力保持 false：Usage 的数据源（ccusage 不覆盖 opencode）尚未设计，
+    /// resume / replay / tool_calls / subagents / live_state / worktree 均未实现。
     fn capabilities(&self) -> HarnessCapabilities {
-        HarnessCapabilities::default()
+        HarnessCapabilities {
+            launch: true,
+            terminal: true,
+            ..HarnessCapabilities::default()
+        }
     }
 
-    fn build_launch_spec(&self, _request: LaunchRequest) -> Result<LaunchSpec> {
-        Err(Error::InvalidInput(
-            "OpenCode 启动尚未实现：当前仅支持安装检测".into(),
-        ))
+    /// 生成启动描述：复用共享的 `program_for`（本机是原生 `.exe`，直跑），
+    /// **默认零参数** —— 不替用户选 model / agent，也不注入 `--mini` 这类界面形态
+    /// 开关（spike 实测：无参数启动即是正常 TUI 首屏）。
+    fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec> {
+        let binary = self.probe.find_executable(OPENCODE_ID).ok_or_else(|| {
+            Error::InvalidInput("OpenCode 未安装：PATH 中找不到可执行文件".to_string())
+        })?;
+
+        let (program, mut args) = program_for(&binary);
+        args.extend(request.args);
+
+        Ok(LaunchSpec {
+            program,
+            args,
+            cwd: if request.cwd.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(request.cwd))
+            },
+            env: Vec::new(),
+            runtime_target_id: request.runtime_target_id,
+        })
     }
 }
 
@@ -341,26 +373,102 @@ mod tests {
         );
     }
 
+    /// 能力只随验收证据变化：安装与否都不改变矩阵（未装也能声明「本适配器实现了
+    /// launch / terminal」——那是静态能力，不是此刻可用性，见 ADR-0005）。
     #[test]
-    fn capabilities_are_unimplemented_regardless_of_installation() {
+    fn capabilities_only_claim_launch_and_terminal() {
         for probe in [installed(), FakeHostProbe::new()] {
             let adapter = OpenCodeAdapter::new(Arc::new(probe), OpenCodeXdgRoots::default());
-            assert_eq!(adapter.capabilities(), HarnessCapabilities::default());
+            let capabilities = adapter.capabilities();
+            assert!(capabilities.launch && capabilities.terminal);
+            assert_eq!(
+                capabilities,
+                HarnessCapabilities {
+                    launch: true,
+                    terminal: true,
+                    ..HarnessCapabilities::default()
+                },
+                "其余七项必须保持 false"
+            );
         }
     }
 
+    /// 生成 spec 时**零默认参数**：不替用户选 model / agent，也不注入 `--mini`
+    /// 之类的界面形态开关。Hub 的默认必须与裸终端一致。
     #[test]
-    fn launch_is_rejected_while_unimplemented() {
-        let result = OpenCodeAdapter::new(Arc::new(installed()), OpenCodeXdgRoots::default())
+    fn a_launch_spec_uses_the_detected_binary_with_no_default_arguments() {
+        let adapter = OpenCodeAdapter::new(Arc::new(installed()), OpenCodeXdgRoots::default());
+
+        let spec = adapter
+            .build_launch_spec(LaunchRequest {
+                project_id: None,
+                cwd: "D:/work".into(),
+                args: vec![],
+                runtime_target_id: "local".into(),
+            })
+            .expect("spec");
+
+        assert_eq!(spec.program, PathBuf::from(BINARY));
+        assert!(
+            spec.args.is_empty(),
+            "默认不得注入任何参数：{:?}",
+            spec.args
+        );
+        assert!(spec.env.is_empty(), "不注入环境变量");
+        assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
+        assert_eq!(spec.runtime_target_id, "local");
+    }
+
+    /// 用户在终端里显式给的参数原样透传，顺序不变。
+    #[test]
+    fn user_arguments_are_passed_through_unchanged() {
+        let adapter = OpenCodeAdapter::new(Arc::new(installed()), OpenCodeXdgRoots::default());
+
+        let spec = adapter
+            .build_launch_spec(LaunchRequest {
+                project_id: None,
+                cwd: String::new(),
+                args: vec!["--model".into(), "opencode/zen".into()],
+                runtime_target_id: "local".into(),
+            })
+            .expect("spec");
+
+        assert_eq!(
+            spec.args,
+            vec!["--model".to_string(), "opencode/zen".to_string()]
+        );
+    }
+
+    /// 空 cwd 表示调用方没有指定工作目录，交给进程继承，不塞空字符串。
+    #[test]
+    fn an_empty_cwd_means_the_request_did_not_specify_one() {
+        let adapter = OpenCodeAdapter::new(Arc::new(installed()), OpenCodeXdgRoots::default());
+
+        let spec = adapter
             .build_launch_spec(LaunchRequest {
                 project_id: None,
                 cwd: String::new(),
                 args: vec![],
                 runtime_target_id: "local".into(),
-            });
-        assert!(
-            matches!(result, Err(Error::InvalidInput(message)) if message.contains("尚未实现"))
-        );
+            })
+            .expect("spec");
+
+        assert_eq!(spec.cwd, None);
+    }
+
+    #[test]
+    fn launch_spec_is_rejected_when_opencode_is_not_installed() {
+        let error =
+            OpenCodeAdapter::new(Arc::new(FakeHostProbe::new()), OpenCodeXdgRoots::default())
+                .build_launch_spec(LaunchRequest {
+                    project_id: None,
+                    cwd: String::new(),
+                    args: vec![],
+                    runtime_target_id: "local".into(),
+                })
+                .expect_err("没装就必须报错");
+
+        assert!(error.to_string().contains("OpenCode"), "{error}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Task 7A 起的清单同步证据；2026-10-12 扩展生产注册表至 OpenCode 检测阶段。
+//! Task 7A 起的清单同步证据；2026-10-12 扩展生产注册表至 OpenCode。
 //!
 //! 这里刻意用**生产组合根** `build_harness_registry()`（而不是在测试里重造一份注册表），
 //! 才能验证「Core 不需要为第二个 Harness 改动」这件事本身。
@@ -309,9 +309,14 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
     assert!(gemini.launch, "gemini launch 已有真机证据");
     assert!(gemini.terminal, "gemini terminal 已有真机 lifecycle 证据");
 
-    // OpenCode：本次仅检测阶段，一个能力都不宣称（ADR-0005 零宣称）。
-    // launch / terminal / usage 各自的真机证据另立计划。
+    // OpenCode：原生 exe 的真机 spawn + lifecycle（spike / real_opencode_terminal /
+    // opencode_lifecycle S1-S4），GUI 验收见 tests/e2e/README.md
     let opencode = capabilities("opencode");
+    assert!(opencode.launch, "opencode launch 已有真机证据");
+    assert!(
+        opencode.terminal,
+        "opencode terminal 已有真机 lifecycle 证据"
+    );
 
     for (name, value) in [
         ("codex.resume", codex.resume),
@@ -333,8 +338,6 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("gemini.subagents", gemini.subagents),
         ("gemini.live_state", gemini.live_state),
         ("gemini.worktree", gemini.worktree),
-        ("opencode.launch", opencode.launch),
-        ("opencode.terminal", opencode.terminal),
         ("opencode.usage", opencode.usage),
         ("opencode.resume", opencode.resume),
         ("opencode.replay", opencode.replay),
