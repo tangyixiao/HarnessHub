@@ -16,6 +16,7 @@ pub mod hhar;
 pub mod permissions;
 pub mod plugins;
 pub mod process;
+pub mod project;
 pub mod pty;
 pub mod runtime;
 pub mod session;
@@ -52,10 +53,13 @@ use crate::terminal::TerminalRuntime;
 ///   也需要写终态（终态事实由进程退出驱动，不是由命令驱动）。
 /// - `harnesses`：已注册的 Harness 适配器，启动后只读。
 /// - `terminal`：终端运行编排（PTY + 会话状态）。
+/// - `git_probe`：Project registry 的 repo root 探测（组合根注入，见
+///   `project::git_root`）。
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
     pub harnesses: Arc<HarnessRegistry>,
     pub terminal: TerminalRuntime,
+    pub git_probe: Arc<dyn crate::project::git_root::GitRootProbe>,
 }
 
 /// 数据库文件名。放在 Tauri 的 app data 目录下，保持 local-first。
@@ -136,6 +140,7 @@ pub fn run() {
                 db: Arc::clone(&db),
                 harnesses: Arc::clone(&harnesses),
                 terminal: TerminalRuntime::new(db, harnesses, Arc::new(PortablePtyBackend::new())),
+                git_probe: Arc::new(crate::project::git_root::SystemGitRootProbe),
             });
 
             Ok(())
@@ -145,12 +150,16 @@ pub fn run() {
             commands::db_health,
             commands::create_session,
             commands::finish_session,
+            commands::get_project_sessions,
             commands::get_usage_sources,
             commands::kill_terminal,
             commands::list_harnesses,
+            commands::list_projects,
             commands::list_sessions,
             commands::refresh_harnesses,
             commands::refresh_usage,
+            commands::register_project,
+            commands::remove_project,
             commands::resize_terminal,
             commands::start_terminal,
             commands::usage_summary,

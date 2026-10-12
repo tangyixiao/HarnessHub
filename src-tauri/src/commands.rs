@@ -212,6 +212,62 @@ pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<V
 }
 
 /* ------------------------------------------------------------------ *
+ * Project registry（§20 第 14 步）
+ * ------------------------------------------------------------------ */
+
+/// 登记一个本地 Git 仓库目录为项目：自动识别 repo root，按 root 幂等 upsert。
+#[tauri::command]
+pub fn register_project(
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<crate::project::ProjectRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let request = crate::project::RegisterRequest { path, name };
+    crate::project::service::ProjectService::new(database.connection(), state.git_probe.clone())
+        .register(&request)
+}
+
+/// 最近项目，按 last_opened_at / created_at 倒序。
+#[tauri::command]
+pub fn list_projects(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<crate::project::ProjectRecord>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let limit = limit
+        .unwrap_or(DEFAULT_SESSION_LIMIT)
+        .min(MAX_SESSION_LIMIT);
+
+    crate::project::service::ProjectService::new(database.connection(), state.git_probe.clone())
+        .list_recent(limit)
+}
+
+/// 删除项目（幂等）。Session 保留但失去归属；项目级设置级联删除。
+#[tauri::command]
+pub fn remove_project(state: State<'_, AppState>, project_id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::project::service::ProjectService::new(database.connection(), state.git_probe.clone())
+        .remove(&project_id)
+}
+
+/// 项目下的 Session 历史。
+#[tauri::command]
+pub fn get_project_sessions(
+    state: State<'_, AppState>,
+    project_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<SessionRecord>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let limit = limit
+        .unwrap_or(DEFAULT_SESSION_LIMIT)
+        .min(MAX_SESSION_LIMIT);
+
+    crate::project::service::ProjectService::new(database.connection(), state.git_probe.clone())
+        .sessions(&project_id, limit)
+}
+
+/* ------------------------------------------------------------------ *
  * Terminal（Task 4）
  *
  * 公共句柄**只有 hub_session_id**：PID 仅用于诊断，不做权限句柄
@@ -341,5 +397,49 @@ mod tests {
         assert_eq!(json["reconciliation"]["costMicrounitsDelta"], 4);
         assert_eq!(json["reconciliation"]["tokensIdentityHolds"], true);
         assert!(json.get("import").is_some() && json.get("reconciliation").is_some());
+    }
+
+    /// 跨 IPC 契约测试：`register_project` / `list_projects` 的返回形状。
+    ///
+    /// 前端 `normalizeProjectRecord`（src/lib/ipc.ts）按这些键取值。
+    #[test]
+    fn project_record_serializes_with_camel_case_keys() {
+        let record = crate::project::ProjectRecord {
+            id: "proj-1".to_string(),
+            name: "demo".to_string(),
+            repo_root: "D:/work/demo".to_string(),
+            created_at: "2026-10-12T00:00:00Z".to_string(),
+            updated_at: "2026-10-12T00:00:01Z".to_string(),
+            last_opened_at: Some("2026-10-12T00:00:01Z".to_string()),
+        };
+
+        let json = serde_json::to_value(&record).expect("序列化");
+
+        assert_eq!(json.as_object().expect("对象").len(), 6, "恰好 6 个键");
+        for key in crate::project::ProjectRecord::keys() {
+            assert!(json.get(key).is_some(), "缺键：{key}");
+        }
+        assert_eq!(json["id"], "proj-1");
+        assert_eq!(json["repoRoot"], "D:/work/demo");
+        assert_eq!(json["createdAt"], "2026-10-12T00:00:00Z");
+        assert_eq!(json["lastOpenedAt"], "2026-10-12T00:00:01Z");
+    }
+
+    /// 跨 IPC 契约测试：`register_project` 的入参形状。
+    #[test]
+    fn register_request_deserializes_with_camel_case_keys() {
+        let request: crate::project::RegisterRequest = serde_json::from_value(serde_json::json!({
+            "path": "D:/work/demo",
+            "name": "工作仓库"
+        }))
+        .expect("反序列化");
+
+        assert_eq!(request.path, "D:/work/demo");
+        assert_eq!(request.name.as_deref(), Some("工作仓库"));
+
+        let minimal: crate::project::RegisterRequest =
+            serde_json::from_value(serde_json::json!({ "path": "D:/work/demo" }))
+                .expect("name 可省");
+        assert_eq!(minimal.name, None);
     }
 }

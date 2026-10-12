@@ -99,6 +99,11 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   （spike + real_opencode_terminal + opencode_lifecycle S1-S4，见 tests/e2e/README.md），
   原生 `.exe` 直跑并能渲染 TUI；GUI 侧 TUI 渲染被跨 Harness 环境故障阻塞（Codex 同实例
   对照同样零输出，同刻 headless 正常），按 ADR-0005 规则 2 属 readiness。
-  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage、Project Registry、
+  Project Registry 已完成（§20 第 14 步）：`src-tauri/src/project/` 模块
+  （`GitRootProbe` 用 `git -C <path> rev-parse --show-toplevel` 解析 repo root、
+  按 `repo_root` UNIQUE 幂等 upsert + touch `last_opened_at`、删除时 session
+  SET NULL / settings CASCADE）、4 个 IPC 命令、Projects 页真实可用
+  （见 docs/specs/2026-10-12-project-registry-design.md 与 tests/e2e/README.md）。
+  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage、
   Activity Timeline。
 - 实施计划见 `docs/plans/`。

@@ -432,6 +432,102 @@ export function finishSession(
 }
 
 /* ------------------------------------------------------------------ *
+ * Project registry（§20 第 14 步）
+ * ------------------------------------------------------------------ */
+
+/** 一条已注册项目（与 Rust `ProjectRecord` 同形）。 */
+export type ProjectRecord = {
+  id: string;
+  name: string;
+  repoRoot: string;
+  createdAt: string;
+  updatedAt: string;
+  lastOpenedAt: string | null;
+};
+
+/**
+ * 安全解析 `ProjectRecord`：拿不到主键 `id` 一律返回 null ——
+ * 宁可丢掉一条残缺记录，也不渲染一个无法删除的卡片。
+ */
+export function normalizeProjectRecord(raw: unknown): ProjectRecord | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    name: typeof source.name === 'string' ? source.name : '',
+    repoRoot: typeof source.repoRoot === 'string' ? source.repoRoot : '',
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+    lastOpenedAt: asStringOrNull(source.lastOpenedAt),
+  };
+}
+
+/**
+ * 登记一个本地目录为项目：Rust 侧自动识别 repo root，按 root 幂等 upsert。
+ * 返回登记后的记录（重复登记返回既有行，并刷新 lastOpenedAt）。
+ */
+export function registerProject(path: string, name?: string): Promise<IpcResult<ProjectRecord>> {
+  return invokeCommand<ProjectRecord>('register_project', {
+    path,
+    name: name ?? null,
+  });
+}
+
+/** 最近项目，按 lastOpenedAt / createdAt 倒序。 */
+export async function listProjects(limit?: number): Promise<IpcResult<ProjectRecord[]>> {
+  const result = await invokeCommand<unknown>(
+    'list_projects',
+    limit === undefined ? undefined : { limit },
+  );
+  if (!result.ok) {
+    return result;
+  }
+
+  const projects = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeProjectRecord)
+        .filter((project): project is ProjectRecord => project !== null)
+    : [];
+
+  return { ok: true, data: projects };
+}
+
+/** 删除项目（幂等）。Session 保留但失去归属；项目级设置级联删除。 */
+export function removeProject(projectId: string): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('remove_project', { projectId });
+}
+
+/** 某个项目下的最近 Session 历史。 */
+export async function getProjectSessions(
+  projectId: string,
+  limit?: number,
+): Promise<IpcResult<SessionRecord[]>> {
+  const raw = await invokeCommand<unknown>('get_project_sessions', {
+    projectId,
+    ...(limit === undefined ? {} : { limit }),
+  });
+  if (!raw.ok) {
+    return raw;
+  }
+
+  const sessions = Array.isArray(raw.data)
+    ? raw.data
+        .map(normalizeSessionRecord)
+        .filter((session): session is SessionRecord => session !== null)
+    : [];
+
+  return { ok: true, data: sessions };
+}
+
+/* ------------------------------------------------------------------ *
  * Harness 清单同步
  * ------------------------------------------------------------------ */
 

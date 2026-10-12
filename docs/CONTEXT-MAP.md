@@ -14,6 +14,7 @@
 | SQLite schema / 迁移               | `src-tauri/src/db/`（`migrations/` 下为 SQL，`migrations.rs` 为执行器）                                                                                                   |
 | 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`（Windows 进程包含 = `pty/containment.rs`，Job Object；真机 Gate = `src-tauri/tests/process_tree_ownership.rs`）            |
 | Git / Worktree 观察                | `src-tauri/src/git/`                                                                                                                                                      |
+| Project Registry（repo root/登记） | `src-tauri/src/project/`、真机测试 `src-tauri/tests/project_registry.rs`                                                                                                  |
 | 文件监听                           | `src-tauri/src/watcher/`                                                                                                                                                  |
 | Python Sidecar 生命周期 / JSON-RPC | `src-tauri/src/sidecar/`（Rust 侧）、`python/harness_hub_runtime/`（Python 侧）                                                                                           |
 | Trace / Canonical Event            | `src-tauri/src/trace/`、`schemas/events/`                                                                                                                                 |
@@ -48,6 +49,13 @@ data / config / state / cache 四个根，组合根 `lib.rs` 读一次环境注�
 真机测试 `opencode_detection.rs`。刻意不 shell out 到 `opencode debug paths`。
 OpenCode 终端生命周期：启动零默认参数（不选 model / agent），复用共享 `program_for`；
 证据为 `opencode_pty_spike.rs`、`real_opencode_terminal.rs`、`opencode_lifecycle.rs`。
+Project Registry：`src-tauri/src/project/{mod,git_root,service,store}.rs` ——
+`GitRootProbe` trait（`SystemGitRootProbe` 用 `git -C <path> rev-parse --show-toplevel`，
+组合根 `lib.rs` 注入 `AppState.git_probe`）；`ProjectStore` 按 `repo_root` UNIQUE
+幂等 upsert + touch `last_opened_at`；IPC 命令 register_project / list_projects /
+remove_project / get_project_sessions；前端 `src/features/projects/`、
+`src/lib/ipc.ts` Project 段；真机测试 `src-tauri/tests/project_registry.rs`；
+spec `docs/specs/2026-10-12-project-registry-design.md`。
 Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
 Harnesses 三处永远同色，未知 id 中性灰）。
 
