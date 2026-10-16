@@ -137,6 +137,10 @@ pub fn refresh_usage(state: State<'_, AppState>) -> Result<UsageRefreshReport> {
 /// 单次查询允许的最大条数，避免前端传入超大 limit 拖垮查询。
 pub const MAX_SESSION_LIMIT: u32 = 500;
 
+/// Activity 事件流的默认 / 最大条数（聚合不受它约束）。
+pub const DEFAULT_ACTIVITY_LIMIT: u32 = 200;
+pub const MAX_ACTIVITY_LIMIT: u32 = 1000;
+
 /// 登记一条 Session（`status = created`）。
 ///
 /// 注意两件事：
@@ -345,6 +349,36 @@ pub fn usage_summary(
     crate::usage::summary::summary(database.connection(), &window)
 }
 
+/// Activity 页的活动流查询。**纯读**：只查 SQLite，不起进程、不写库（ADR-0012）。
+///
+/// 与 `usage_summary` 同形：`range` 是 `today` / `7d` / `30d` / `all`，
+/// `timezone_offset_minutes` 决定本地日 / 本地小时的归属。`limit` 只截断事件流
+/// （`has_more` 告知前端「还有更多」），不截断按天 / 按小时的聚合。
+#[tauri::command]
+pub fn activity_timeline(
+    state: State<'_, AppState>,
+    range: String,
+    timezone_offset_minutes: i32,
+    limit: Option<u32>,
+) -> Result<crate::activity::ActivityTimeline> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let range = crate::usage::summary::parse_range(&range)?;
+    let window = crate::usage::summary::range_bounds(
+        database.connection(),
+        range,
+        &clock::now_rfc3339(),
+        timezone_offset_minutes,
+    )?;
+
+    crate::activity::query::timeline(
+        database.connection(),
+        &window,
+        limit
+            .unwrap_or(DEFAULT_ACTIVITY_LIMIT)
+            .min(MAX_ACTIVITY_LIMIT),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +475,100 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "path": "D:/work/demo" }))
                 .expect("name 可省");
         assert_eq!(minimal.name, None);
+    }
+
+    /// 跨 IPC 契约测试：`activity_timeline` 的返回形状。
+    ///
+    /// 前端 `normalizeActivityTimeline`（src/lib/ipc.ts）按这些键取值；
+    /// 顶层键名、`events` / `days` / `hours` 三张表的键名都要锁死。
+    #[test]
+    fn activity_timeline_serializes_with_camel_case_keys() {
+        let timeline = crate::activity::ActivityTimeline {
+            range: crate::usage::summary::UsageRangeWindow {
+                kind: crate::usage::summary::UsageRange::Today,
+                start_utc: Some("2026-09-22T16:00:00Z".to_string()),
+                end_utc: Some("2026-09-23T16:00:00Z".to_string()),
+                timezone_offset_minutes: 480,
+                now_utc: "2026-09-22T23:30:00Z".to_string(),
+            },
+            events: vec![crate::activity::ActivityEvent {
+                kind: crate::activity::ActivityEventKind::Usage,
+                occurred_at: "2026-09-22T23:30:00Z".to_string(),
+                day: "2026-09-23".to_string(),
+                hour: 7,
+                harness_id: "codex".to_string(),
+                project_id: None,
+                source_session_id: Some("s-1".to_string()),
+                model: Some("gpt-5.6-sol".to_string()),
+                total_tokens: 32,
+                cost_microunits: Some(12_340_000),
+                cost_is_lower_bound: false,
+                status: None,
+                launch_mode: None,
+                duration_ms: None,
+                cwd: None,
+                hub_session_id: None,
+            }],
+            days: vec![crate::activity::ActivityDayBucket {
+                day: "2026-09-23".to_string(),
+                usage_event_count: 1,
+                managed_session_count: 0,
+                total_tokens: 32,
+                cost_microunits: Some(12_340_000),
+                cost_is_lower_bound: false,
+            }],
+            hours: vec![crate::activity::ActivityHourBucket {
+                hour: 7,
+                usage_event_count: 1,
+                managed_session_count: 0,
+                total_tokens: 32,
+            }],
+            usage_event_count: 1,
+            managed_session_count: 0,
+            active_days: 1,
+            total_tokens: 32,
+            max_day_tokens: 32,
+            max_hour_tokens: 32,
+            has_more: false,
+        };
+
+        let json = serde_json::to_value(&timeline).expect("序列化");
+        let object = json.as_object().expect("对象");
+
+        assert_eq!(
+            object.len(),
+            crate::activity::ActivityTimeline::keys().len(),
+            "顶层键必须恰好是 keys() 列出的那些"
+        );
+        for key in crate::activity::ActivityTimeline::keys() {
+            assert!(object.get(*key).is_some(), "缺键：{key}");
+        }
+
+        assert_eq!(json["range"]["kind"], "today");
+        assert_eq!(json["range"]["timezoneOffsetMinutes"], 480);
+        assert_eq!(json["range"]["startUtc"], "2026-09-22T16:00:00Z");
+        assert_eq!(json["events"][0]["kind"], "usage");
+        assert_eq!(json["events"][0]["occurredAt"], "2026-09-22T23:30:00Z");
+        assert_eq!(json["events"][0]["day"], "2026-09-23");
+        assert_eq!(json["events"][0]["hour"], 7);
+        assert_eq!(json["events"][0]["totalTokens"], 32);
+        assert_eq!(json["events"][0]["costIsLowerBound"], false);
+        assert_eq!(json["days"][0]["usageEventCount"], 1);
+        assert_eq!(json["hours"][0]["managedSessionCount"], 0);
+        assert_eq!(json["hasMore"], false);
+
+        // 不得出现 snake_case 孪生键（AGENTS.md 跨 IPC 契约纪律）。
+        for leaked in [
+            "usage_event_count",
+            "managed_session_count",
+            "max_day_tokens",
+            "cost_is_lower_bound",
+        ] {
+            assert!(json.get(leaked).is_none(), "顶层泄漏：{leaked}");
+            let event = json["events"][0].as_object().expect("events 对象");
+            assert!(event.get(leaked).is_none(), "events 泄漏：{leaked}");
+            let day = json["days"][0].as_object().expect("days 对象");
+            assert!(day.get(leaked).is_none(), "days 泄漏：{leaked}");
+        }
     }
 }

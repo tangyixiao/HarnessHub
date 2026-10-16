@@ -1009,3 +1009,209 @@ export async function getUsageSummary(options: {
 
   return { ok: true, data: summary };
 }
+
+/* ------------------------------------------------------------------ *
+ * Activity Timeline（只读投影，ADR-0012）
+ * ------------------------------------------------------------------ */
+
+export type ActivityEventKind = 'usage' | 'session';
+
+const ACTIVITY_EVENT_KINDS: ActivityEventKind[] = ['usage', 'session'];
+
+/** 活动流里的一条事件。`day` / `hour` 已由后端按 `timezoneOffsetMinutes` 本地化。 */
+export interface ActivityEvent {
+  kind: ActivityEventKind;
+  occurredAt: string;
+  day: string;
+  hour: number;
+  harnessId: string;
+  projectId: string | null;
+  sourceSessionId: string | null;
+  model: string | null;
+  totalTokens: number;
+  costMicrounits: number | null;
+  costIsLowerBound: boolean;
+  status: string | null;
+  launchMode: string | null;
+  durationMs: number | null;
+  cwd: string | null;
+  hubSessionId: string | null;
+}
+
+export interface ActivityDayBucket {
+  day: string;
+  usageEventCount: number;
+  managedSessionCount: number;
+  totalTokens: number;
+  costMicrounits: number | null;
+  costIsLowerBound: boolean;
+}
+
+export interface ActivityHourBucket {
+  hour: number;
+  usageEventCount: number;
+  managedSessionCount: number;
+  totalTokens: number;
+}
+
+export interface ActivityTimeline {
+  range: UsageRangeWindow;
+  events: ActivityEvent[];
+  days: ActivityDayBucket[];
+  hours: ActivityHourBucket[];
+  usageEventCount: number;
+  managedSessionCount: number;
+  activeDays: number;
+  totalTokens: number;
+  maxDayTokens: number;
+  maxHourTokens: number;
+  hasMore: boolean;
+}
+
+function normalizeActivityEventArray(raw: unknown): ActivityEvent[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): ActivityEvent[] => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const occurredAt = typeof source.occurredAt === 'string' ? source.occurredAt : '';
+    if (occurredAt.length === 0) {
+      return [];
+    }
+    const hour = asNumber(source.hour);
+    return [
+      {
+        kind: ACTIVITY_EVENT_KINDS.includes(source.kind as ActivityEventKind)
+          ? (source.kind as ActivityEventKind)
+          : 'usage',
+        occurredAt,
+        day: typeof source.day === 'string' ? source.day : '',
+        hour: hour >= 0 && hour <= 23 ? hour : 0,
+        harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+        projectId: asStringOrNull(source.projectId),
+        sourceSessionId: asStringOrNull(source.sourceSessionId),
+        model: asStringOrNull(source.model),
+        totalTokens: asNumber(source.totalTokens),
+        costMicrounits: typeof source.costMicrounits === 'number' ? source.costMicrounits : null,
+        costIsLowerBound: source.costIsLowerBound === true,
+        status: asStringOrNull(source.status),
+        launchMode: asStringOrNull(source.launchMode),
+        durationMs: typeof source.durationMs === 'number' ? source.durationMs : null,
+        cwd: asStringOrNull(source.cwd),
+        hubSessionId: asStringOrNull(source.hubSessionId),
+      },
+    ];
+  });
+}
+
+function normalizeActivityDayArray(raw: unknown): ActivityDayBucket[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): ActivityDayBucket[] => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const day = typeof source.day === 'string' ? source.day : '';
+    if (day.length === 0) {
+      return [];
+    }
+    return [
+      {
+        day,
+        usageEventCount: asNumber(source.usageEventCount),
+        managedSessionCount: asNumber(source.managedSessionCount),
+        totalTokens: asNumber(source.totalTokens),
+        costMicrounits: typeof source.costMicrounits === 'number' ? source.costMicrounits : null,
+        costIsLowerBound: source.costIsLowerBound === true,
+      },
+    ];
+  });
+}
+
+function normalizeActivityHourArray(raw: unknown): ActivityHourBucket[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): ActivityHourBucket[] => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const source = entry as Record<string, unknown>;
+    const hour = asNumber(source.hour);
+    return [
+      {
+        hour: hour >= 0 && hour <= 23 ? hour : 0,
+        usageEventCount: asNumber(source.usageEventCount),
+        managedSessionCount: asNumber(source.managedSessionCount),
+        totalTokens: asNumber(source.totalTokens),
+      },
+    ];
+  });
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `ActivityTimeline`。
+ *
+ * 与 `normalizeUsageSummary` 同一策略：只有「完全不是对象」才返回 `null`；
+ * 缺字段一律退化成 0 / null，页面宁可显示空日历也不要白屏。
+ */
+export function normalizeActivityTimeline(
+  raw: unknown,
+  fallbackOffsetMinutes = 0,
+): ActivityTimeline | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    range: normalizeRangeWindow(source.range, fallbackOffsetMinutes),
+    events: normalizeActivityEventArray(source.events),
+    days: normalizeActivityDayArray(source.days),
+    hours: normalizeActivityHourArray(source.hours),
+    usageEventCount: asNumber(source.usageEventCount),
+    managedSessionCount: asNumber(source.managedSessionCount),
+    activeDays: asNumber(source.activeDays),
+    totalTokens: asNumber(source.totalTokens),
+    maxDayTokens: asNumber(source.maxDayTokens),
+    maxHourTokens: asNumber(source.maxHourTokens),
+    hasMore: source.hasMore === true,
+  };
+}
+
+/**
+ * Activity 页的**只读**活动流查询（ADR-0012）。
+ *
+ * 不起任何外部进程、不写数据库；`limit` 只截断事件流，后端用 `hasMore`
+ * 告知前端「还有更多」，聚合数字不受截断影响。
+ */
+export async function getActivityTimeline(options: {
+  range: UsageRangeKind;
+  timezoneOffsetMinutes?: number;
+  limit?: number;
+}): Promise<IpcResult<ActivityTimeline>> {
+  const timezoneOffsetMinutes = options.timezoneOffsetMinutes ?? localTimezoneOffsetMinutes();
+  const result = await invokeCommand<unknown>('activity_timeline', {
+    range: options.range,
+    timezoneOffsetMinutes,
+    ...(options.limit === undefined ? {} : { limit: options.limit }),
+  });
+  if (!result.ok) {
+    return result;
+  }
+
+  const timeline = normalizeActivityTimeline(result.data, timezoneOffsetMinutes);
+  if (timeline === null) {
+    return { ok: false, error: 'invalid-activity-timeline-payload' };
+  }
+
+  return { ok: true, data: timeline };
+}

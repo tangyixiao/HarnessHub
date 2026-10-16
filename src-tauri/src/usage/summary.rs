@@ -76,6 +76,11 @@ impl UsageRangeWindow {
     fn modifier(&self) -> String {
         format!("{:+} minutes", self.timezone_offset_minutes)
     }
+
+    /// 同上，但对外可见：`activity` 模块需要把同一个修饰符绑到 `?1`。
+    pub fn modifier_public(&self) -> String {
+        self.modifier()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

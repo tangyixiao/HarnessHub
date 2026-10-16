@@ -104,6 +104,10 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   按 `repo_root` UNIQUE 幂等 upsert + touch `last_opened_at`、删除时 session
   SET NULL / settings CASCADE）、4 个 IPC 命令、Projects 页真实可用
   （见 docs/specs/2026-10-12-project-registry-design.md 与 tests/e2e/README.md）。
-  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage、
-  Activity Timeline。
+  Activity Timeline 已完成（§20 第 15 步）：`src-tauri/src/activity/` 模块把
+  `usage_events` + `sessions` 折叠成统一活动事件流只读投影（ADR-0012 纪律：
+  `timeline(&Connection)` 结构上不可能起进程），1 个 IPC 命令
+  `activity_timeline`、History 页（Activity Calendar + Session Timeline，
+  见 docs/specs/2026-10-14-activity-timeline-design.md 与 tests/e2e/README.md）。
+  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
 - 实施计划见 `docs/plans/`。

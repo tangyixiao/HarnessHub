@@ -5,6 +5,7 @@
 //! - 只有 `commands` 与 [`run`] 直接接触 Tauri；
 //! - SQLite 由本 crate 独占持有，Python sidecar 不得直连。
 
+pub mod activity;
 pub mod clock;
 pub mod commands;
 pub mod db;
@@ -146,6 +147,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::activity_timeline,
             commands::app_info,
             commands::db_health,
             commands::create_session,

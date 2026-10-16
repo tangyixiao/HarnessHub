@@ -1293,3 +1293,51 @@ test the_real_machine_resolves_this_repository_root_and_registers_it ... ok
   `created_at=updated_at=last_opened_at=2026-10-12T15:06:06Z`（RFC3339Z，与
   `clock::now_rfc3339` 同形）；`sessions.project_id` 非空计数 0（当前无挂项目的 session）。
 - 删除 → 卡片消失、空态文案回归、`projects` 行数归零（session 保留但失去归属）。
+
+## 2026-10-14 — Activity Timeline（统一活动事件流投影，§20 第 15 步）
+
+### 真机测试（`src-tauri/tests/real_activity_timeline.rs`，7 passed / 16.56s，2026-10-16）
+
+```
+Activity 对账通过：usage 事件 232 / tokens 2945615580 / 活跃本地日 32 / 今天 13 条（30 天 210 条）
+```
+
+覆盖点：
+
+- 真机跑一次 ccusage 导入 replay 同一份快照后，`activity::query::timeline()` 与
+  **独立手写 SQL** 逐项一致：token 总数、事件数、逐日聚合（独立 SQL 故意不用
+  `query.rs` 的 UNION ALL 口径，日期集合与每日 tokens 全部对上）。
+- 三个维度自洽：事件流之和 == 按天之和 == 按小时之和 == 全局 token 数；
+  `hours` 恒 24 项按 hour 升序；`active_days == days.len()`。
+- 关掉数据库重开，Activity 的每一个数字一字不变（数字完全由 SQLite 恢复）。
+- 时间窗：`+480` 与 `+0` 的「今天」是不同 UTC 窗口；今天 ⊆ 30 天（事件数与 tokens）。
+- 渲染路径结构上不可能起 ccusage：`timeline()` 签名只拿 `&Connection`。
+- 冷启动纪律：临时目录裸 `Database::open` 从零迁移，只调生产代码填充前置状态。
+
+### lifecycle 修复（`src-tauri/tests/opencode_lifecycle.rs` S2，2026-10-16）
+
+- S2 首跑失败：`s2_opencode_can_exit_naturally` 第一对 Ctrl+C 的 25s 观察窗超时直接
+  panic，文档注释承诺的「补发一对」重试不可达（opencode 版本未变，1.18.23；
+  当天 TUI 初始化慢、首屏 6702-11915 bytes，慢启动吞键暴露测试缺陷；10-12 通过
+  纯属时序好）。修复 = 观察窗超时改 `break` 静默退出内层循环，让外层 3 对重试生效。
+- 修复后 4 条链全绿（39.45s `--test-threads=1`）：S1 `user_killed` exit_code=1、
+  S2 补发一对后 `natural_exit` exit_code=0、S3 `host_shutdown` Unknown、S4 `lost` 幂等；
+  S2 单独再跑两次均过（7.25s / 8.48s）。教训：内层循环超时 panic 会吞掉外层文档化
+  重试逻辑；真机 TUI 测试首屏字节数可作时序漂移信号。
+
+### GUI 机制（dev app，override 3300 端口 + CDP 9222，2026-10-14 实测）
+
+- 截图：`D:\HarnessHub-E2E\activity-gui.png`（全部范围，选中 2026-06-10）；
+  驱动脚本 `activity-gui.mjs`、原始输出 `activity-gui.log`、观察记录
+  `activity-gui-notes.md`。
+- 30 天：Active Days 14 / Tokens 319,248,080 / Usage Events 35 / Managed Sessions 41；
+  事件流默认全部，点 `2026-06-10` 后描述变为「2026-06-10 的事件。」。
+- 全部：Active Days 46 / Tokens **4,757,843,285** / Usage Events **243** /
+  Managed Sessions 41 —— 与 Dashboard 逐字一致（同一份 SQLite 只读投影）。
+- 今天：全 0 + 空态「还没有活动数据」（当天无导入用量也无新会话，符合预期）。
+- 小时图 `activity-hours` 子元素 24 个（本地小时 0..23 全覆盖）。
+- 页面无 `**` 字面 markdown、无 `+NNN -NNN` diff 形态（CONTEXT.md 约束 7）。
+- 已知取舍：选中 2026-06-10 时事件流显示「这一天没有事件流记录。」——该日只有
+  1 条 usage 事件，而事件流上限 60 条已被更新的记录占满，`hasMore=true` 如实提示；
+  按天聚合（330,804 tokens）与事件流上限是两个独立口径，页面文案已写明
+  「按天 / 按小时的聚合不受此限制」。

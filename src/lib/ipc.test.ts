@@ -7,6 +7,7 @@ import {
   NOT_IN_TAURI,
   createSession,
   finishSession,
+  getActivityTimeline,
   getAppInfo,
   getDbHealth,
   getProjectSessions,
@@ -17,6 +18,7 @@ import {
   listHarnesses,
   listProjects,
   listSessions,
+  normalizeActivityTimeline,
   normalizeHarnessSummary,
   normalizeProjectRecord,
   normalizeSessionRecord,
@@ -922,6 +924,187 @@ describe('getUsageSummary', () => {
     await expect(getUsageSummary({ range: 'all' })).resolves.toEqual({
       ok: false,
       error: NOT_IN_TAURI,
+    });
+  });
+});
+
+describe('Activity Timeline IPC（§20 第 15 步）', () => {
+  /** 与 Rust `activity_timeline_serializes_with_camel_case_keys` 同形。 */
+  const payload = {
+    range: {
+      kind: 'today',
+      startUtc: '2026-09-22T16:00:00Z',
+      endUtc: '2026-09-23T16:00:00Z',
+      timezoneOffsetMinutes: 480,
+      nowUtc: '2026-09-22T23:30:00Z',
+    },
+    events: [
+      {
+        kind: 'usage',
+        occurredAt: '2026-09-22T23:30:00Z',
+        day: '2026-09-23',
+        hour: 7,
+        harnessId: 'codex',
+        projectId: null,
+        sourceSessionId: 's-1',
+        model: 'gpt-5.6-sol',
+        totalTokens: 32,
+        costMicrounits: 12_340_000,
+        costIsLowerBound: false,
+        status: null,
+        launchMode: null,
+        durationMs: null,
+        cwd: null,
+        hubSessionId: null,
+      },
+      {
+        kind: 'session',
+        occurredAt: '2026-09-22T10:00:00Z',
+        day: '2026-09-22',
+        hour: 18,
+        harnessId: 'codex',
+        projectId: null,
+        sourceSessionId: null,
+        model: null,
+        totalTokens: 0,
+        costMicrounits: null,
+        costIsLowerBound: false,
+        status: 'exited',
+        launchMode: 'terminal',
+        durationMs: 95_000,
+        cwd: 'D:/HarnessHub',
+        hubSessionId: 'hub-1',
+      },
+    ],
+    days: [
+      {
+        day: '2026-09-22',
+        usageEventCount: 0,
+        managedSessionCount: 1,
+        totalTokens: 0,
+        costMicrounits: null,
+        costIsLowerBound: false,
+      },
+      {
+        day: '2026-09-23',
+        usageEventCount: 1,
+        managedSessionCount: 0,
+        totalTokens: 32,
+        costMicrounits: 12_340_000,
+        costIsLowerBound: false,
+      },
+    ],
+    hours: Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      usageEventCount: hour === 7 ? 1 : 0,
+      managedSessionCount: 0,
+      totalTokens: hour === 7 ? 32 : 0,
+    })),
+    usageEventCount: 1,
+    managedSessionCount: 1,
+    activeDays: 2,
+    totalTokens: 32,
+    maxDayTokens: 32,
+    maxHourTokens: 32,
+    hasMore: false,
+  };
+
+  it('解析 Rust 侧的真实形状', () => {
+    const timeline = normalizeActivityTimeline(payload);
+
+    expect(timeline?.usageEventCount).toBe(1);
+    expect(timeline?.managedSessionCount).toBe(1);
+    expect(timeline?.activeDays).toBe(2);
+    expect(timeline?.totalTokens).toBe(32);
+    expect(timeline?.hasMore).toBe(false);
+    expect(timeline?.range.kind).toBe('today');
+    expect(timeline?.range.timezoneOffsetMinutes).toBe(480);
+    expect(timeline?.events[0]?.kind).toBe('usage');
+    expect(timeline?.events[0]?.day).toBe('2026-09-23');
+    expect(timeline?.events[0]?.hour).toBe(7);
+    expect(timeline?.events[1]?.durationMs).toBe(95_000);
+    expect(timeline?.days).toHaveLength(2);
+    expect(timeline?.hours).toHaveLength(24);
+    expect(timeline?.hours[7]?.totalTokens).toBe(32);
+  });
+
+  it('完全不是对象时才返回 null（其余形状都收敛成安全默认值）', () => {
+    expect(normalizeActivityTimeline(null)).toBeNull();
+    expect(normalizeActivityTimeline('nope')).toBeNull();
+
+    const partial = normalizeActivityTimeline({ events: 'nope', days: null, hours: 3 });
+    expect(partial?.events).toEqual([]);
+    expect(partial?.days).toEqual([]);
+    expect(partial?.hours).toEqual([]);
+    expect(partial?.usageEventCount).toBe(0);
+    expect(partial?.hasMore).toBe(false);
+    expect(partial?.range.kind).toBe('all');
+  });
+
+  it('丢掉没有发生时间的事件，而不是渲染一行没有时间的记录', () => {
+    const timeline = normalizeActivityTimeline({
+      events: [{ totalTokens: 1 }, { occurredAt: '2026-09-22T23:30:00Z', totalTokens: 2 }],
+    });
+
+    expect(timeline?.events).toHaveLength(1);
+    expect(timeline?.events[0]?.occurredAt).toBe('2026-09-22T23:30:00Z');
+    expect(timeline?.events[0]?.totalTokens).toBe(2);
+  });
+
+  it('未知 kind 收敛为 usage，越界 hour 收敛为 0', () => {
+    const timeline = normalizeActivityTimeline({
+      events: [
+        {
+          kind: 'git-diff',
+          occurredAt: '2026-09-22T23:30:00Z',
+          hour: 99,
+          totalTokens: 5,
+        },
+      ],
+      hours: [{ hour: -1, totalTokens: 1 }],
+    });
+
+    expect(timeline?.events[0]?.kind).toBe('usage');
+    expect(timeline?.events[0]?.hour).toBe(0);
+    expect(timeline?.hours[0]?.hour).toBe(0);
+  });
+
+  it('getActivityTimeline 把范围、时区偏移与 limit 一起传给后端', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({}));
+    stubTauri(invokeSpy);
+
+    const result = await getActivityTimeline({
+      range: '7d',
+      timezoneOffsetMinutes: 480,
+      limit: 60,
+    });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('activity_timeline');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      range: '7d',
+      timezoneOffsetMinutes: 480,
+      limit: 60,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('省略 limit 时不带上这个参数（后端用自己的默认值）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({}));
+    stubTauri(invokeSpy);
+
+    await getActivityTimeline({ range: 'all' });
+
+    const args = invokeSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('limit' in args).toBe(false);
+    expect(typeof args.timezoneOffsetMinutes).toBe('number');
+  });
+
+  it('形状完全不对时返回明确错误，而不是伪造一份空时间线', async () => {
+    stubTauri(async () => 42);
+
+    await expect(getActivityTimeline({ range: 'all' })).resolves.toEqual({
+      ok: false,
+      error: 'invalid-activity-timeline-payload',
     });
   });
 });

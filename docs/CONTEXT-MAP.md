@@ -29,7 +29,7 @@
 | Harness 列表页                     | `src/features/harnesses/`                                                                                                                                                 |
 | 项目页                             | `src/features/projects/`                                                                                                                                                  |
 | Session / Terminal                 | `src/features/sessions/`、`src/features/terminal/`                                                                                                                        |
-| 历史 / Activity Timeline           | `src/features/history/`                                                                                                                                                   |
+| 历史 / Activity Timeline           | `src/features/history/`、`src-tauri/src/activity/`（`query.rs` = 统一活动流只读投影，真机测试 `src-tauri/tests/real_activity_timeline.rs`）                               |
 | 设置                               | `src/features/settings/`                                                                                                                                                  |
 | 前端调用 Rust                      | `src/lib/ipc.ts`（唯一 IPC 入口，不要在组件里直接 `invoke`）                                                                                                              |
 | Adapter 测试夹具                   | `fixtures/<harness>/`、`docs/adr/`                                                                                                                                        |
