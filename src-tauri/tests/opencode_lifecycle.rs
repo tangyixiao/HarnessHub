@@ -290,10 +290,12 @@ fn s2_opencode_can_exit_naturally() {
                 outcome = Some(record);
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "一对 Ctrl+C 的观察窗超时（会话仍 running）"
-            );
+            // 观察窗到期必须**静默退出**内层循环，让外层按文档注释补发下一对；
+            // 在这里 panic 会让「补一对」的重试永远不可达（2026-10-16 实测：
+            // TUI 初始化变慢吞键时第一对超时直接炸测试）。
+            if Instant::now() >= deadline {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         if let Some(record) = outcome {
