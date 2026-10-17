@@ -13,8 +13,10 @@
 //! - [`supervisor`]：子进程生命周期、握手、超时与降级。
 
 pub mod adapters;
+pub mod discovery;
 pub mod host_api;
 pub mod manifest;
 pub mod registry;
 pub mod rpc;
+pub mod service;
 pub mod supervisor;
