@@ -38,14 +38,14 @@ plugins/
 
 宿主侧模块（`src-tauri/src/plugins/`，全部新建）：
 
-| 文件 | 职责 |
-|---|---|
-| `manifest.rs` | manifest.toml 解析 + 校验（id 规范、api_version 匹配、capabilities 布尔） |
-| `registry.rs` | 已安装插件发现/注册（扫描 `plugins/` 目录），插件表落 SQLite |
-| `rpc.rs` | 行分隔 JSON-RPC 2.0 codec + 跨 IPC DTO（含 contract test） |
-| `supervisor.rs` | 子进程生命周期：spawn、握手超时、崩溃隔离、stderr 捕获 |
-| `host_api.rs` | 受限 Host API 分发点 + observe-only 决策记录 |
-| `adapters.rs` | 六类 Adapter trait 契约（Rust 侧） |
+| 文件            | 职责                                                                      |
+| --------------- | ------------------------------------------------------------------------- |
+| `manifest.rs`   | manifest.toml 解析 + 校验（id 规范、api_version 匹配、capabilities 布尔） |
+| `registry.rs`   | 已安装插件发现/注册（扫描 `plugins/` 目录），插件表落 SQLite              |
+| `rpc.rs`        | 行分隔 JSON-RPC 2.0 codec + 跨 IPC DTO（含 contract test）                |
+| `supervisor.rs` | 子进程生命周期：spawn、握手超时、崩溃隔离、stderr 捕获                    |
+| `host_api.rs`   | 受限 Host API 分发点 + observe-only 决策记录                              |
+| `adapters.rs`   | 六类 Adapter trait 契约（Rust 侧）                                        |
 
 数据流：UI/命令 → `plugins::registry` → `supervisor` spawn 插件进程 → JSON-RPC 握手（capability negotiation）→ 按需调用 Adapter 方法 → 所有 Host API 调用经 `host_api` 记录 `permission_decisions`。
 
@@ -57,10 +57,17 @@ name = "Usage Connect"
 version = "0.1.0"
 api_version = "1"               # 宿主只接受 "1"
 
+[adapter]
+command = ["python", "adapter/usage.py"]   # argv，不经 shell；cwd = 插件目录
+
 [capabilities]
 usage = true                    # detect/launch/resume/usage/trace/profiles/mcp/skills 布尔
 # 其余缺省 false
 ```
+
+`[adapter].command` 是**必需**字段（补 spec 初稿遗漏的启动声明）：宿主 `spawn(argv[0], argv[1..])`，
+`cwd` 固定为插件目录，因此相对路径参数天然解析到插件内部；**禁止经 shell 展开**
+（不做 `sh -c`，避免 manifest 变成任意命令执行入口）。空数组/空串/缺失 = manifest 校验失败。
 
 ## 2. 协议、握手与 Adapter 契约
 
@@ -78,17 +85,17 @@ usage = true                    # detect/launch/resume/usage/trace/profiles/mcp/
 
 **Adapter 方法**（宿主→插件）：
 
-| 方法 | 通路 | v0.1 状态 |
-|---|---|---|
-| `usage/import` | connect 示例 | **打通**：结果喂现有 usage 导入管道 |
-| `skill/list` / `skill/get` | skill 示例 | **打通**：SKILL.md 注入会话启动 |
-| `harness/*`、`profile/*`、`trace/*`、`runtime/*` | — | trait + 协议方法定义，实现返回 `-32001 not_supported` |
+| 方法                                             | 通路         | v0.1 状态                                             |
+| ------------------------------------------------ | ------------ | ----------------------------------------------------- |
+| `usage/import`                                   | connect 示例 | **打通**：结果喂现有 usage 导入管道                   |
+| `skill/list` / `skill/get`                       | skill 示例   | **打通**：SKILL.md 注入会话启动                       |
+| `harness/*`、`profile/*`、`trace/*`、`runtime/*` | —            | trait + 协议方法定义，实现返回 `-32001 not_supported` |
 
 **Host API**（插件→宿主，7 个受限 API 按计划书全列）：
 
-| 方法 | v0.1 状态 |
-|---|---|
-| `host/log` | **真实实现**（写 tracing + 记录决策） |
+| 方法                                                                                                                             | v0.1 状态                                   |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `host/log`                                                                                                                       | **真实实现**（写 tracing + 记录决策）       |
 | `fs.read_scoped`、`secret.resolve_ref`、`db.emit_event`、`config.read_owned`、`config.write_projected`、`process.spawn_declared` | 协议定义，宿主返回 `-32003 not_implemented` |
 
 **Permission boundary（observe-only + migration 0008）**：每次 Host API 调用写一行：
