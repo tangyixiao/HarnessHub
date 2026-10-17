@@ -379,12 +379,157 @@ pub fn activity_timeline(
     )
 }
 
+/// 插件能力的**只读快照**，八个布尔与 manifest 的 `[capabilities]` 一一对应。
+///
+/// 之所以不直接把 `capabilities_json` 原文透给前端：那样 TS 侧就得自己解析一段
+/// 未校验的 JSON，而 IPC 契约纪律要求形状在 Rust 侧定型（AGENTS.md）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilities {
+    pub detect: bool,
+    pub launch: bool,
+    pub resume: bool,
+    pub usage: bool,
+    pub trace: bool,
+    pub profiles: bool,
+    pub mcp: bool,
+    pub skills: bool,
+}
+
+/// 一个已缓存的 skill（注册时从插件拉取，v0.1 不热更新）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSkill {
+    pub skill_id: String,
+    pub name: String,
+    pub description: String,
+    /// `SKILL.md` 原文。宿主不解析（spec §3），这里同样只透传。
+    pub body: String,
+}
+
+/// 插件列表项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub api_version: String,
+    pub path: String,
+    pub status: String,
+    pub capabilities: PluginCapabilities,
+    pub skills: Vec<PluginSkill>,
+    pub registered_at: String,
+}
+
+/// 已登记插件列表。**纯读**：不扫目录、不起进程（ADR-0012）。
+///
+/// 要发现新插件或复活 degraded 插件请调用 [`plugin_refresh`]。
+#[tauri::command]
+pub fn plugin_list(state: State<'_, AppState>) -> Result<Vec<PluginSummary>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let records = crate::plugins::registry::list_plugins(database.connection())?;
+    Ok(records.into_iter().map(plugin_summary).collect())
+}
+
+/// 一次 refresh 的结果，透给调用方作为「刷新已生效」的证据。
+///
+/// 刻意不用 `Result`：单个插件失败是正常结果（R14），见 `service::RefreshReport`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRefreshReport {
+    pub registered: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// 显式刷新插件：扫描目录 → 登记 → 握手 → 拉取 skill 缓存。
+///
+/// 语义上是**写操作**（起子进程、写 `plugins` 表），因此只允许用户动作触发，
+/// 绝不在渲染时调用——与 [`refresh_usage`] 同一条纪律。
+#[tauri::command]
+pub fn plugin_refresh(state: State<'_, AppState>) -> Result<PluginRefreshReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let report = crate::plugins::service::refresh(database.connection(), &state.plugins_root);
+    Ok(PluginRefreshReport {
+        registered: report.registered,
+        errors: report.errors,
+    })
+}
+
+/// 注册表行 → IPC 视图。
+///
+/// 解析失败**降级成空值而不是报错**：一条坏行不该让整个插件列表打不开
+/// （`capabilities_json` / `skills_cache_json` 只由本宿主写入，坏掉说明库被外部改过）。
+fn plugin_summary(record: crate::plugins::registry::PluginRecord) -> PluginSummary {
+    PluginSummary {
+        id: record.id,
+        name: record.name,
+        version: record.version,
+        api_version: record.api_version,
+        path: record.path,
+        status: record.status,
+        capabilities: parse_capabilities(&record.capabilities_json),
+        skills: parse_skills(record.skills_cache_json.as_deref()),
+        registered_at: record.registered_at,
+    }
+}
+
+fn parse_capabilities(raw: &str) -> PluginCapabilities {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return PluginCapabilities::default();
+    };
+    let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+    PluginCapabilities {
+        detect: flag("detect"),
+        launch: flag("launch"),
+        resume: flag("resume"),
+        usage: flag("usage"),
+        trace: flag("trace"),
+        profiles: flag("profiles"),
+        mcp: flag("mcp"),
+        skills: flag("skills"),
+    }
+}
+
+/// 缓存形状是 `{"skills":[…]}`（见 `service::fetch_skills`）；`NULL` = 还没拉过。
+fn parse_skills(raw: Option<&str>) -> Vec<PluginSkill> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.get("skills").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            // 缺 skill_id 的条目直接丢弃：没有 id 的 skill 无法被引用。
+            let skill_id = entry.get("skill_id")?.as_str()?.to_string();
+            let text = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            Some(PluginSkill {
+                name: text("name"),
+                description: text("description"),
+                body: text("body"),
+                skill_id,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::usage::importer::Reconciliation;
     use crate::usage::{ImportStatus, RunnerKind, UsageImport};
-
     /// 跨 IPC 契约测试：`refresh_usage` 的返回形状。
     ///
     /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageRefreshReport` 依赖这些键，
@@ -569,6 +714,55 @@ mod tests {
             assert!(event.get(leaked).is_none(), "events 泄漏：{leaked}");
             let day = json["days"][0].as_object().expect("days 对象");
             assert!(day.get(leaked).is_none(), "days 泄漏：{leaked}");
+        }
+    }
+
+    /// 跨 IPC 契约测试：`plugin_list` 的返回形状。
+    ///
+    /// 前端 `src/lib/ipc.ts` 的 `normalizePlugin` 依赖这些键名；插件列表一旦
+    /// 泄漏 snake_case，UI 会静默渲染空列表而不是报错——这正是 AGENTS.md 里
+    /// 记录过两次的同类事故，所以在这里逐字锁死。
+    #[test]
+    fn plugin_list_serializes_summary_with_camel_case_keys() {
+        let summary = PluginSummary {
+            id: "usage-connect".to_string(),
+            name: "Usage Connect".to_string(),
+            version: "0.1.0".to_string(),
+            api_version: "1".to_string(),
+            path: "/plugins/usage-connect".to_string(),
+            status: "ready".to_string(),
+            capabilities: PluginCapabilities {
+                usage: true,
+                skills: true,
+                ..Default::default()
+            },
+            skills: vec![PluginSkill {
+                skill_id: "demo".to_string(),
+                name: "Demo".to_string(),
+                description: "演示".to_string(),
+                body: "---\nname: demo\n---\n".to_string(),
+            }],
+            registered_at: "2026-10-17T00:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_value(&summary).expect("序列化");
+
+        assert_eq!(json["id"], "usage-connect");
+        assert_eq!(json["apiVersion"], "1");
+        assert_eq!(json["registeredAt"], "2026-10-17T00:00:00Z");
+        assert_eq!(json["capabilities"]["usage"], true);
+        assert_eq!(json["capabilities"]["trace"], false);
+        assert_eq!(json["skills"][0]["skillId"], "demo");
+        assert_eq!(json["skills"][0]["body"], "---\nname: demo\n---\n");
+
+        // capabilities 必须八个键全在：消费者不该去猜缺键语义。
+        let capabilities = json["capabilities"].as_object().expect("capabilities 对象");
+        assert_eq!(capabilities.len(), 8);
+
+        for leaked in ["api_version", "registered_at", "skill_id"] {
+            assert!(json.get(leaked).is_none(), "顶层泄漏：{leaked}");
+            let skill = json["skills"][0].as_object().expect("skills 对象");
+            assert!(skill.get(leaked).is_none(), "skills 泄漏：{leaked}");
         }
     }
 }

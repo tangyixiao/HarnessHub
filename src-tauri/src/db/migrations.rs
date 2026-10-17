@@ -67,6 +67,18 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0007_usage_import_unattributed_tokens.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 8,
+        name: "0008_permission_decisions",
+        sql: include_str!("migrations/0008_permission_decisions.sql"),
+        foreign_keys_off: false,
+    },
+    Migration {
+        version: 9,
+        name: "0009_plugins",
+        sql: include_str!("migrations/0009_plugins.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -223,6 +235,8 @@ mod tests {
         "tool_calls",
         "file_events",
         "git_events",
+        "permission_decisions",
+        "plugins",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -934,5 +948,126 @@ mod tests {
             sessions_sql.contains("harness_installations"),
             "sessions 必须保留指向 harness_installations 的复合外键：{sessions_sql}"
         );
+    }
+
+    /// 0008 + 0009：**老库升级路径**（AGENTS.md 冷启动纪律）。
+    ///
+    /// 必须用裸 `Connection` + `apply_until` 控制版本：`Database::open_*` 会一次性把迁移
+    /// 跑到最新，那样只能验证最终 schema —— 而真实用户是从 v7 升上来的。
+    /// 这条用例同时是「两条插件迁移被正确注册、按序执行」的唯一证据。
+    #[test]
+    fn migration_0008_and_0009_upgrade_a_v7_database_to_v9() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        // 模拟已发布的 v7 用户库：只有 0001..0007 的内容。
+        apply_until(&mut conn, 7).expect("建到 v7");
+        assert_eq!(current_version(&conn).expect("版本"), 7);
+        // 老库里这两张表**确实还不存在** —— 否则下面的断言可能只是「表本来就在」。
+        let plugin_tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'
+                 AND name IN ('permission_decisions', 'plugins')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v7 表检查");
+        assert_eq!(plugin_tables, 0, "v7 不该有插件相关表");
+
+        // 用生产入口升级，顺序与命名都必须可核对。
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(
+            applied,
+            vec![
+                "0008_permission_decisions".to_string(),
+                "0009_plugins".to_string(),
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 9);
+
+        // 升级之后的库必须真的可用，而不只是「表存在」。
+        conn.execute(
+            "INSERT INTO plugins
+                (id, name, version, api_version, path, capabilities_json,
+                 skills_cache_json, status, registered_at)
+             VALUES ('usage-connect', 'Usage Connect', '0.1.0', '1', 'D:/plugins/usage-connect',
+                     '{\"usage\":true}', NULL, 'ready', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("升级后必须能写插件行");
+        conn.execute(
+            "INSERT INTO permission_decisions (plugin_id, api, decision, reason, args_json, created_at)
+             VALUES ('usage-connect', 'host/log', 'observed', NULL, '{}', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("升级后必须能写决策行");
+
+        // CHECK 约束真的在生效（不是「列名存在」而已）。
+        let bad_status = conn.execute(
+            "INSERT INTO plugins
+                (id, name, version, api_version, path, capabilities_json,
+                 skills_cache_json, status, registered_at)
+             VALUES ('bad', 'Bad', '0.1.0', '1', 'D:/p/bad', '{}', NULL, 'enabled', 't')",
+            [],
+        );
+        assert!(bad_status.is_err(), "非法 status 必须被 CHECK 拒绝");
+
+        let bad_decision = conn.execute(
+            "INSERT INTO permission_decisions (plugin_id, api, decision, args_json, created_at)
+             VALUES ('usage-connect', 'host/log', 'allowed', '{}', 't')",
+            [],
+        );
+        assert!(
+            bad_decision.is_err(),
+            "v0.1 的 decision 只允许 'observed'，'allowed' 必须被拒绝"
+        );
+
+        // 没有外键违规：这两张表是故意不加外键的，但不该顺手破坏别处。
+        let violations: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("外键检查");
+        assert_eq!(violations, 0);
+    }
+
+    /// 卸载插件后，它当年的权限决策必须留下（这就是 0008 不加外键的理由）。
+    ///
+    /// 如果 `permission_decisions.plugin_id` 是 `REFERENCES plugins(id)`，
+    /// 这条断言在 CASCADE 下会悄悄清零、在 RESTRICT 下插件根本删不掉。
+    #[test]
+    fn permission_decisions_survive_plugin_uninstall() {
+        let db = crate::test_support::empty_db();
+        let conn = db.connection();
+
+        conn.execute(
+            "INSERT INTO plugins
+                (id, name, version, api_version, path, capabilities_json,
+                 skills_cache_json, status, registered_at)
+             VALUES ('hello-skill', 'Hello Skill', '0.1.0', '1', 'D:/plugins/hello-skill',
+                     '{\"skills\":true}', '[]', 'ready', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("登记插件");
+        conn.execute(
+            "INSERT INTO permission_decisions (plugin_id, api, decision, args_json, created_at)
+             VALUES ('hello-skill', 'host/log', 'observed', '{\"message\":\"hi\"}',
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("记录决策");
+
+        conn.execute("DELETE FROM plugins WHERE id = 'hello-skill'", [])
+            .expect("插件可被卸载（有审计记录也不该被拦）");
+
+        let survivors: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM permission_decisions WHERE plugin_id = 'hello-skill'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("计数");
+        assert_eq!(survivors, 1, "卸载插件不得销毁审计证据");
     }
 }

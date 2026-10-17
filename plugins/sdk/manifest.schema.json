@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harnesshub.local/schemas/plugin-manifest.schema.json",
+  "title": "Harness Hub 插件清单（manifest.toml）",
+  "description": "宿主校验规则的可执行镜像。本文件描述的是 manifest.toml 反序列化成 JSON 之后的形状（TOML 与 JSON 的值模型一致，只是语法不同）。字段语义见 plugins/sdk/protocol.md。",
+  "type": "object",
+  "required": ["id", "name", "version", "api_version", "adapter"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "插件唯一标识，同时用作目录名、数据库主键与 RPC 句柄。宿主用 trim 后的值做全串匹配，所以必须是纯 ASCII 小写。首个字符必须是字母，不允许大写、下划线与空格。",
+      "examples": ["usage-connect", "hello-skill", "plugin-2-x"]
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "展示名。唯一规则是 trim 后非空；允许空格与任意 Unicode。"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "插件自身版本（建议 semver）。宿主只要求 trim 后非空，不解析版本号。"
+    },
+    "api_version": {
+      "const": "1",
+      "description": "插件 API 版本。v0.1 宿主只接受字符串 \"1\"，其他值一律拒绝注册（不是警告）。"
+    },
+    "adapter": {
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "description": "启动适配器的 argv 数组，不经过 shell，工作目录固定为插件目录。第一个元素是程序，其余是参数；单元素数组（只有程序名）合法。",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "每个元素 trim 后必须非空：空串会变成一个空参数，插件看到的 argv 与作者预期不同，错误还会推迟到运行时才暴露。"
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "能力声明。缺省整节等价于全部 false。宿主把「插件自报的 supported_methods」与「这里为 true 的能力」求交集，得到真正允许调用的方法集合。声明只是元数据，不是权限引擎（v0.1 只观察不拦截，见 ADR-0018）。",
+      "additionalProperties": false,
+      "properties": {
+        "detect": {
+          "type": "boolean",
+          "default": false,
+          "description": "发现本机已安装的 harness。v0.1 未实现。"
+        },
+        "launch": {
+          "type": "boolean",
+          "default": false,
+          "description": "启动 harness。v0.1 未实现。"
+        },
+        "resume": {
+          "type": "boolean",
+          "default": false,
+          "description": "恢复会话。v0.1 未实现。"
+        },
+        "usage": {
+          "type": "boolean",
+          "default": false,
+          "description": "导入用量。唯一在 v0.1 真正跑通的 connect 通路：usage/import。"
+        },
+        "trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "解析会话轨迹。v0.1 未实现。"
+        },
+        "profiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "读写 profile。v0.1 未实现。"
+        },
+        "mcp": {
+          "type": "boolean",
+          "default": false,
+          "description": "提供 MCP 服务器。v0.1 未实现。"
+        },
+        "skills": {
+          "type": "boolean",
+          "default": false,
+          "description": "提供 skills。v0.1 已跑通的第二条通路：skill/list 与 skill/get。"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

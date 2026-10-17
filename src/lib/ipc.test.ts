@@ -18,8 +18,11 @@ import {
   listHarnesses,
   listProjects,
   listSessions,
+  listPlugins,
   normalizeActivityTimeline,
   normalizeHarnessSummary,
+  normalizePlugin,
+  normalizePluginRefreshReport,
   normalizeProjectRecord,
   normalizeSessionRecord,
   normalizeUsageCapabilities,
@@ -27,6 +30,7 @@ import {
   normalizeUsageReconciliation,
   normalizeUsageSource,
   normalizeUsageSummary,
+  pluginRefresh,
   refreshHarnesses,
   refreshUsage,
   registerProject,
@@ -1106,5 +1110,173 @@ describe('Activity Timeline IPC（§20 第 15 步）', () => {
       ok: false,
       error: 'invalid-activity-timeline-payload',
     });
+  });
+});
+
+/**
+ * 插件列表的 payload 是手工复刻的 Rust `PluginSummary` 形状（camelCase）。
+ * 与 `CODEX_PAYLOAD` 同一策略：锁住前端解析行为，而不是去调真后端。
+ */
+const USAGE_CONNECT_PAYLOAD = {
+  id: 'usage-connect',
+  name: 'Usage Connect',
+  version: '0.1.0',
+  apiVersion: '1',
+  path: 'D:/HarnessHub/plugins/examples/usage-connect',
+  status: 'ready',
+  capabilities: {
+    detect: false,
+    launch: false,
+    resume: false,
+    usage: true,
+    trace: false,
+    profiles: false,
+    mcp: false,
+    skills: false,
+  },
+  skills: [],
+  registeredAt: '2026-10-17T12:00:00Z',
+};
+
+describe('normalizePlugin', () => {
+  it('读出全部字段', () => {
+    const plugin = normalizePlugin(USAGE_CONNECT_PAYLOAD);
+
+    expect(plugin).toEqual({
+      id: 'usage-connect',
+      name: 'Usage Connect',
+      version: '0.1.0',
+      apiVersion: '1',
+      path: 'D:/HarnessHub/plugins/examples/usage-connect',
+      status: 'ready',
+      capabilities: {
+        detect: false,
+        launch: false,
+        resume: false,
+        usage: true,
+        trace: false,
+        profiles: false,
+        mcp: false,
+        skills: false,
+      },
+      skills: [],
+      registeredAt: '2026-10-17T12:00:00Z',
+    });
+  });
+
+  it('缺 capabilities 时八个布尔全退化成 false（而不是 undefined）', () => {
+    const plugin = normalizePlugin({ id: 'bare', name: 'Bare' });
+
+    expect(plugin?.capabilities).toEqual({
+      detect: false,
+      launch: false,
+      resume: false,
+      usage: false,
+      trace: false,
+      profiles: false,
+      mcp: false,
+      skills: false,
+    });
+  });
+
+  it('没有 id 的行直接丢弃，不生成无名插件', () => {
+    expect(normalizePlugin({ name: 'No Id' })).toBeNull();
+    expect(normalizePlugin({ id: '' })).toBeNull();
+    expect(normalizePlugin(null)).toBeNull();
+    expect(normalizePlugin(42)).toBeNull();
+  });
+
+  it('skills 里有坏项时逐项丢弃，保留其余', () => {
+    const plugin = normalizePlugin({
+      id: 'hello-skill',
+      skills: [
+        { skillId: 'demo', name: 'Demo', description: '演示', body: '---\n' },
+        { name: '没有 skillId' },
+        'not-an-object',
+      ],
+    });
+
+    expect(plugin?.skills).toEqual([
+      { skillId: 'demo', name: 'Demo', description: '演示', body: '---\n' },
+    ]);
+  });
+
+  it('skills 字段缺失或不是数组时退化成空数组', () => {
+    expect(normalizePlugin({ id: 'a' })?.skills).toEqual([]);
+    expect(normalizePlugin({ id: 'a', skills: 'oops' })?.skills).toEqual([]);
+  });
+});
+
+describe('normalizePluginRefreshReport', () => {
+  it('读出 registered 与 errors', () => {
+    expect(
+      normalizePluginRefreshReport({
+        registered: ['usage-connect', 'hello-skill'],
+        errors: ['broken: manifest 缺少 [adapter] command'],
+      }),
+    ).toEqual({
+      registered: ['usage-connect', 'hello-skill'],
+      errors: ['broken: manifest 缺少 [adapter] command'],
+    });
+  });
+
+  it('字段缺失时退化成空数组而不是 undefined', () => {
+    expect(normalizePluginRefreshReport({})).toEqual({ registered: [], errors: [] });
+    expect(normalizePluginRefreshReport(null)).toEqual({ registered: [], errors: [] });
+  });
+
+  it('数组里混入非字符串时只保留字符串项', () => {
+    expect(normalizePluginRefreshReport({ registered: ['a', 1, null, 'b'] })).toEqual({
+      registered: ['a', 'b'],
+      errors: [],
+    });
+  });
+});
+
+describe('plugin IPC wrappers', () => {
+  it('listPlugins 使用 plugin_list 命令名并逐个 normalize', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      USAGE_CONNECT_PAYLOAD,
+      { name: '坏行没有 id' },
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await listPlugins();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('plugin_list');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.id).toBe('usage-connect');
+    }
+  });
+
+  it('listPlugins 在顶层不是数组时返回空列表（而不是报错）', async () => {
+    stubTauri(async () => ({ nope: true }));
+
+    await expect(listPlugins()).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('listPlugins 把后端错误原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error('数据库锁中毒');
+    });
+
+    await expect(listPlugins()).resolves.toEqual({
+      ok: false,
+      error: '数据库锁中毒',
+    });
+  });
+
+  it('pluginRefresh 使用 plugin_refresh 命令名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({ registered: ['a'], errors: [] }));
+    stubTauri(invokeSpy);
+
+    const result = await pluginRefresh();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('plugin_refresh');
+    expect(result).toEqual({ ok: true, data: { registered: ['a'], errors: [] } });
   });
 });

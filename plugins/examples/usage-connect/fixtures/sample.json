@@ -1,0 +1,102 @@
+{
+  "session": [
+    {
+      "agent": "codex",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 21116000,
+      "inputTokens": 500400,
+      "metadata": {
+        "lastActivity": "2026-10-15T09:12:04.517Z",
+        "reasoningOutputTokens": 26400
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 17204000,
+          "cost": 10.55186,
+          "inputTokens": 412000,
+          "modelName": "gpt-5.6-sol",
+          "outputTokens": 79800
+        },
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 3912000,
+          "cost": 1.70024,
+          "inputTokens": 88400,
+          "modelName": "gpt-5.6-terra",
+          "outputTokens": 21600
+        }
+      ],
+      "modelsUsed": ["gpt-5.6-sol", "gpt-5.6-terra"],
+      "outputTokens": 101400,
+      "period": "2026/10/15/rollout-2026-10-15T09-12-04-7f3c2a1e",
+      "totalCost": 12.2521,
+      "totalTokens": 21717800
+    },
+    {
+      "agent": "claude",
+      "cacheCreationTokens": 2225000,
+      "cacheReadTokens": 9440000,
+      "inputTokens": 173300,
+      "metadata": {
+        "lastActivity": "2026-10-16T18:40:31.204Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 2105000,
+          "cacheReadTokens": 8800000,
+          "cost": 12.44071,
+          "inputTokens": 152300,
+          "modelName": "claude-opus-4-6-20260101",
+          "outputTokens": 44100
+        },
+        {
+          "cacheCreationTokens": 120000,
+          "cacheReadTokens": 640000,
+          "cost": 0.40932,
+          "inputTokens": 21000,
+          "modelName": "claude-haiku-4-5",
+          "outputTokens": 6800
+        }
+      ],
+      "modelsUsed": ["claude-opus-4-6-20260101", "claude-haiku-4-5"],
+      "outputTokens": 50900,
+      "period": "5c1f2b70-9a4d-4c8e-9b21-2f6d7e8a0b3c",
+      "totalCost": 12.85003,
+      "totalTokens": 11889200
+    },
+    {
+      "agent": "zcode",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 306000,
+      "inputTokens": 22300,
+      "metadata": {
+        "lastActivity": "2026-10-17T08:05:12.882Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 210000,
+          "cost": 0.19735,
+          "inputTokens": 14300,
+          "modelName": "gpt-5.6-sol",
+          "outputTokens": 5100
+        },
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 96000,
+          "cost": 0,
+          "inputTokens": 8000,
+          "missingPricing": true,
+          "modelName": "GLM-5.3-Flash",
+          "outputTokens": 3200
+        }
+      ],
+      "modelsUsed": ["gpt-5.6-sol", "GLM-5.3-Flash"],
+      "outputTokens": 8300,
+      "period": "sess_01JA7K3M2P4Q6R8S0T2V4W6X",
+      "totalCost": 0.19735,
+      "totalTokens": 336600
+    }
+  ]
+}
