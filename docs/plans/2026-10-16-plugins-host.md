@@ -120,6 +120,33 @@
 3. Gates 表填**真实输出**（format / rust fmt / lint / typecheck / pnpm test / rust:test / python:test / build / clippy）。
 4. 提交：`docs(plan): Plugins host v0.1 plan` → `feat(plugins): out-of-process plugin host with usage and skill paths`。
 
+## 完成门（2026-10-17 实测）
+
+| Gate        | 命令                                 | 真实输出                                                                                                  |
+| ----------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| format      | `pnpm format:check`                  | `All matched files use Prettier code style!`                                                              |
+| rust fmt    | `pnpm rust:fmt:check`                | 无输出（`cargo fmt --check` 通过即静默）                                                                  |
+| lint        | `pnpm lint`                          | `✖ 4 problems (0 errors, 4 warnings)`——四个 `react-refresh/only-export-components` 系既有告警，非本次引入 |
+| typecheck   | `pnpm typecheck`                     | `tsc --noEmit` 无输出                                                                                     |
+| unit (web)  | `pnpm test`                          | `Test Files 9 passed (9)` / `Tests 179 passed (179)`，5.25s                                               |
+| unit (rust) | `pnpm rust:test -- --test-threads=1` | 全绿：lib 435 passed；28 个集成测试目标全部 `0 failed`（`real_plugins` 12 passed 含在内），退出码 0       |
+| unit (py)   | `pnpm python:test`                   | `Ran 12 tests in 0.001s` / `OK`                                                                           |
+| build       | `pnpm build`                         | `✓ built in 6.83s`（rolldown；tailwind hook 3.3s 属正常 timing 报告）                                     |
+| clippy      | `pnpm rust:clippy`                   | `Finished dev profile ... in 4.98s`（`-D warnings` 干净）                                                 |
+
+插件相关单测细目：`cargo test --lib plugins` **76 passed / 0 failed**（10.35s）；
+`cargo test --test real_plugins` **12 passed / 0 failed**（1.13s）。
+
+两处环境性插曲，如实记录：
+
+1. 首次 `pnpm rust:test` 并行跑时，多个测试目标报
+   `E0786: found invalid metadata files for crate harness_hub_lib` /
+   `failed to mmap file ... (os error 1455 页面文件太小)`，随后级联成一片 `E0463`。
+   这是提交内存不足导致的 mmap 失败，不是代码问题：`--test-threads=1` 串行跑即全绿。
+2. 同一轮并行跑里 `opencode_lifecycle` 的 S2 失败过一次，单独重跑与串行全跑均通过。
+   真机 TUI 测试对机器负载敏感（S2 的 25s 观察窗 + TUI 首屏时序），
+   与此前 2026-10-16 记录的抖动同源，非回归。
+
 ## 已知风险
 
 1. **`pty::containment` 没有非 Windows stub** → supervisor 必须 `#[cfg(windows)]` 门控，否则 Linux/macOS 编译失败。
