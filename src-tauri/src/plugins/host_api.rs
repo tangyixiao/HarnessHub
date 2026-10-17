@@ -51,12 +51,16 @@ pub const ARGS_JSON_LIMIT: usize = 512;
 ///
 /// 直接 `&text[..512]` 会在中文/emoji 中间切开 UTF-8 序列并 panic —— 插件数据不可信，
 /// 一条正常的中文参数就能把宿主打崩。
+///
+/// 省略号**算在** [`ARGS_JSON_LIMIT`] 之内：`0008_permission_decisions.sql` 承诺
+/// 「宿主保证 <= 512 字符」，若省略号另算，落库值就会是 513 —— 表注释与实现各说各话，
+/// 将来加 CHECK 约束时会当场炸掉一批历史行。
 pub fn truncate_args(raw: &str) -> String {
     if raw.chars().count() <= ARGS_JSON_LIMIT {
         return raw.to_string();
     }
 
-    let mut truncated: String = raw.chars().take(ARGS_JSON_LIMIT).collect();
+    let mut truncated: String = raw.chars().take(ARGS_JSON_LIMIT - 1).collect();
     truncated.push('…');
     truncated
 }
@@ -247,12 +251,16 @@ mod tests {
         let raw = "中".repeat(ARGS_JSON_LIMIT * 2);
         let truncated = truncate_args(&raw);
 
-        assert_eq!(truncated.chars().count(), ARGS_JSON_LIMIT + 1); // +1 = 省略号
+        // 省略号计入上限：落库值与迁移文件承诺的「<= 512 字符」必须一致。
+        assert_eq!(truncated.chars().count(), ARGS_JSON_LIMIT);
         assert!(truncated.ends_with('…'));
 
         // 边界：刚好等于上限时不加省略号。
         let exact = "a".repeat(ARGS_JSON_LIMIT);
         assert_eq!(truncate_args(&exact), exact);
+        // 超一个字符也要截：不能出现「只多一个就算了」的模糊地带。
+        let one_over = "a".repeat(ARGS_JSON_LIMIT + 1);
+        assert_eq!(truncate_args(&one_over).chars().count(), ARGS_JSON_LIMIT);
     }
 
     #[test]
@@ -273,8 +281,9 @@ mod tests {
             .expect("参数");
 
         assert!(
-            stored.chars().count() <= ARGS_JSON_LIMIT + 1,
-            "落库参数必须截断：{} 字符",
+            stored.chars().count() <= ARGS_JSON_LIMIT,
+            "落库参数必须截断到 {} 字符以内：{} 字符",
+            ARGS_JSON_LIMIT,
             stored.chars().count()
         );
     }
