@@ -296,6 +296,8 @@ pub fn import_usage(conn: &Connection, plugin_id: &str, dir: &Path) -> Result<us
     let row_count = normalized.events.len();
 
     let source = format!("{USAGE_SOURCE_PREFIX}{plugin_id}");
+    let normalized = retag_source(normalized, &source);
+
     let started_at = clock::now_rfc3339();
     let request = crate::usage::importer::request_from(
         &normalized,
@@ -309,6 +311,42 @@ pub fn import_usage(conn: &Connection, plugin_id: &str, dir: &Path) -> Result<us
     importer.import(&request)?;
 
     Ok(row_count)
+}
+
+/// 把归一化结果里的来源换成插件自己的 id，并**重算幂等键**。
+///
+/// 这两件事必须在一次操作里完成，否则会出现「键说自己是 ccusage、列说自己是插件」
+/// 的行——ADR-0011 决策三把 `source` 当作身份维度的一部分，键若不跟着换，
+/// 插件数据就会和宿主自己跑 ccusage 得到的数据撞同一个键：同一份会话被两条来源
+/// 各导一次时，后写的会静默覆盖先写的。
+///
+/// 重算而不是复用原键，正是为了让这两条来源**永远不互相去重**——它们本就不同源。
+fn retag_source(
+    normalized: crate::usage::NormalizedUsage,
+    source: &str,
+) -> crate::usage::NormalizedUsage {
+    let events = normalized
+        .events
+        .into_iter()
+        .map(|mut draft| {
+            draft.source = source.to_string();
+            draft.stable_source_key =
+                crate::usage::key::stable_source_key(&crate::usage::key::KeyDimensions {
+                    source,
+                    report_kind: &draft.report_kind,
+                    harness: &draft.harness,
+                    source_session_id: &draft.source_session_id,
+                    model: &draft.model,
+                });
+            draft.key_version = crate::usage::key::KEY_VERSION;
+            draft
+        })
+        .collect();
+
+    crate::usage::NormalizedUsage {
+        events,
+        ..normalized
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +400,79 @@ mod tests {
         let empty: Value = serde_json::from_str(r#"{"skills":[]}"#).expect("模板合法");
 
         assert!(empty["skills"].as_array().is_some());
+    }
+
+    /// 换源必须同时换幂等键，否则插件数据会和宿主自己跑 ccusage 撞键。
+    ///
+    /// 这条测试就是 ADR-0011 决策三的可执行版本：`source` 是身份维度，
+    /// 只改列不改键 = 「键说自己是 ccusage、列说自己是插件」。
+    #[test]
+    fn retagging_rewrites_the_key_not_just_the_source_column() {
+        let dimensions = crate::usage::key::KeyDimensions {
+            source: crate::usage::ccusage::SOURCE_ID,
+            report_kind: crate::usage::ccusage::REPORT_KIND,
+            harness: "codex",
+            source_session_id: "rollout-1",
+            model: "gpt-5.6-sol",
+        };
+        let draft = crate::usage::UsageEventDraft {
+            stable_source_key: crate::usage::key::stable_source_key(&dimensions),
+            key_version: crate::usage::key::KEY_VERSION,
+            source: crate::usage::ccusage::SOURCE_ID.to_string(),
+            report_kind: crate::usage::ccusage::REPORT_KIND.to_string(),
+            harness: "codex".to_string(),
+            source_session_id: "rollout-1".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            provider: None,
+            input_tokens: 10,
+            output_tokens: 1,
+            cache_creation_tokens: 0,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: 11,
+            cost_microunits: None,
+            currency: None,
+            currency_source: None,
+            token_source: "reported".to_string(),
+            cost_source: None,
+            pricing_mode: None,
+            occurred_at: None,
+            occurred_at_source: "unavailable".to_string(),
+            day: None,
+            raw_payload: None,
+        };
+        let ccusage_key = draft.stable_source_key.clone();
+        let normalized = crate::usage::NormalizedUsage {
+            events: vec![draft],
+            totals: None,
+            sessions_seen: 1,
+            timestampless: 1,
+            row_total_residual: 0,
+        };
+
+        let retagged = retag_source(normalized, "plugin:usage-connect");
+
+        let event = &retagged.events[0];
+        assert_eq!(event.source, "plugin:usage-connect");
+        assert_ne!(
+            event.stable_source_key, ccusage_key,
+            "同一个会话经插件导入必须换一把新键，否则会和宿主的 ccusage 记录互相覆盖"
+        );
+        // 新键必须真的是「用新 source 重算出来的」，不是随手换了个随机值。
+        assert_eq!(
+            event.stable_source_key,
+            crate::usage::key::stable_source_key(&crate::usage::key::KeyDimensions {
+                source: "plugin:usage-connect",
+                report_kind: &event.report_kind,
+                harness: &event.harness,
+                source_session_id: &event.source_session_id,
+                model: &event.model,
+            }),
+            "换源后的键必须能由新维度复算出来"
+        );
+        // 其余维度原样保留：换源不该动会话身份。
+        assert_eq!(retagged.sessions_seen, 1);
+        assert_eq!(event.harness, "codex");
+        assert_eq!(event.source_session_id, "rollout-1");
     }
 }
