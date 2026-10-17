@@ -505,43 +505,37 @@ mod tests {
             .expect("启动");
 
         // 等读线程收到 EOF 并写终态
-        let mut finished = None;
-        for _ in 0..60 {
-            if let Some(record) = runtime
-                .list_sessions(10)
-                .expect("列出")
-                .into_iter()
-                .find(|record| record.hub_session_id == session.hub_session_id)
-            {
-                if record.status != SessionStatus::Running {
-                    finished = Some(record);
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-
-        let finished = finished.expect("会话应进入终态");
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
         assert_eq!(
             finished.termination_reason,
             Some(TerminationReason::NaturalExit),
             "没有 kill 意图时按自然退出处理"
         );
 
-        // 原始输出必须原样到达 emitter
-        let recorded = events.lock().expect("events").clone();
-        let output: Vec<u8> = recorded
-            .iter()
-            .filter_map(|event| match event {
-                PtyEvent::Output { data, .. } => Some(data.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "codex-cli 0.152.1"
-        );
+        // 原始输出必须原样到达 emitter。
+        //
+        // 这里必须**单独等**输出，不能只等终态：reaper 写终态在前，读线程把尾部字节
+        // 交付完在后（`REAP_INTERVAL` 先触发，之后才是有界的 `READER_DRAIN_GRACE`）。
+        // 只等终态就等于假设「终态可见 ⇒ 输出已全部送达」，那是拿测试的运气当契约。
+        let expected = "codex-cli 0.152.1";
+        let mut output = Vec::new();
+        for _ in 0..120 {
+            let recorded = events.lock().expect("events").clone();
+            output = recorded
+                .iter()
+                .filter_map(|event| match event {
+                    PtyEvent::Output { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            if output.len() >= expected.len() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        assert_eq!(String::from_utf8(output).expect("UTF-8"), expected);
     }
 
     /// 约束 1：kill 只表达意图，终态由 reaper 依真实退出写成。
