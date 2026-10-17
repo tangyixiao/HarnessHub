@@ -147,6 +147,13 @@
    真机 TUI 测试对机器负载敏感（S2 的 25s 观察窗 + TUI 首屏时序），
    与此前 2026-10-16 记录的抖动同源，非回归。
 
+另有一处**不是**环境抖动，当场修掉了：`terminal::tests::natural_exit_finishes_the_session_and_emits_exit_code`
+首跑失败在 `src-tauri/src/terminal.rs:541` 的 `assert_eq!(left, right)`（输出为空）。根因是测试自身的
+等待顺序假设错了——reaper 先写终态、后做有界的 `READER_DRAIN_GRACE` 等待读线程交付尾部字节
+（`src-tauri/src/pty/manager.rs:191`、`:197`），所以「终态可见 ⇒ 输出已全部送达」并不成立，
+此前一直是靠时序运气通过。改成先等终态、再单独轮询输出字节数，修后连跑 6 次终端测试全绿。
+提交 `06f65d4 test(terminal): wait for the drained output instead of assuming the terminal state implies it`。
+
 ## 已知风险
 
 1. **`pty::containment` 没有非 Windows stub** → supervisor 必须 `#[cfg(windows)]` 门控，否则 Linux/macOS 编译失败。
