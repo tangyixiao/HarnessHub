@@ -1,0 +1,17 @@
+# usage-connect —— connect 型示例插件（`usage/import` 通路）。
+#
+# `[adapter].command` 是 argv 数组，不经过 shell，工作目录固定为本插件目录。
+# 因此 "adapter/usage.py" 这样的相对路径是相对 plugins/examples/usage-connect/ 解析的。
+
+id = "usage-connect"
+name = "Usage Connect"
+version = "0.1.0"
+api_version = "1"
+
+[adapter]
+command = ["python", "adapter/usage.py"]
+
+# `[capabilities]` 是宿主唯一认账的授权来源：插件的 supported_methods 只是自报，
+# 必须再与本表求交集。这里只声明 usage，所以 skill/* 一律不可调用。
+[capabilities]
+usage = true

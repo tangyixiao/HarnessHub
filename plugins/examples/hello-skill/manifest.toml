@@ -1,0 +1,15 @@
+# hello-skill —— skill 型示例插件（`skill/list` + `skill/get` 通路）。
+#
+# `[adapter].command` 是 argv 数组，不经过 shell，工作目录固定为本插件目录。
+
+id = "hello-skill"
+name = "Hello Skill"
+version = "0.1.0"
+api_version = "1"
+
+[adapter]
+command = ["python", "adapter/skill.py"]
+
+# 只声明 skills：宿主不会把 usage/import 放进允许集。
+[capabilities]
+skills = true
