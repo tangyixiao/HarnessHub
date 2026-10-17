@@ -1,8 +1,8 @@
 //! 插件注册表的 **store 层**（migration 0009 的 `plugins` 表）。
 //!
-//! 这里只做「行 ↔ 结构体」，不做扫描、不做 spawn、不做校验：
-//! 发现目录是 [`super::discovery`] 的事，manifest 合法性是 [`super::manifest`] 的事，
-//! 进程状态是 [`super::supervisor`] 的事。把这三件事混进来，store 就没法在
+//! 这里只做「行 ↔ 结构体」：不扫插件目录、不 spawn、不校验清单。
+//! 目录扫描由调用方（refresh 流程）负责，manifest 合法性归 [`super::manifest`]，
+//! 进程状态归 [`super::supervisor`]。把这些混进来，store 就没法在
 //! 没有文件系统、没有子进程的单测里被验证。
 //!
 //! 三条与表结构绑定的约定：
