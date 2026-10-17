@@ -27,7 +27,7 @@ impl Capabilities {
             "harness/resume" => self.resume,
             "usage/import" => self.usage,
             "trace/query" => self.trace,
-            "profile/list" => self.profiles,
+            "profile/list" | "profile/activate" => self.profiles,
             "mcp/servers" => self.mcp,
             "skill/list" | "skill/get" => self.skills,
             _ => false,
