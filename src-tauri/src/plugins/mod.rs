@@ -10,9 +10,11 @@
 //! - [`adapters`]：v0.1 打通哪些方法、其余一律 `not_supported`。
 //! - [`host_api`]：宿主真正提供给插件的受限能力，越权请求在这里被拒。
 //! - [`registry`]：插件索引与状态的持久化。
+//! - [`supervisor`]：子进程生命周期、握手、超时与降级。
 
 pub mod adapters;
 pub mod host_api;
 pub mod manifest;
 pub mod registry;
 pub mod rpc;
+pub mod supervisor;
