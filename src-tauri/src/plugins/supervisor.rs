@@ -770,6 +770,11 @@ mod tests {
         assert!(bytes <= STDERR_LIMIT + 4096, "stderr 缓冲无界增长：{bytes}");
     }
 
+    /// 进程是否仍然存活。
+    ///
+    /// 非 Windows 上原本是个「恒为 true」的桩，于是 `handshake_times_out_...` 那条
+    /// 「超时必须真的把进程杀掉」的断言在 Linux CI 上必然失败——桩把断言变成了
+    /// 恒假命题。改成用 `kill -0`（只探测存在性，不投递信号）如实回答。
     #[cfg(windows)]
     fn process_alive(pid: u32) -> bool {
         let output = Command::new("tasklist")
@@ -780,7 +785,12 @@ mod tests {
     }
 
     #[cfg(not(windows))]
-    fn process_alive(_pid: u32) -> bool {
-        true
+    fn process_alive(pid: u32) -> bool {
+        // `kill -0` 成功 = 进程存在且我们有权向它发信号；失败 = 已退出或无权限。
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
