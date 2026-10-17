@@ -56,11 +56,14 @@ use crate::terminal::TerminalRuntime;
 /// - `terminal`：终端运行编排（PTY + 会话状态）。
 /// - `git_probe`：Project registry 的 repo root 探测（组合根注入，见
 ///   `project::git_root`）。
+/// - `plugins_root`：插件扫描根。在组合根解析一次（环境变量 `HARNESS_HUB_PLUGINS_DIR`
+///   或 `<app_data_dir>/plugins`），命令层不再读环境——否则单测会依赖真实环境。
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
     pub harnesses: Arc<HarnessRegistry>,
     pub terminal: TerminalRuntime,
     pub git_probe: Arc<dyn crate::project::git_root::GitRootProbe>,
+    pub plugins_root: std::path::PathBuf,
 }
 
 /// 数据库文件名。放在 Tauri 的 app data 目录下，保持 local-first。
@@ -137,11 +140,25 @@ pub fn run() {
             }
             drop(database);
 
+            // 插件扫描根在组合根解析一次：命令层只拿结果，不读环境变量。
+            // 目录**不存在就创建**——首次启动时用户需要有个地方放插件，
+            // 而 `plugin_refresh` 在空目录上返回空报告是合法结果。
+            let plugins_root = crate::plugins::discovery::default_root(&data_dir);
+            if let Err(error) = std::fs::create_dir_all(&plugins_root) {
+                // 建不出来不该阻止应用启动：用户可能把根指到了一个无写权限的位置，
+                // 此时插件功能降级为「一个都扫不到」，其余功能照常。
+                eprintln!(
+                    "插件目录创建失败（{}）：{error}；插件功能将不可用",
+                    plugins_root.display()
+                );
+            }
+
             app.manage(AppState {
                 db: Arc::clone(&db),
                 harnesses: Arc::clone(&harnesses),
                 terminal: TerminalRuntime::new(db, harnesses, Arc::new(PortablePtyBackend::new())),
                 git_probe: Arc::new(crate::project::git_root::SystemGitRootProbe),
+                plugins_root,
             });
 
             Ok(())
@@ -158,6 +175,8 @@ pub fn run() {
             commands::list_harnesses,
             commands::list_projects,
             commands::list_sessions,
+            commands::plugin_list,
+            commands::plugin_refresh,
             commands::refresh_harnesses,
             commands::refresh_usage,
             commands::register_project,

@@ -1215,3 +1215,199 @@ export async function getActivityTimeline(options: {
 
   return { ok: true, data: timeline };
 }
+
+/* ------------------------------------------------------------------ *
+ * 插件宿主（Phase 9.3）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 与 Rust `PluginCapabilities` 同形，八个布尔与 manifest `[capabilities]` 一一对应。
+ *
+ * Rust 侧保证八个键**永远全在**（契约测试盯住），所以这里不做缺键降级——
+ * 缺了就说明后端违约，而不是前端该猜。
+ */
+export type PluginCapabilities = {
+  detect: boolean;
+  launch: boolean;
+  resume: boolean;
+  usage: boolean;
+  trace: boolean;
+  profiles: boolean;
+  mcp: boolean;
+  skills: boolean;
+};
+
+/** 一个已缓存的 skill。`body` 是 `SKILL.md` 原文，宿主不解析、前端也不解析。 */
+export type PluginSkill = {
+  skillId: string;
+  name: string;
+  description: string;
+  body: string;
+};
+
+/**
+ * 一个已登记的插件。
+ *
+ * `status` 保持成自由字符串而不是联合类型：后端新增状态（比如将来的 `disabled`）
+ * 不该让前端把整行丢掉；UI 只对认识的 `ready` / `degraded` 分支着色。
+ */
+export type Plugin = {
+  id: string;
+  name: string;
+  version: string;
+  apiVersion: string;
+  path: string;
+  status: string;
+  capabilities: PluginCapabilities;
+  skills: PluginSkill[];
+  registeredAt: string;
+};
+
+/** 一次 `plugin_refresh` 的结果。单个插件失败落在 `errors` 里，不是整体失败（R14）。 */
+export type PluginRefreshReport = {
+  registered: string[];
+  errors: string[];
+};
+
+const EMPTY_CAPABILITIES: PluginCapabilities = {
+  detect: false,
+  launch: false,
+  resume: false,
+  usage: false,
+  trace: false,
+  profiles: false,
+  mcp: false,
+  skills: false,
+};
+
+function normalizePluginCapabilities(raw: unknown): PluginCapabilities {
+  if (typeof raw !== 'object' || raw === null) {
+    return { ...EMPTY_CAPABILITIES };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const flag = (key: keyof PluginCapabilities): boolean => source[key] === true;
+
+  return {
+    detect: flag('detect'),
+    launch: flag('launch'),
+    resume: flag('resume'),
+    usage: flag('usage'),
+    trace: flag('trace'),
+    profiles: flag('profiles'),
+    mcp: flag('mcp'),
+    skills: flag('skills'),
+  };
+}
+
+function normalizePluginSkill(raw: unknown): PluginSkill | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const skillId = typeof source.skillId === 'string' ? source.skillId.trim() : '';
+  if (skillId.length === 0) {
+    return null;
+  }
+
+  return {
+    skillId,
+    name: typeof source.name === 'string' ? source.name : skillId,
+    description: typeof source.description === 'string' ? source.description : '',
+    body: typeof source.body === 'string' ? source.body : '',
+  };
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `Plugin`。
+ *
+ * 与 `normalizeSessionRecord` 同一策略：没有 `id` 的行直接丢弃——无名插件
+ * 在 UI 上既不能定位也不能刷新，留着只会变成一行打不开的鬼影。
+ */
+export function normalizePlugin(raw: unknown): Plugin | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  const skills = Array.isArray(source.skills)
+    ? source.skills
+        .map(normalizePluginSkill)
+        .filter((skill): skill is PluginSkill => skill !== null)
+    : [];
+
+  return {
+    id,
+    name: typeof source.name === 'string' ? source.name : id,
+    version: typeof source.version === 'string' ? source.version : '',
+    apiVersion: typeof source.apiVersion === 'string' ? source.apiVersion : '',
+    path: typeof source.path === 'string' ? source.path : '',
+    status: typeof source.status === 'string' ? source.status : 'unknown',
+    capabilities: normalizePluginCapabilities(source.capabilities),
+    skills,
+    registeredAt: typeof source.registeredAt === 'string' ? source.registeredAt : '',
+  };
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+/**
+ * 收敛 `plugin_refresh` 的返回。
+ *
+ * 形状错了也**不报错**：刷新是写路径，此时插件表可能已经更新了，
+ * 让 UI 因为解析失败而显示「刷新失败」会掩盖真实结果。宁可显示空报告。
+ */
+export function normalizePluginRefreshReport(raw: unknown): PluginRefreshReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { registered: [], errors: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    registered: asStringArray(source.registered),
+    errors: asStringArray(source.errors),
+  };
+}
+
+/**
+ * 已登记插件列表。**纯读**：不扫目录、不起子进程（ADR-0012）。
+ *
+ * 想发现新插件或让 degraded 插件复活，调用 [`pluginRefresh`]。
+ */
+export async function listPlugins(): Promise<IpcResult<Plugin[]>> {
+  const result = await invokeCommand<unknown>('plugin_list');
+  if (!result.ok) {
+    return result;
+  }
+
+  const plugins = Array.isArray(result.data)
+    ? result.data.map(normalizePlugin).filter((plugin): plugin is Plugin => plugin !== null)
+    : [];
+
+  return { ok: true, data: plugins };
+}
+
+/**
+ * 显式刷新插件：扫描目录 → 登记 → 握手 → 拉取 skill 缓存。
+ *
+ * 语义上是**写操作**（起子进程、写 `plugins` 表），只允许用户动作触发，
+ * 与 [`refreshUsage`] 同一条纪律。
+ */
+export async function pluginRefresh(): Promise<IpcResult<PluginRefreshReport>> {
+  const result = await invokeCommand<unknown>('plugin_refresh');
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizePluginRefreshReport(result.data) };
+}
