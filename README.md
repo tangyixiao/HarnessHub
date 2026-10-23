@@ -10,7 +10,7 @@ Harness Hub 是一个 **local-first 的 AI Coding Harness 桌面控制中心**�
 
 ## 当前版本
 
-正在准备 **v0.1.0-alpha.4**。Windows x64 unsigned NSIS 安装包与 SHA-256 校验文件尚未构建；Release 尚未发布。准备完成后将在 [GitHub Releases](https://github.com/tangyixiao/HarnessHub/releases) 提供下载，目标条目为 [v0.1.0-alpha.4](https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0-alpha.4)。
+**v0.1.0-alpha.4 — Windows x64 alpha 预发布版本**。已完成未签名 NSIS 构建、SHA-256 校验、全部本地质量检查与隔离数据库冷启动验证。下载入口：[v0.1.0-alpha.4](https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0-alpha.4)；验证范围见[发布说明](./docs/releases/v0.1.0-alpha.4.md)。
 
 当前实现包含：
 
@@ -24,7 +24,7 @@ Harness Hub 是一个 **local-first 的 AI Coding Harness 桌面控制中心**�
 
 ## 下载与运行
 
-发布后，从 [GitHub Releases](https://github.com/tangyixiao/HarnessHub/releases) 下载 Windows x64 NSIS 安装包。该 alpha 安装包计划为**未签名**版本；Windows 可能显示发布者未知或 SmartScreen 提示。安装后可从开始菜单启动 Harness Hub。
+从 [v0.1.0-alpha.4 Release 条目](https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0-alpha.4) 下载 [Windows x64 NSIS 安装包](https://github.com/tangyixiao/HarnessHub/releases/download/v0.1.0-alpha.4/Harness-Hub_0.1.0-alpha.4_x64-setup.exe) 与 [SHA256SUMS](https://github.com/tangyixiao/HarnessHub/releases/download/v0.1.0-alpha.4/SHA256SUMS)。该 alpha 安装包为**未签名**版本；Windows 可能显示发布者未知或 SmartScreen 提示。
 
 运行桌面应用需要 Windows x64 与 WebView2 Runtime（Windows 11 通常已包含）。要使用某个 Harness，需先在本机单独安装并配置它；Harness Hub 不附带 Harness 程序或凭据。内置 usage 导入会依次使用 PATH 上的 `ccusage`、用户配置的命令，或通过 `npx --yes ccusage@20.0.24` 运行固定版本；最后一种方式需要 Node.js/npm，并可能在本机尚无缓存时下载 ccusage。源码仓库中的 usage-connect 示例插件只需 Python 标准库和示例 fixture，由 Rust 宿主解析结果，不需要另装 ccusage；该示例不会预装在发布安装包中。Python sidecar 使用时另需 Python 3.10+ 与 uv 0.5+。
 
@@ -48,7 +48,7 @@ pnpm tauri dev
 - CodeBuddy 当前为 detection-only，尚不支持启动、终端或 usage 导入。
 - 插件 v0.1 仅暴露后端 IPC，没有 UI；权限决策为 observe-only 记录，不构成安全沙箱或访问隔离。
 - 插件 IPC 仅有 `plugin_list` 与 `plugin_refresh`。`usage/import` 由 Rust service 调用；skill 在 refresh 时拉取、缓存，再随插件列表返回。源码仓库中的 usage-connect 示例只依赖 Python 标准库与 fixture，发布安装包不预装示例插件。内置 ccusage runner 会依次使用 PATH 上的 `ccusage`、显式配置命令，或 Node.js/npm 提供的固定版本 npx fallback。其他插件需自行提供声明的 adapter 命令。
-- 当前仍是 alpha 软件；发布安装包的实际验证情况会在本版本 Release 说明中逐项记录。
+- 当前仍是 alpha 软件；本版本的本地构建、完整质量 gates 和隔离数据库冷启动结果见 Release 说明与发布计划。实际 Harness readiness 仍依赖本机安装、认证和 GUI 环境。
 
 ## License
 
