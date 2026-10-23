@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "harness-hub"
-version = "0.0.0"
+version = "0.1.0-alpha.4"
 dependencies = [
  "hex",
  "portable-pty",
