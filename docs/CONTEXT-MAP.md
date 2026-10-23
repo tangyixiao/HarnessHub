@@ -34,6 +34,7 @@
 | 前端调用 Rust                      | `src/lib/ipc.ts`（唯一 IPC 入口，不要在组件里直接 `invoke`）                                                                                                              |
 | Adapter 测试夹具                   | `fixtures/<harness>/`、`docs/adr/`                                                                                                                                        |
 | 规格 / 设计 / 计划                 | `docs/specs/`、`docs/plans/`、根目录 `HARNESS_HUB_PROJECT_PLAN.md`                                                                                                        |
+| 多工具互通的复用研究与后续方向     | `docs/research/2026-10-23-interop-reuse-review.md`、`docs/specs/2026-10-23-ecosystem-interoperability-direction.md`（Proposed，尚未实现）                                 |
 
 ## 层与依赖方向（不可反向依赖）
 
