@@ -58,6 +58,33 @@ pub enum Error {
     /// `detail` 保留底层错误用于诊断；**终态仍只由 reaper 决定**。
     #[error("输入不可用：会话 {session_id} 的写入线程失败：{detail}")]
     InputWorkerFailed { session_id: String, detail: String },
+
+    /// 插件清单（`manifest.toml`）缺失必需字段或字段不合法。
+    ///
+    /// 与 [`Error::Io`] 刻意分开：读不到文件是「这不是插件」，
+    /// 清单非法是「这个插件坏了」，调用方处置完全不同（忽略 vs 标记降级）。
+    #[error("插件清单无效：{0}")]
+    PluginManifest(String),
+
+    /// 启动插件子进程失败（找不到解释器、权限不足、命令行非法）。
+    #[error("插件进程启动失败：{0}")]
+    PluginSpawn(String),
+
+    /// 握手未按约定完成：应答缺字段、自报 id 与 manifest 不符、未回 `initialized`。
+    #[error("插件握手失败：{0}")]
+    PluginHandshake(String),
+
+    /// 插件在超时时间内没有回包。区别于崩溃：进程还活着，只是不响应。
+    #[error("插件未响应：{0}")]
+    PluginTimeout(String),
+
+    /// 收到了不符合 JSON-RPC 2.0 / 本协议约定的数据（坏 JSON、缺 jsonrpc 字段等）。
+    #[error("插件协议错误：{0}")]
+    PluginProtocol(String),
+
+    /// 插件已经不可用（进程崩溃、管道断开），需要重新拉起。
+    #[error("插件已失效：{0}")]
+    PluginDegraded(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

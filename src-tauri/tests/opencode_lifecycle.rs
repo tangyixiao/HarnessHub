@@ -207,6 +207,34 @@ impl Harness {
         }
     }
 
+    /// 进程可能在 Ctrl+C 入队前已经自然退出：这时 reaper 会先写终态，再关闭输入
+    /// 并从 PTY manager 移除会话，后续 write 可能返回 `未知会话` / `InputClosed`。
+    /// 只在有界观察到数据库终态时把这种错误视为退出竞态；仍为 running 则保留失败。
+    fn write_ctrl_c_or_observe_exit(&self, session_id: &str) -> Option<SessionRecord> {
+        let Err(write_error) = self.runtime.write(session_id, b"\x03") else {
+            return None;
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let record = self
+                .runtime
+                .list_sessions(10)
+                .expect("列出")
+                .into_iter()
+                .find(|record| record.hub_session_id == session_id)
+                .expect("会话应存在");
+            if record.status != SessionStatus::Running {
+                return Some(record);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "写入 Ctrl+C 失败但会话仍为 running：{write_error}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn running(&self) -> usize {
         self.runtime
             .list_sessions(50)
@@ -267,17 +295,13 @@ fn s2_opencode_can_exit_naturally() {
     let mut ctrl_c_pairs = 0;
     let finished = loop {
         ctrl_c_pairs += 1;
-        harness
-            .runtime
-            .write(&session_id, b"\x03")
-            .expect("写入第一次 Ctrl+C");
-        std::thread::sleep(Duration::from_millis(600));
-        harness
-            .runtime
-            .write(&session_id, b"\x03")
-            .expect("写入第二次 Ctrl+C");
+        let mut outcome = harness.write_ctrl_c_or_observe_exit(&session_id);
+        if outcome.is_none() {
+            std::thread::sleep(Duration::from_millis(600));
+            // 第一记 Ctrl+C 后进程可能已自然退出，不能再无条件写第二次。
+            outcome = harness.write_ctrl_c_or_observe_exit(&session_id);
+        }
         let deadline = Instant::now() + Duration::from_secs(25);
-        let mut outcome = None;
         while outcome.is_none() {
             let record = harness
                 .runtime

@@ -58,6 +58,15 @@ remove_project / get_project_sessions；前端 `src/features/projects/`、
 spec `docs/specs/2026-10-12-project-registry-design.md`。
 Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
 Harnesses 三处永远同色，未知 id 中性灰）。
+插件宿主：`src-tauri/src/plugins/{manifest,rpc,adapters,host_api,registry,discovery,service,supervisor}.rs`
+—— manifest 解析校验与 capability 授权（唯一的「这方法能不能调」来源）、行分隔
+JSON-RPC codec、六类 Adapter trait（v0.1 只打通 usage 与 skill，其余 `Unsupported`
+返回 `-32001`）、受限 Host API（v0.1 只有 `host/log` 真实实现，7 个调用都写
+`permission_decisions` 观测行）、SQLite 持久化（迁移 0008/0009）、discovery 只碰文件系统、
+service 编排 refresh/import_usage、supervisor 负责 spawn/握手/超时/降级/懒重启；
+协议契约与 manifest schema 在 `plugins/sdk/`，两个示例在 `plugins/examples/`；
+IPC 命令 plugin_list / plugin_refresh；真机测试 `src-tauri/tests/real_plugins.rs`；
+spec `docs/specs/2026-10-16-plugins-host-design.md`，边界见 ADR-0018。
 
 ```text
 src/features/*  →  src/components/*  →  src/lib/*

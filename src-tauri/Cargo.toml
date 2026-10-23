@@ -28,6 +28,10 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 sha2 = "0.10.9"
 tauri = { version = "2", features = [] }
 thiserror = "2.0.20"
+# 插件清单（plugins/manifest.rs）：之前只是 tauri-build 的传递依赖，不能直接 `use toml::`。
+# 刻意钉 0.8：0.9/1.x 换了 API（`toml::from_str` 的 Value 模型不同），跨大版本迁移
+# 会把「清单校验」这件事和一个不相关的解析器升级绑在一起。
+toml = "0.8"
 uuid = { version = "1.20.0", features = ["v4"] }
 
 # Windows 进程包含（Task 8B）：Job Object 是唯一能覆盖 .cmd → node → descendants 的机制。

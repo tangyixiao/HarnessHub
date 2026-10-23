@@ -109,5 +109,15 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   `timeline(&Connection)` 结构上不可能起进程），1 个 IPC 命令
   `activity_timeline`、History 页（Activity Calendar + Session Timeline，
   见 docs/specs/2026-10-14-activity-timeline-design.md 与 tests/e2e/README.md）。
+  插件宿主 v0.1 已完成（Phase 9.3，见 docs/specs/2026-10-16-plugins-host-design.md）：
+  `src-tauri/src/plugins/` 八个子模块（manifest 解析校验 + capability 路由、行分隔
+  JSON-RPC codec、六类 Adapter trait、受限 Host API、SQLite 持久化、discovery 扫描、
+  service 编排、supervisor 子进程生命周期）；插件是一个目录（manifest.toml + adapter/），
+  默认 out-of-process，握手超时 10s / 调用超时 30s / 崩溃标 degraded 且绝不 panic 宿主；
+  两条通路可用（`usage/import` 走既有 ccusage 解析与幂等导入、`skill/list` + `skill/get`
+  透传 SKILL.md），其余四类 Adapter 返回 `-32001 not_supported`；2 个 IPC 命令
+  `plugin_list` / `plugin_refresh`（v0.1 不加 UI）；`plugins/sdk/` 有协议契约与 manifest
+  schema，`plugins/examples/` 有 connect 型与 skill 型两个示例。权限边界完全 observe-only
+  （决策恒为 `observed`，只记录不拦截，依据 ADR-0018）。
   尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
 - 实施计划见 `docs/plans/`。

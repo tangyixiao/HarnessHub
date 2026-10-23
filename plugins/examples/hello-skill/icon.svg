@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <title>hello-skill</title>
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#1e293b" />
+  <path d="M6.5 7.5A2.5 2.5 0 0 1 9 5h6a2.5 2.5 0 0 1 2.5 2.5v5A2.5 2.5 0 0 1 15 15H11l-3.2 3v-3H9a2.5 2.5 0 0 1-2.5-2.5z" stroke="#7dd3fc" stroke-width="1.6" stroke-linejoin="round" />
+  <path d="M9.2 10.4h5.6" stroke="#e2e8f0" stroke-width="1.3" stroke-linecap="round" />
+</svg>
