@@ -1,6 +1,6 @@
 [package]
 name = "harness-hub"
-version = "0.0.0"
+version = "0.1.0-alpha.4"
 description = "Harness Hub — local-first control plane for AI coding harnesses"
 authors = ["Harness Hub contributors"]
 license = "MIT"
