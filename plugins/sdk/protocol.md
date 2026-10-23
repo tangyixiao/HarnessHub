@@ -130,6 +130,12 @@ stderr 按固定大小字节块读取，仅保留最后 **64 KiB 原始字节**�
 
 ## 4. usage/import 的数据形状
 
+导入只使用已登记目录里的插件：请求目录经路径规范化后必须与登记目录相同，manifest 的
+`id` 必须等于登记 id。身份错配在启动进程前拒绝，不改变已登记插件的健康状态。
+匹配身份后的启动、握手、方法调用或载荷校验失败会将插件标为 `degraded`，需要显式
+`plugin_refresh` 恢复；SQLite 自身写入失败不降级插件。非空的零 token 会话报告仍保留
+成功导入审计，真正空的 `session` 数组返回 0，不产生导入记录。
+
 `result.session` 是 **ccusage unified session 报告里 `session` 数组的等价物**。宿主把它
 包成 `{"session":[...]}` 后**直接喂给现有的 ccusage 解析器**（`usage::parse_report` →
 `normalize_session`），不会为插件单独写一套解析。

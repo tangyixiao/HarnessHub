@@ -257,43 +257,42 @@ pub fn import_usage(conn: &Connection, plugin_id: &str, dir: &Path) -> Result<us
         )));
     }
 
-    let manifest = super::manifest::load(dir)?;
+    let requested_dir = dir.canonicalize().map_err(|error| {
+        Error::InvalidInput(format!("插件 {plugin_id} 的请求目录不可用：{error}"))
+    })?;
+    let registered_dir = Path::new(&record.path).canonicalize().map_err(|error| {
+        Error::InvalidInput(format!("插件 {plugin_id} 的登记目录不可用：{error}"))
+    })?;
+    if requested_dir != registered_dir {
+        return Err(Error::InvalidInput(format!(
+            "插件 {plugin_id} 的请求目录与登记目录不一致"
+        )));
+    }
+
+    let manifest = super::manifest::load(&registered_dir)?;
+    if manifest.id != plugin_id {
+        return Err(Error::InvalidInput(format!(
+            "插件 {plugin_id} 的 manifest id 与登记身份不一致"
+        )));
+    }
     if !manifest.capabilities.usage {
         return Err(Error::PluginProtocol(format!(
             "插件 {plugin_id} 未声明 usage 能力"
         )));
     }
 
-    let mut process = handshake(&manifest, dir)?;
-    let mut host = DatabaseHostApi {
-        conn,
-        plugin_id: &manifest.id,
+    let normalized = match fetch_usage(conn, &manifest, &registered_dir) {
+        Ok(normalized) => normalized,
+        Err(error) => {
+            registry::set_status(conn, plugin_id, STATUS_DEGRADED)?;
+            return Err(error);
+        }
     };
-    let value = process.call(USAGE_IMPORT, &serde_json::json!({}), &mut host);
-    process.shutdown();
-    let value = value?;
-
-    let sessions = value
-        .get("session")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            Error::PluginProtocol(format!(
-                "插件 {plugin_id} 的 usage/import 回包缺少 session 数组"
-            ))
-        })?;
-
-    if sessions.is_empty() {
+    let row_count = normalized.events.len();
+    // 非空的零 token 会话也需要成功导入审计，只有真正空报告沿用早退语义。
+    if normalized.sessions_seen == 0 {
         return Ok(0);
     }
-
-    // 组装成 ccusage 报告形状（键是单数 `session`，见 plugins/sdk/protocol.md §4）。
-    let raw = serde_json::json!({ "session": sessions }).to_string();
-    let report = crate::usage::ccusage::parse_report(&raw)?;
-    let normalized = crate::usage::ccusage::normalize_session(
-        &report,
-        crate::usage::ccusage::PRICING_MODE_AUTO,
-    )?;
-    let row_count = normalized.events.len();
 
     let source = format!("{USAGE_SOURCE_PREFIX}{plugin_id}");
     let normalized = retag_source(normalized, &source);
@@ -311,6 +310,37 @@ pub fn import_usage(conn: &Connection, plugin_id: &str, dir: &Path) -> Result<us
     importer.import(&request)?;
 
     Ok(row_count)
+}
+
+/// 只处理插件进程与数据契约；SQLite 导入失败由调用方处理，不归咎于插件。
+fn fetch_usage(
+    conn: &Connection,
+    manifest: &Manifest,
+    dir: &Path,
+) -> Result<crate::usage::NormalizedUsage> {
+    let mut process = handshake(manifest, dir)?;
+    let mut host = DatabaseHostApi {
+        conn,
+        plugin_id: &manifest.id,
+    };
+    let value = process.call(USAGE_IMPORT, &serde_json::json!({}), &mut host);
+    process.shutdown();
+    let value = value?;
+
+    let sessions = value
+        .get("session")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Error::PluginProtocol(format!(
+                "插件 {} 的 usage/import 回包缺少 session 数组",
+                manifest.id
+            ))
+        })?;
+
+    // 组装成 ccusage 报告形状（键是单数 `session`，见 plugins/sdk/protocol.md §4）。
+    let raw = serde_json::json!({ "session": sessions }).to_string();
+    let report = crate::usage::ccusage::parse_report(&raw)?;
+    crate::usage::ccusage::normalize_session(&report, crate::usage::ccusage::PRICING_MODE_AUTO)
 }
 
 /// 把归一化结果里的来源换成插件自己的 id，并**重算幂等键**。

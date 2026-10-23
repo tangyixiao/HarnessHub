@@ -32,11 +32,14 @@
 - RED：`6 passed; 3 failed`。单行缓存达到 `196616` 字节；无换行与非法 UTF-8 两例报 `stderr 尾部未交付`。
 - GREEN：`9 passed; 0 failed`（11.13s）。旧 flood 夹具改为协商通过的 `usage/import`，强制断言 `flooded = true`，确认确实产生了输出。
 
-### Task 2：RED
+### Task 2：RED → GREEN
 
 `cargo test --manifest-path src-tauri/Cargo.toml --test real_plugins usage_import -- --test-threads=1`
 
 - RED：`3 passed; 4 failed`。两个身份错配都返回 `Ok(6)`；启动失败和坏载荷后状态仍为 `ready`，期望 `degraded`。
 - 正向对照：合法空结果、SQLite 导入失败不降级、原有幂等导入均通过。
+- 首次 GREEN：`7 passed; 0 failed`（3.57s）。
+- 独立审阅指出不能把零事件当空报告；新增零 token 非空会话用例得到 `0 passed; 1 failed`（审计行 0，期望 1），修正为依据 `sessions_seen` 早退。
+- 补充真实方法调用后崩溃、显式 refresh 恢复的闭环。最终 `real_plugins`：`20 passed; 0 failed`（6.04s），含 6 条 common 辅助测试；全部从生产路径建立登记。
 
 完整验收待实测后填写。
