@@ -301,11 +301,36 @@ fn a_blocked_write_in_one_session_never_freezes_the_runtime() {
         .is_ok()
     );
 
-    // kill 成功之后输入侧关闭（spec §4.5）
-    assert!(matches!(
-        manager.write("hub-a", b"x"),
-        Err(Error::InputClosed { .. })
-    ));
+    // kill 成功之后输入侧关闭（spec §4.5）。如果 reaper 已经完成 forget，handle 已从
+    // manager 移除，未知会话也是合法结果（spec §4.4.1 / §6.1 T8）。
+    match manager.write("hub-a", b"x") {
+        Err(Error::InputClosed { .. }) => {}
+        Err(Error::InvalidInput(message)) if message.contains("未知会话") => {
+            // 确认未知会话来自 reaper 完成回收，而非遗漏了本测试的输入隔离保障。
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline
+                && !backend
+                    .forgotten
+                    .lock()
+                    .expect("forgotten")
+                    .iter()
+                    .any(|session| session == "hub-a")
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                backend
+                    .forgotten
+                    .lock()
+                    .expect("forgotten")
+                    .iter()
+                    .any(|session| session == "hub-a"),
+                "未知会话必须对应 reaper 已完成回收"
+            );
+            assert_eq!(manager.pending_bytes("hub-a"), None, "handle 必须已移除");
+        }
+        other => panic!("kill/reaper 完成后必须拒绝 A 的新输入，实际 {other:?}"),
+    }
 }
 
 /// T9：shutdown 绝不 join —— worker park 在阻塞写里时也必须在硬期限内返回（spec §4.7）。
