@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """往 stderr 无限猛写：验证 64 KiB 环形缓冲真的不会无界增长。
 
-一次 flood/stderr 调用里写 ~256 KiB，然后正常回包，让宿主有机会统计缓冲大小。
+通过 usage/import 触发输出，经过真实 capability 协商；支持超长无换行与非法 UTF-8。
 """
 
 import json
@@ -26,7 +26,7 @@ for line in sys.stdin:
                     "result": {
                         "plugin_id": PLUGIN_ID,
                         "plugin_version": "0.1.0",
-                        "supported_methods": ["flood/stderr"],
+                        "supported_methods": ["usage/import"],
                     },
                 }
             )
@@ -36,11 +36,16 @@ for line in sys.stdin:
         sys.stdout.flush()
         continue
 
-    if method == "flood/stderr":
-        chunk = "x" * 200 + "\n"
-        for _ in range(1300):  # ~260 KiB
-            sys.stderr.write(chunk)
-        sys.stderr.flush()
+    if method == "usage/import":
+        mode = (message.get("params") or {}).get("mode")
+        if mode == "invalid":
+            payload = b"\xff\xfe\nAFTER-INVALID\n"
+        elif mode == "unterminated":
+            payload = b"x" * (256 * 1024) + b"FLOOD-END"
+        else:
+            payload = (b"x" * 200 + b"\n") * 1300 + b"FLOOD-END\n"
+        sys.stderr.buffer.write(payload)
+        sys.stderr.buffer.flush()
         sys.stdout.write(
             json.dumps({"jsonrpc": "2.0", "id": request_id, "result": {"flooded": True}}) + "\n"
         )

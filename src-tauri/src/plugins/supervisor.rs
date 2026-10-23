@@ -25,7 +25,7 @@
 //! 让错误错位到后续调用。杀进程 + 下次 lazy respawn 是唯一可靠的做法。
 
 use std::collections::{BTreeSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -100,35 +100,34 @@ pub struct HandshakeInfo {
 /// stderr 环形缓冲：保留最后 64 KiB。
 #[derive(Debug, Default)]
 struct RingBuffer {
-    lines: VecDeque<String>,
-    bytes: usize,
+    bytes: VecDeque<u8>,
 }
 
 impl RingBuffer {
-    fn push(&mut self, line: String) {
-        self.bytes += line.len() + 1;
-        self.lines.push_back(line);
-
-        while self.bytes > STDERR_LIMIT && self.lines.len() > 1 {
-            if let Some(dropped) = self.lines.pop_front() {
-                self.bytes -= dropped.len() + 1;
-            }
+    fn push(&mut self, chunk: impl AsRef<[u8]>) {
+        let chunk = chunk.as_ref();
+        if chunk.len() >= STDERR_LIMIT {
+            self.bytes.clear();
+            self.bytes.extend(&chunk[chunk.len() - STDERR_LIMIT..]);
+        } else {
+            let overflow = (self.bytes.len() + chunk.len()).saturating_sub(STDERR_LIMIT);
+            self.bytes.drain(..overflow);
+            self.bytes.extend(chunk);
         }
     }
 
     /// 末尾若干行，用 `\n` 连接。错误信息用这个，避免把 64 KiB 全塞进 UI。
     fn tail(&self, max_lines: usize) -> String {
-        let start = self.lines.len().saturating_sub(max_lines);
-        self.lines
-            .iter()
-            .skip(start)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+        let bytes: Vec<u8> = self.bytes.iter().copied().collect();
+        // UTF-8 可能跨 read 块，也可能从缓存淘汰边界截断；只在显示时容错解码。
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines: Vec<&str> = text.lines().rev().take(max_lines).collect();
+        lines.reverse();
+        lines.join("\n")
     }
 
     fn byte_len(&self) -> usize {
-        self.bytes
+        self.bytes.len()
     }
 }
 
@@ -269,10 +268,17 @@ impl PluginProcess {
         thread::Builder::new()
             .name(format!("plugin-{}-stderr", manifest.id))
             .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { break };
+                let mut stderr = stderr;
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let count = match stderr.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(count) => count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    };
                     match stderr_writer.lock() {
-                        Ok(mut buffer) => buffer.push(line),
+                        Ok(mut buffer) => buffer.push(&chunk[..count]),
                         // 锁中毒时静默丢弃：stderr 是诊断数据，不值得为它 panic 宿主。
                         Err(_) => break,
                     }
@@ -664,17 +670,23 @@ mod tests {
     fn ring_buffer_keeps_only_the_tail() {
         let mut buffer = RingBuffer::default();
         for index in 0..10_000 {
-            buffer.push(format!("line {index} {}", "x".repeat(50)));
+            buffer.push(format!("line {index} {}\n", "x".repeat(50)));
         }
 
-        assert!(
-            buffer.byte_len() <= STDERR_LIMIT + 200,
-            "{}",
-            buffer.byte_len()
-        );
+        assert!(buffer.byte_len() <= STDERR_LIMIT, "{}", buffer.byte_len());
         let tail = buffer.tail(3);
         assert!(tail.contains("line 9999"), "{tail}");
         assert!(!tail.contains("line 0 "), "{tail}");
+    }
+
+    #[test]
+    fn ring_buffer_caps_a_single_oversized_line() {
+        let mut buffer = RingBuffer::default();
+        buffer.push(format!("{}THE-END", "界".repeat(STDERR_LIMIT)));
+
+        assert!(buffer.byte_len() <= STDERR_LIMIT, "{}", buffer.byte_len());
+        assert!(buffer.tail(1).ends_with("THE-END"));
+        assert_eq!(buffer.tail(0), "");
     }
 
     #[test]
@@ -762,12 +774,65 @@ mod tests {
         let mut process = PluginProcess::spawn(&manifest, &fixture("")).expect("spawn");
         process.handshake("0.1.0").expect("握手");
 
-        // 让插件往 stderr 猛写 2 秒。
-        let _ = process.call("flood/stderr", &serde_json::json!({}), &mut NoHostApi);
-        thread::sleep(Duration::from_millis(500));
+        let result = process
+            .call("usage/import", &serde_json::json!({}), &mut NoHostApi)
+            .expect("必须真正触发输出，不能把 capability 拒绝当成功");
+        assert_eq!(result["flooded"], true);
+
+        wait_for_stderr(&process, "FLOOD-END");
 
         let bytes = process.stderr_byte_len();
-        assert!(bytes <= STDERR_LIMIT + 4096, "stderr 缓冲无界增长：{bytes}");
+        assert!(bytes <= STDERR_LIMIT, "stderr 缓冲无界增长：{bytes}");
+    }
+
+    fn wait_for_stderr(process: &PluginProcess, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process.stderr_tail(3).contains(marker) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process.stderr_tail(3).contains(marker), "stderr 尾部未交付");
+    }
+
+    #[test]
+    fn stderr_without_newline_is_captured_while_plugin_is_alive() {
+        if !python_available() {
+            eprintln!("跳过：PATH 里没有 python");
+            return;
+        }
+        let manifest = manifest_for("chatty-plugin", "chatty_stderr.py");
+        let mut process = PluginProcess::spawn(&manifest, &fixture("")).expect("spawn");
+        process.handshake("0.1.0").expect("握手");
+        process
+            .call(
+                "usage/import",
+                &serde_json::json!({"mode": "unterminated"}),
+                &mut NoHostApi,
+            )
+            .expect("调用");
+
+        wait_for_stderr(&process, "FLOOD-END");
+        assert_eq!(process.stderr_byte_len(), STDERR_LIMIT);
+    }
+
+    #[test]
+    fn invalid_utf8_stderr_does_not_stop_capture() {
+        if !python_available() {
+            eprintln!("跳过：PATH 里没有 python");
+            return;
+        }
+        let manifest = manifest_for("chatty-plugin", "chatty_stderr.py");
+        let mut process = PluginProcess::spawn(&manifest, &fixture("")).expect("spawn");
+        process.handshake("0.1.0").expect("握手");
+        process
+            .call(
+                "usage/import",
+                &serde_json::json!({"mode": "invalid"}),
+                &mut NoHostApi,
+            )
+            .expect("调用");
+
+        wait_for_stderr(&process, "AFTER-INVALID");
+        assert_eq!(process.stderr_tail(1), "AFTER-INVALID");
     }
 
     /// 进程是否仍然存活。
