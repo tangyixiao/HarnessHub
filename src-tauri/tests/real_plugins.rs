@@ -181,6 +181,317 @@ fn usage_import_is_idempotent_and_tagged_with_the_plugin_source() {
 }
 
 #[test]
+fn usage_import_rejects_an_unregistered_directory_before_spawn() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("wrong-directory");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let other = root.join("other-copy");
+    copy_dir(&root.join("usage-connect"), &other);
+    let marker = other.join("started");
+    let script = other.join("adapter/usage.py");
+    let original = std::fs::read_to_string(&script).expect("读取 adapter");
+    std::fs::write(
+        &script,
+        original.replace("PLUGIN_ID =", "Path('started').touch()\nPLUGIN_ID ="),
+    )
+    .expect("添加启动标记");
+
+    let result = service::import_usage(db.connection(), "usage-connect", &other);
+    assert!(
+        matches!(result, Err(harness_hub_lib::error::Error::InvalidInput(_))),
+        "{result:?}"
+    );
+    assert!(!marker.exists(), "不属于登记目录的 adapter 不应被启动");
+    assert_usage_is_empty_and_plugin_is_ready(&db);
+}
+
+#[test]
+fn usage_import_rejects_a_changed_manifest_identity_before_spawn() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("wrong-id");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let dir = root.join("usage-connect");
+    let manifest_path = dir.join("manifest.toml");
+    let original = std::fs::read_to_string(&manifest_path).expect("manifest");
+    std::fs::write(
+        &manifest_path,
+        original.replace("usage-connect", "other-plugin"),
+    )
+    .expect("更改 manifest 身份");
+    let script = dir.join("adapter/usage.py");
+    let original = std::fs::read_to_string(&script).expect("adapter");
+    std::fs::write(
+        &script,
+        original.replace(
+            "PLUGIN_ID = \"usage-connect\"",
+            "Path('started').touch()\nPLUGIN_ID = \"other-plugin\"",
+        ),
+    )
+    .expect("更改 adapter 身份");
+
+    let result = service::import_usage(db.connection(), "usage-connect", &dir);
+    assert!(
+        matches!(result, Err(harness_hub_lib::error::Error::InvalidInput(_))),
+        "{result:?}"
+    );
+    assert!(!dir.join("started").exists());
+    assert_usage_is_empty_and_plugin_is_ready(&db);
+}
+
+fn assert_usage_is_empty_and_plugin_is_ready(db: &Database) {
+    for table in ["usage_events", "usage_imports"] {
+        let count: i64 = db
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("计数");
+        assert_eq!(count, 0, "错配不得写入 {table}");
+    }
+    assert_eq!(
+        registry::get_plugin(db.connection(), "usage-connect")
+            .expect("查询")
+            .expect("存在")
+            .status,
+        registry::STATUS_READY
+    );
+}
+
+#[test]
+fn usage_import_failure_marks_degraded_until_refresh_recovers() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("import-failure");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let dir = root.join("usage-connect");
+    let script = dir.join("adapter/usage.py");
+    let original = std::fs::read_to_string(&script).expect("adapter");
+    std::fs::write(&script, "import sys\nsys.exit(1)\n").expect("破坏 adapter");
+
+    service::import_usage(db.connection(), "usage-connect", &dir).expect_err("启动失败");
+    assert_eq!(
+        registry::get_plugin(db.connection(), "usage-connect")
+            .expect("查询")
+            .expect("存在")
+            .status,
+        registry::STATUS_DEGRADED
+    );
+    let result = service::import_usage(db.connection(), "usage-connect", &dir);
+    assert!(matches!(
+        result,
+        Err(harness_hub_lib::error::Error::PluginDegraded(_))
+    ));
+
+    std::fs::write(&script, original).expect("还原 adapter");
+    service::refresh(db.connection(), &root);
+    assert!(
+        service::import_usage(db.connection(), "usage-connect", &dir.join("."))
+            .expect("refresh 后恢复，路径别名可用")
+            > 0
+    );
+}
+
+#[test]
+fn usage_import_call_crash_marks_degraded_without_implicit_respawn() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+
+    let root = fresh_root("usage-call-crash");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("从空库启动");
+    let refresh = service::refresh(db.connection(), &root);
+    assert!(
+        refresh.registered.contains(&"usage-connect".to_string()),
+        "生产 refresh 应登记 usage-connect：{:?}",
+        refresh
+    );
+    let dir = root.join("usage-connect");
+    let script = dir.join("adapter/usage.py");
+    let original = std::fs::read_to_string(&script).expect("读取 adapter");
+    let target = "    rows = load_fixture()\n";
+    assert_eq!(
+        original.matches(target).count(),
+        1,
+        "应恰好匹配 handle_usage_import 的函数体边界"
+    );
+    let modified = original.replacen(
+        target,
+        "    Path('called').touch()\n    sys.exit(1)\n    rows = load_fixture()\n",
+        1,
+    );
+    assert!(
+        modified.contains("def handle_usage_import(params: dict) -> dict:\n    \"\"\"usage/import")
+            && modified.contains("    Path('called').touch()\n    sys.exit(1)\n"),
+        "故障注入必须命中 usage/import handler，不能影响 initialize"
+    );
+    std::fs::write(&script, modified).expect("注入调用期崩溃");
+
+    let first = service::import_usage(db.connection(), "usage-connect", &dir);
+    assert!(first.is_err(), "usage/import 进程崩溃应使调用失败");
+    let called = dir.join("called");
+    assert!(called.exists(), "插件必须实际收到 usage/import 请求");
+    assert_eq!(
+        registry::get_plugin(db.connection(), "usage-connect")
+            .expect("查询")
+            .expect("refresh 已登记")
+            .status,
+        registry::STATUS_DEGRADED
+    );
+    for table in ["usage_events", "usage_imports"] {
+        let count: i64 = db
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("计数");
+        assert_eq!(count, 0, "调用崩溃不得留下 {table} 半成品");
+    }
+
+    std::fs::remove_file(&called).expect("清除首次调用标记");
+    let second = service::import_usage(db.connection(), "usage-connect", &dir);
+    assert!(
+        matches!(
+            second,
+            Err(harness_hub_lib::error::Error::PluginDegraded(_))
+        ),
+        "degraded 插件应在 spawn 前返回 PluginDegraded：{second:?}"
+    );
+    assert!(
+        !called.exists(),
+        "degraded 状态下的二次调用不得隐式重启插件"
+    );
+
+    std::fs::write(&script, original).expect("还原 adapter");
+    let recovered = service::refresh(db.connection(), &root);
+    assert!(
+        recovered.registered.contains(&"usage-connect".to_string()),
+        "refresh 应重新注册插件：{:?}",
+        recovered
+    );
+    assert!(
+        service::import_usage(db.connection(), "usage-connect", &dir).expect("refresh 后正向导入")
+            > 0,
+        "恢复后的示例插件应导入至少一个会话"
+    );
+}
+
+#[test]
+fn usage_import_invalid_payload_marks_plugin_degraded() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("invalid-usage");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let dir = root.join("usage-connect");
+    std::fs::write(dir.join("fixtures/sample.json"), r#"{"session":[{}]}"#).expect("坏数据");
+
+    service::import_usage(db.connection(), "usage-connect", &dir).expect_err("拒绝坏数据");
+    assert_eq!(
+        registry::get_plugin(db.connection(), "usage-connect")
+            .expect("查询")
+            .expect("存在")
+            .status,
+        registry::STATUS_DEGRADED
+    );
+    let count: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+        .expect("事件数");
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn usage_import_empty_payload_succeeds_without_degrading() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("empty-usage");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let dir = root.join("usage-connect");
+    std::fs::write(dir.join("fixtures/sample.json"), r#"{"session":[]}"#).expect("空数据");
+
+    assert_eq!(
+        service::import_usage(db.connection(), "usage-connect", &dir).expect("空导入"),
+        0
+    );
+    assert_usage_is_empty_and_plugin_is_ready(&db);
+}
+
+#[test]
+fn usage_import_zero_token_session_keeps_the_import_audit() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("zero-token-usage");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    let dir = root.join("usage-connect");
+    std::fs::write(
+        dir.join("fixtures/sample.json"),
+        r#"{"session":[{"agent":"codex","period":"zero-token-session","totalTokens":0,"modelBreakdowns":[]}]}"#,
+    ).expect("零 token 会话");
+
+    assert_eq!(
+        service::import_usage(db.connection(), "usage-connect", &dir).expect("导入"),
+        0
+    );
+    let count: i64 = db.connection().query_row(
+        "SELECT COUNT(*) FROM usage_imports WHERE source = 'plugin:usage-connect' AND status = 'succeeded'",
+        [], |row| row.get(0),
+    ).expect("导入审计数");
+    assert_eq!(count, 1, "非空会话报告即使没有事件也需要保留审计");
+}
+
+#[test]
+fn usage_import_database_failure_does_not_degrade_a_healthy_plugin() {
+    if !python_available() {
+        eprintln!("跳过：PATH 里没有 python");
+        return;
+    }
+    let root = fresh_root("db-failure");
+    stage_examples(&root);
+    let db = Database::open_in_memory().expect("空库");
+    service::refresh(db.connection(), &root);
+    db.connection().execute_batch("CREATE TRIGGER fail_usage BEFORE INSERT ON usage_events BEGIN SELECT RAISE(ABORT, 'test database failure'); END;")
+        .expect("模拟 SQLite 写失败");
+
+    let result = service::import_usage(
+        db.connection(),
+        "usage-connect",
+        &root.join("usage-connect"),
+    );
+    assert!(
+        matches!(result, Err(harness_hub_lib::error::Error::Database(_))),
+        "{result:?}"
+    );
+    assert_usage_is_empty_and_plugin_is_ready(&db);
+}
+
+#[test]
 fn skill_get_returns_the_skill_markdown_verbatim() {
     if !python_available() {
         eprintln!("跳过：PATH 里没有 python");
