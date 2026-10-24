@@ -184,22 +184,66 @@ fn is_not_repository_diagnostic(stderr: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        process::Command,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::process::Command;
+
+    fn fixture_git(root: &Path) -> Command {
+        let support = root.join(".git/hh-fixture");
+        std::fs::create_dir_all(support.join("hooks")).unwrap();
+        std::fs::create_dir_all(support.join("template")).unwrap();
+        let config = support.join("empty-config");
+        std::fs::write(&config, b"").unwrap();
+        let mut command = Command::new("git");
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            if matches!(
+                name.as_str(),
+                "GIT_DIR"
+                    | "GIT_WORK_TREE"
+                    | "GIT_INDEX_FILE"
+                    | "GIT_COMMON_DIR"
+                    | "GIT_PREFIX"
+                    | "GIT_OBJECT_DIRECTORY"
+                    | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+                    | "GIT_CONFIG"
+                    | "GIT_CONFIG_COUNT"
+                    | "GIT_CONFIG_PARAMETERS"
+            ) || name.starts_with("GIT_CONFIG_KEY_")
+                || name.starts_with("GIT_CONFIG_VALUE_")
+            {
+                command.env_remove(key);
+            }
+        }
+        command
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", &config)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_TEMPLATE_DIR", support.join("template"))
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .args([
+                "-c",
+                "user.name=Harness Hub Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
+            ])
+            .arg("-c")
+            .arg(format!(
+                "core.hooksPath={}",
+                support.join("hooks").display()
+            ));
+        command
+    }
 
     struct Repo(PathBuf);
     impl Repo {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "hh-git-capture-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let root =
+                std::env::temp_dir().join(format!("hh-git-capture-{}", uuid::Uuid::new_v4()));
             Self::at(root)
         }
         fn at(root: PathBuf) -> Self {
@@ -209,19 +253,7 @@ mod tests {
             repo
         }
         fn git(&self, args: &[&str]) {
-            let status = Command::new("git")
-                .args([
-                    "-c",
-                    "user.name=Harness Hub Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                ])
-                .args(args)
-                .current_dir(&self.0)
-                .env("GIT_CONFIG_GLOBAL", "NUL")
-                .env("GIT_CONFIG_SYSTEM", "NUL")
-                .status()
-                .unwrap();
+            let status = fixture_git(&self.0).args(args).status().unwrap();
             assert!(status.success());
         }
     }
@@ -232,16 +264,97 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess helper; parent supplies disposable paths"]
+    fn fixture_environment_helper() {
+        let root = PathBuf::from(std::env::var_os("HH_FIXTURE_CHILD_ROOT").unwrap());
+        let owner = root.parent().unwrap();
+        assert_eq!(owner.parent(), Some(std::env::temp_dir().as_path()));
+        let owner_name = owner.file_name().unwrap().to_str().unwrap();
+        uuid::Uuid::parse_str(owner_name.strip_prefix("hh-git-capture-").unwrap()).unwrap();
+        assert!(matches!(
+            root.file_name().unwrap().to_str().unwrap(),
+            "child-index" | "child-repository" | "child-config"
+        ));
+        let repo = Repo::at(root);
+        assert!(repo.0.join(".git").is_dir(), "init stays inside fixture");
+        std::fs::write(repo.0.join("file"), b"fixture").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "fixture"]);
+        assert!(
+            repo.0.join(".git/index").is_file(),
+            "index stays inside fixture"
+        );
+    }
+
+    #[test]
+    fn fixture_git_isolates_inherited_repository_and_config_environment() {
+        let protected = Repo::new();
+        std::fs::write(protected.0.join("file"), b"protected").unwrap();
+        protected.git(&["add", "file"]);
+        protected.git(&["commit", "-qm", "protected"]);
+        let paths = [".git/config", ".git/HEAD", ".git/index", "file"];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|p| std::fs::read(protected.0.join(p)).unwrap())
+            .collect();
+        for mode in ["index", "repository", "config"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "git::snapshot::tests::fixture_environment_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(
+                    "HH_FIXTURE_CHILD_ROOT",
+                    protected.0.join(format!("child-{mode}")),
+                );
+            match mode {
+                "index" => {
+                    child.env("GIT_INDEX_FILE", protected.0.join(".git/index"));
+                }
+                "repository" => {
+                    child
+                        .env("GIT_DIR", protected.0.join(".git"))
+                        .env("GIT_WORK_TREE", &protected.0)
+                        .env("GIT_COMMON_DIR", protected.0.join(".git"))
+                        .env("GIT_OBJECT_DIRECTORY", protected.0.join(".git/objects"))
+                        .env(
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            protected.0.join(".git/objects"),
+                        )
+                        .env("GIT_PREFIX", "polluted/");
+                }
+                "config" => {
+                    child
+                        .env("GIT_CONFIG_COUNT", "1")
+                        .env("GIT_CONFIG_KEY_0", "core.bare")
+                        .env("GIT_CONFIG_VALUE_0", "true")
+                        .env("GIT_CONFIG_PARAMETERS", "'core.bare=true'");
+                }
+                _ => unreachable!(),
+            }
+            let output = child.output().unwrap();
+            for (path, expected) in paths.iter().zip(&before) {
+                assert_eq!(
+                    &std::fs::read(protected.0.join(path)).unwrap(),
+                    expected,
+                    "protected sentinel unchanged ({mode}, {path})"
+                );
+            }
+            assert!(
+                output.status.success(),
+                "isolated child {mode}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
     fn existing_non_repo_is_not_repository_but_invalid_paths_are_errors() {
         let temp = Repo::new();
-        let empty = std::env::temp_dir().join(format!(
-            "hh-nonrepo-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let empty = std::env::temp_dir().join(format!("hh-nonrepo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&empty).unwrap();
         assert_eq!(capture(&empty).unwrap(), GitObservation::NotRepository);
         let _ = std::fs::remove_dir(&empty);
@@ -312,7 +425,7 @@ mod tests {
         };
         let head = committed.head.unwrap();
         let branch = String::from_utf8(
-            Command::new("git")
+            fixture_git(&repo.0)
                 .args(["symbolic-ref", "--short", "HEAD"])
                 .current_dir(&repo.0)
                 .output()
@@ -350,35 +463,28 @@ mod tests {
 
     #[test]
     fn bare_repository_is_not_a_worktree() {
-        let parent = std::env::temp_dir().join(format!(
-            "hh-git-bare-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&parent).unwrap();
+        let owner = Repo::new();
+        let parent = &owner.0;
         let bare = parent.join("bare.git");
-        let output = Command::new("git")
+        let output = fixture_git(parent)
             .args(["init", "--bare", "-q"])
             .arg(&bare)
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(capture(&bare).unwrap(), GitObservation::NotRepository);
-        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[cfg(unix)]
     #[test]
     fn non_utf8_repository_path_is_passed_as_os_string() {
         use std::os::unix::ffi::OsStringExt;
-        let mut name = format!("hh-git-nonutf8-{}-", std::process::id()).into_bytes();
+        let owner = Repo::new();
+        let mut name = b"nonutf8-".to_vec();
         name.push(0xff);
-        let root = std::env::temp_dir().join(OsString::from_vec(name));
+        let root = owner.0.join(OsString::from_vec(name));
         std::fs::create_dir_all(&root).unwrap();
-        let init = Command::new("git")
+        let init = fixture_git(&root)
             .args(["init", "-q"])
             .current_dir(&root)
             .output()

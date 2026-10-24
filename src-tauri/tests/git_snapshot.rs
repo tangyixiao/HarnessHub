@@ -48,7 +48,8 @@ impl Fixture {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.root.join("no-global-config"))
             .env("GIT_TEMPLATE_DIR", &self.template)
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C");
         for key in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -306,9 +307,48 @@ fn capture_preserves_head_index_working_bytes_and_never_executes_fsmonitor() {
 }
 
 #[test]
+fn sha256_unsupported_diagnostic_does_not_swallow_other_init_errors() {
+    assert!(sha256_unsupported(
+        b"error: unknown option `object-format=sha256'\nusage: git init\n"
+    ));
+    assert!(sha256_unsupported(
+        b"fatal: unknown hash algorithm 'sha256'\n"
+    ));
+    assert!(!sha256_unsupported(
+        b"fatal: bad config line 1 in file object-format=sha256\n"
+    ));
+    assert!(!sha256_unsupported(
+        b"fatal: cannot mkdir sha256: Permission denied\n"
+    ));
+}
+
+fn sha256_unsupported(stderr: &[u8]) -> bool {
+    stderr == b"fatal: unknown hash algorithm 'sha256'\n"
+        || stderr.starts_with(b"error: unknown option `object-format=sha256'\nusage: git init")
+}
+
+#[test]
 fn real_sha256_repository_returns_complete_64_hex_head() {
     let f = Fixture::new();
-    let repo = f.repo("sha256", true);
+    let repo = f.root.join("sha256");
+    fs::create_dir(&repo).expect("create SHA256 fixture");
+    let init = f.command(
+        &repo,
+        &[
+            "init",
+            "-q",
+            "--initial-branch=main",
+            "--object-format=sha256",
+        ],
+    );
+    if !init.status.success() && sha256_unsupported(&init.stderr) {
+        println!("SKIP: Git explicitly reports unsupported SHA256 object format");
+        return;
+    }
+    assert!(
+        init.status.success(),
+        "SHA256 fixture init failed (not an unsupported-format diagnostic)"
+    );
     f.write(&repo, "tracked", b"SHA256 fixture\n");
     f.commit(&repo);
     let s = snapshot(&repo);
