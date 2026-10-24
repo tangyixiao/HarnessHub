@@ -183,6 +183,62 @@ ccusage session --nope --json   →  exit 2,  stdout/stderr 有 "Unknown session
 
 非零退出必须被记录成**失败的 import**（带 stderr 摘要），不得当成「没有数据」。
 
+## 第三轮取证（2026-10-24，ROADMAP A2）：gemini 数据源
+
+问题：解析层对 `agent` 没有白名单（session 行按原样落库），opencode 已有夹具，
+gemini 全仓无夹具。A2 要回答「真机上 gemini 行长什么样」。
+
+### 真机实测（本机，Windows）
+
+```text
+npx --yes ccusage@20.0.24 session --sections daily --by-agent --json
+  → exit 0，492,771 字节
+  → session 546 行，agent 分布 {codex: 466, opencode: 2, claude: 5, zcode: 73}
+  → daily 的 agents[] 同样只有这 4 个
+  → 没有任何 agent 为 gemini 的行
+
+npx --yes ccusage@20.0.24 gemini session --json
+  → exit 0，185 字节：{"sessions": [], "totals": {…, "totalCost": -0.0}}
+  → 本机 ~/.gemini/tmp 下没有会话日志，loader 返回空报告
+```
+
+空报告本身就是证据：`ccusage gemini` 子命令的顶层键是 **`sessions`（复数）**，
+行键是 **`sessionId`**（focused schema），与 unified 报告的 `session`/`period`
+不是一种形状 —— v0.1 只导 unified，子命令输出不进导入层。
+
+### 源码取证（GitHub ccusage/ccusage，tag v20.0.24）
+
+真机没有 gemini 行，行形状从工具自己的源码取证（本机 npx 缓存里的 20.0.24
+二进制同样嵌着这些字段名与 `adapters\gemini` 路径，交叉印证）：
+
+- **unified 行的 `agent` 值就是 `"gemini"`**：`ccusage-adapter-all/src/loader.rs`
+  里 gemini 的 load spec 用字符串 `"gemini"`；`report.rs` 的 `agent_label`
+  （`"gemini" => "Gemini CLI"`）只是展示层映射，不进 JSON。
+- **`period` = Gemini CLI 日志里的 `sessionId` 原样，不带日期前缀**：
+  session 口径先按 `entry.session_id` 分组（`adapters/gemini/src/report.rs`），
+  `adapter-all` 的 `summary_rows` 再取 `date.or(week).or(month).or(session_id)`，
+  session 行落到 `session_id`。「不能假定 period 里有日期」在 gemini 上同样成立，
+  `occurred_at` 完全依赖 `metadata.lastActivity`。
+- **`metadata` 只有 `lastActivity`**：`summary_metadata` 对走 `summary_rows`
+  的 agent 只写 lastActivity；`reasoningOutputTokens` 只在 codex 行
+  （`codex_group_row`）出现 —— **gemini 行没有 reasoningOutputTokens**。
+- **thoughts token 不在四类之内**：`adapters/gemini/src/parser.rs` 里
+  `total = input + output + cacheRead + thoughts`（或文件自带 total），
+  行 `totalTokens` = 四类之和 + `extra_total_tokens`（thoughts），而
+  `modelBreakdowns` 序列化时跳过 extra —— 与 opencode 的 +910 残差同一机制，
+  落 `usage_imports.unattributed_tokens`，**不得**伪标成 reasoning。
+- tool token 折进 `input`；`cacheCreationTokens` 恒 0；模型缺价时 cost 0 +
+  `missingPricing: true`（价格查找按 `google/`、`gemini/`、`vertex_ai/`、
+  `openrouter/google/` 前缀候选）。
+- 数据源：`~/.gemini/tmp/**/*.{json,jsonl}`（可用 `GEMINI_DATA_DIR` 覆盖）。
+
+### 结论
+
+本机没有 gemini 真实数据可脱敏，`gemini-session.json` 是 **synthetic** 夹具：
+形状严格对齐 unified session schema 与上述源码口径（裸 UUID 的 `period`、
+只有 `lastActivity` 的 `metadata`、`totalTokens` 比四类之和多出 thoughts），
+**待真机出现 gemini 数据后回填真实样本**。合成数据不得伪装成真机输出。
+
 ## 由此确定的 Task 5 设计（已冻结为 ADR-0011）
 
 1. Runner：PATH → 用户配置 → pinned managed（`ccusage@20.0.24`）→ `unavailable`；**不用 `@latest`**。
@@ -203,13 +259,14 @@ ccusage session --nope --json   →  exit 2,  stdout/stderr 有 "Unknown session
 
 ## 本目录的夹具
 
-| 文件                     | 用途                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| `session.json`           | 主路径：`session` + `totals`，4 个 agent、含多模型行、reasoning tokens、`missingPricing`   |
-| `sections.json`          | 单次 `--sections daily --by-agent` 形状：`session` + `daily` + `totals`（子集自洽）        |
-| `noisy-cost.json`        | 决策六的金额边界 fixture（浮点噪声、`e` 记法、half-even、`missingPricing`）                |
-| `empty.json`             | 合法但零 session → 必须是成功的空导入，不是错误                                            |
-| `unsupported-shape.json` | 合法 JSON 但只有 `sessionId`、没有 `period`/`modelBreakdowns` → 必须报 `unsupported_shape` |
+| 文件                     | 用途                                                                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `session.json`           | 主路径：`session` + `totals`，4 个 agent、含多模型行、reasoning tokens、`missingPricing`                                          |
+| `sections.json`          | 单次 `--sections daily --by-agent` 形状：`session` + `daily` + `totals`（子集自洽）                                               |
+| `noisy-cost.json`        | 决策六的金额边界 fixture（浮点噪声、`e` 记法、half-even、`missingPricing`）                                                       |
+| `empty.json`             | 合法但零 session → 必须是成功的空导入，不是错误                                                                                   |
+| `unsupported-shape.json` | 合法 JSON 但只有 `sessionId`、没有 `period`/`modelBreakdowns` → 必须报 `unsupported_shape`                                        |
+| `gemini-session.json`    | **synthetic**（A2，待真机数据回填）：gemini 行形状 —— 裸 UUID period、只有 lastActivity 的 metadata、totalTokens 含 thoughts 残差 |
 
 截断 / 语法错误的 JSON 不放夹具文件（`prettier --check .` 会覆盖 `fixtures/**/*.json`，
 放进来的话整个仓库的 format gate 会被一个故意损坏的文件卡住），改为在测试里内联字符串。
