@@ -26,6 +26,7 @@ import {
   normalizePluginRefreshReport,
   normalizeProjectRecord,
   normalizeSessionGitSnapshot,
+  normalizeSessionGitSummary,
   normalizeSessionRecord,
   normalizeUsageCapabilities,
   normalizeUsageImport,
@@ -1340,6 +1341,36 @@ describe('normalizeSessionGitSnapshot', () => {
     const snapshot = normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, stagedFiles: '2' });
 
     expect(snapshot?.stagedFiles).toBe(0);
+  });
+});
+
+describe('normalizeSessionGitSummary', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeSessionGitSummary({ commits: 2, insertions: 41, deletions: 7 })).toEqual({
+      commits: 2,
+      insertions: 41,
+      deletions: 7,
+    });
+  });
+
+  it('null（没有窗口）与 0 commits（窗口内无提交）是两个不同的答案', () => {
+    expect(normalizeSessionGitSummary(null)).toBeNull();
+    expect(normalizeSessionGitSummary('x')).toBeNull();
+    // 后端 Some(0,0,0)：同 HEAD 的真实摘要，必须保留为 0 而不是折叠成 null。
+    expect(normalizeSessionGitSummary({ commits: 0, insertions: 0, deletions: 0 })).toEqual({
+      commits: 0,
+      insertions: 0,
+      deletions: 0,
+    });
+  });
+
+  it('计数缺省 / 非数字收敛为 0，不把字符串渲染出来', () => {
+    expect(normalizeSessionGitSummary({})).toEqual({
+      commits: 0,
+      insertions: 0,
+      deletions: 0,
+    });
+    expect(normalizeSessionGitSummary({ commits: '2' })?.commits).toBe(0);
   });
 });
 

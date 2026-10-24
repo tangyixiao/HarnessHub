@@ -252,9 +252,11 @@ describe('SessionsPage', () => {
    */
   it('有 start+end 快照时渲染 Git 区块：head 短 sha 与四类计数，且不出现 AI 归因文案', async () => {
     (window as unknown as Internals).__TAURI_INTERNALS__ = {
-      invoke: vi.fn(async (cmd: string) =>
-        cmd === 'list_sessions' ? [EXITED_SESSION] : [GIT_START_SNAPSHOT, GIT_END_SNAPSHOT],
-      ),
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === 'list_sessions') return [EXITED_SESSION];
+        if (cmd === 'session_git_summary') return null;
+        return [GIT_START_SNAPSHOT, GIT_END_SNAPSHOT];
+      }),
     };
 
     render(<SessionsPage />);
@@ -275,6 +277,25 @@ describe('SessionsPage', () => {
 
     expect(screen.queryByText(/AI (写了|产出)/)).not.toBeInTheDocument();
     expect(screen.queryByText(/贡献/)).not.toBeInTheDocument();
+  });
+
+  /** A3：窗口摘要（commits / ±行数）拼在区块标题里；None 时标题保持纯文本。 */
+  it('有窗口摘要时显示「N commits · +X / −Y」，没有摘要时不显示括号段', async () => {
+    (window as unknown as Internals).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === 'list_sessions') return [EXITED_SESSION];
+        if (cmd === 'session_git_summary') return { commits: 2, insertions: 41, deletions: 7 };
+        return [GIT_START_SNAPSHOT, GIT_END_SNAPSHOT];
+      }),
+    };
+
+    render(<SessionsPage />);
+
+    expect(
+      await screen.findByText('Git · 会话期间的变更（2 commits · +41 / −7）'),
+    ).toBeInTheDocument();
+    // R5：摘要同样只能说「会话期间的变更」。
+    expect(screen.queryByText(/AI (写了|产出)/)).not.toBeInTheDocument();
   });
 
   it('没有快照时完全不渲染 Git 区块（不出错也不转圈）', async () => {

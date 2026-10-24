@@ -1492,3 +1492,45 @@ export async function getSessionGitSnapshots(
 
   return { ok: true, data: snapshots };
 }
+
+/** 会话窗口 Git 摘要（R5：窗口内仓库发生了什么，不是 AI 产出归因）。 */
+export type SessionGitSummary = {
+  commits: number;
+  insertions: number;
+  deletions: number;
+};
+
+/**
+ * 收敛 `session_git_summary` 的返回。
+ *
+ * `null`（没有窗口：缺快照 / unborn HEAD / 仓库不可达）与「0 commits」是两回事，
+ * 必须保留三态：null（没有摘要）/ 0（窗口内没有 commit）/ N（有变化）。
+ * 计数字段缺省 0；完全不是对象也返回 null。
+ */
+export function normalizeSessionGitSummary(raw: unknown): SessionGitSummary | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    commits: asNumber(source.commits),
+    insertions: asNumber(source.insertions),
+    deletions: asNumber(source.deletions),
+  };
+}
+
+/**
+ * 会话窗口摘要（ROADMAP A3）。**纯读**：按需现算（后端至多跑两条有界 git 命令），
+ * 不落库、不缓存。Rust 侧在锁外跑 git，本调用可能耗时至几秒。
+ */
+export async function getSessionGitSummary(
+  hubSessionId: string,
+): Promise<IpcResult<SessionGitSummary | null>> {
+  const result = await invokeCommand<unknown>('session_git_summary', { hubSessionId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeSessionGitSummary(result.data) };
+}
