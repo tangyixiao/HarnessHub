@@ -696,7 +696,7 @@ mod tests {
             deletions: 7,
         };
 
-        let json = serde_json::to_value(&summary).expect("序列化");
+        let json = serde_json::to_value(summary).expect("序列化");
         assert_eq!(json["commits"], 2);
         assert_eq!(json["insertions"], 41);
         assert_eq!(json["deletions"], 7);
@@ -704,8 +704,8 @@ mod tests {
             assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
         }
 
-        let none = serde_json::to_value(Option::<crate::git::WindowSummary>::None)
-            .expect("序列化 None");
+        let none =
+            serde_json::to_value(Option::<crate::git::WindowSummary>::None).expect("序列化 None");
         assert!(none.is_null(), "None 必须是 null：{none}");
     }
 
