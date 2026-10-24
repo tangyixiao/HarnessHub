@@ -13,7 +13,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root =
-            std::env::temp_dir().join(format!("hh-git-integration-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("hh-git integration-{}-'", uuid::Uuid::new_v4()));
         fs::create_dir(&root).expect("create fixture root");
         let hooks = root.join("empty-hooks");
         let template = root.join("empty-template");
@@ -259,14 +259,11 @@ fn capture_preserves_head_index_working_bytes_and_never_executes_fsmonitor() {
     f.git(&repo, &["add", "tracked"]);
     f.write(&repo, "tracked", b"working\n");
     f.write(&repo, "untracked", b"untracked bytes\0\xff");
-    let sentinel = f.root.join("fsmonitor-fired");
-    let script = f.root.join("fsmonitor-hook");
+    let sentinel = repo.join(".git/fsmonitor-fired");
+    let script = repo.join(".git/fsmonitor-hook");
     fs::write(
         &script,
-        format!(
-            "#!/bin/sh\nprintf fired > '{}'\nprintf 'token\\0'\n",
-            sentinel.to_string_lossy().replace('\\', "/")
-        ),
+        b"#!/bin/sh\nprintf fired > .git/fsmonitor-fired\nprintf 'token\\0'\n",
     )
     .expect("write fsmonitor hook");
     #[cfg(unix)]
@@ -276,14 +273,7 @@ fn capture_preserves_head_index_working_bytes_and_never_executes_fsmonitor() {
             .expect("make hook executable");
     }
     // Prove the configured hook can execute before testing that capture suppresses it.
-    f.git(
-        &repo,
-        &[
-            "config",
-            "core.fsmonitor",
-            &script.to_string_lossy().replace('\\', "/"),
-        ],
-    );
+    f.git(&repo, &["config", "core.fsmonitor", ".git/fsmonitor-hook"]);
     f.git(&repo, &["status", "--porcelain=v1"]);
     assert!(sentinel.exists(), "fsmonitor positive control executes");
     fs::remove_file(&sentinel).expect("reset fsmonitor sentinel");
@@ -334,13 +324,24 @@ fn current_repository_read_only_smoke() {
         .parent()
         .expect("repository parent");
     let s = snapshot(root);
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .expect("read smoke HEAD");
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output().expect("read smoke HEAD");
     assert!(output.status.success(), "read smoke HEAD succeeds");
     let expected = String::from_utf8(output.stdout).expect("ASCII smoke HEAD");
     assert!(
