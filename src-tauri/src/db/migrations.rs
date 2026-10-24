@@ -1055,9 +1055,10 @@ mod tests {
     ///
     /// 必须用裸 `Connection` + `apply_until` 控制版本：`Database::open_*` 会一次性把迁移
     /// 跑到最新，那样只能验证最终 schema —— 而真实用户是从 v7 升上来的。
-    /// 这条用例同时是「两条插件迁移被正确注册、按序执行」的唯一证据。
+    /// 这条用例同时是「插件两条迁移被正确注册、按序执行」的证据；后续迁移
+    /// （0010 起）出现在断言里即代表它们同样落在这条升级路径上。
     #[test]
-    fn migration_0008_and_0009_upgrade_a_v7_database_to_v9() {
+    fn migration_0008_and_0009_upgrade_a_v7_database_to_latest() {
         let mut conn = Connection::open_in_memory().expect("打开内存库");
         conn.pragma_update(None, "foreign_keys", "ON")
             .expect("外键");
@@ -1083,9 +1084,12 @@ mod tests {
             vec![
                 "0008_permission_decisions".to_string(),
                 "0009_plugins".to_string(),
+                // 0010 起的后续迁移同样在这条 v7 升级路径上按序执行；
+                // 每新增一条迁移都要在这里追加（断言过期就说明这条测试没跟上）。
+                "0010_git_snapshots".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 9);
+        assert_eq!(current_version(&conn).expect("版本"), 10);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(
