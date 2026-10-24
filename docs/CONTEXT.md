@@ -119,5 +119,17 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   `plugin_list` / `plugin_refresh`（v0.1 不加 UI）；`plugins/sdk/` 有协议契约与 manifest
   schema，`plugins/examples/` 有 connect 型与 skill 型两个示例。权限边界完全 observe-only
   （决策恒为 `observed`，只记录不拦截，依据 ADR-0018）。
+  Git Session Snapshot 已完成（ROADMAP A1，spec
+  docs/specs/2026-10-24-git-session-snapshot-design.md）：内部只读 `git::capture(&Path)`
+  返回工作树根、git/common 目录、完整 HEAD（SHA-1 / SHA-256，合法 unborn 为 None）与
+  staged / unstaged / untracked / conflicted 文件计数；支持 detached HEAD 和 linked
+  worktree。系统 Git 命令按每条 3 秒、每流 1 MiB 限制执行，禁用可选锁和 fsmonitor。
+  接线：migration 0010 `git_snapshots`（(hub_session_id, phase) 主键、phase ∈
+  {start,end}、FK 级联删除）；terminal 生命周期在 mark_running 后与终态写入成功后
+  各经**后台线程**补拍一次（短锁读 cwd → 无锁跑 git → 短锁落行，观测 best-effort、
+  失败不落行也不影响会话状态机）；IPC `session_git_snapshots` 纯读；Sessions 页
+  展示「Git · 会话期间的变更」（R5：不得声称 AI 贡献）。
+  多命令观察不保证文件系统原子性，也不表示 AI 贡献；真实仓库集成测试见
+  `src-tauri/tests/git_snapshot.rs` 与 terminal 生命周期用例。
   尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
 - 实施计划见 `docs/plans/`。

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionsPage } from '@/features/sessions/SessionsPage';
@@ -218,5 +218,94 @@ describe('SessionsPage', () => {
     render(<SessionsPage />);
 
     expect(await screen.findByText(/database is locked/)).toBeInTheDocument();
+  });
+
+  /**
+   * 与 IPC 契约 `session_git_snapshots` 的返回项同形（serde camelCase）。
+   */
+  const GIT_START_SNAPSHOT = {
+    hubSessionId: EXITED_SESSION.hubSessionId,
+    phase: 'start',
+    capturedAt: '2026-09-22T10:00:00Z',
+    worktreeRoot: 'D:/work/harness-hub',
+    head: '1234567890abcdef1234567890abcdef12345678',
+    stagedFiles: 2,
+    unstagedFiles: 1,
+    untrackedFiles: 3,
+    conflictedFiles: 0,
+  };
+
+  const GIT_END_SNAPSHOT = {
+    ...GIT_START_SNAPSHOT,
+    phase: 'end',
+    capturedAt: '2026-09-22T10:05:00Z',
+    head: '89abcdef0123456789abcdef0123456789abcdef',
+    stagedFiles: 4,
+    unstagedFiles: 0,
+    untrackedFiles: 5,
+    conflictedFiles: 1,
+  };
+
+  /**
+   * R5 红线：Git 快照是**仓库状态观测**，区块只能写「会话期间的变更」，
+   * 绝不能出现「AI 写了 N 行 / AI 产出」这类归因文案。
+   */
+  it('有 start+end 快照时渲染 Git 区块：head 短 sha 与四类计数，且不出现 AI 归因文案', async () => {
+    (window as unknown as Internals).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) =>
+        cmd === 'list_sessions' ? [EXITED_SESSION] : [GIT_START_SNAPSHOT, GIT_END_SNAPSHOT],
+      ),
+    };
+
+    render(<SessionsPage />);
+
+    expect(await screen.findByText('已结束')).toBeInTheDocument();
+
+    expect(await screen.findByText('Git · 会话期间的变更')).toBeInTheDocument();
+    // head 短 sha：start（1234567）→ end（89abcde）。
+    expect(screen.getByText(/1234567 → 89abcde/)).toBeInTheDocument();
+    expect(screen.getByText('已暂存文件')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+    expect(screen.getByText('未暂存文件')).toBeInTheDocument();
+    expect(screen.getByText('0')).toBeInTheDocument();
+    expect(screen.getByText('未跟踪文件')).toBeInTheDocument();
+    expect(screen.getByText('5')).toBeInTheDocument();
+    expect(screen.getByText('冲突文件')).toBeInTheDocument();
+    expect(screen.getByText('1')).toBeInTheDocument();
+
+    expect(screen.queryByText(/AI (写了|产出)/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/贡献/)).not.toBeInTheDocument();
+  });
+
+  it('没有快照时完全不渲染 Git 区块（不出错也不转圈）', async () => {
+    const invokeSpy = vi.fn(async (cmd: string) =>
+      cmd === 'list_sessions' ? [EXITED_SESSION] : [],
+    );
+    (window as unknown as Internals).__TAURI_INTERNALS__ = { invoke: invokeSpy };
+
+    render(<SessionsPage />);
+    expect(await screen.findByText('已结束')).toBeInTheDocument();
+
+    // 等快照请求真正发出并返回空列表后，再断言「不渲染」，避免与异步拉取竞态。
+    await waitFor(() => {
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'session_git_snapshots')).toBe(true);
+    });
+    expect(screen.queryByText('Git · 会话期间的变更')).not.toBeInTheDocument();
+  });
+
+  it('快照读取失败时卡片照常渲染，Git 区块整体不出现，也不升级成页面错误', async () => {
+    (window as unknown as Internals).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => {
+        if (cmd === 'list_sessions') return [EXITED_SESSION];
+        throw new Error('git snapshot read failed');
+      }),
+    };
+
+    render(<SessionsPage />);
+
+    expect(await screen.findByText('已结束')).toBeInTheDocument();
+    expect(screen.queryByText('Git · 会话期间的变更')).not.toBeInTheDocument();
+    // 观测是 best-effort：快照失败绝不能触发页面级「读取失败」。
+    expect(screen.queryByText('读取失败')).not.toBeInTheDocument();
   });
 });

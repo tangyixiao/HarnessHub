@@ -1411,3 +1411,84 @@ export async function pluginRefresh(): Promise<IpcResult<PluginRefreshReport>> {
 
   return { ok: true, data: normalizePluginRefreshReport(result.data) };
 }
+
+/* ------------------------------------------------------------------ *
+ * Git Session Snapshot（ROADMAP 阶段 A1，best-effort 观测）
+ * ------------------------------------------------------------------ */
+
+export type SnapshotPhase = 'start' | 'end';
+
+/**
+ * 与 IPC 契约 `session_git_snapshots` 的返回项同形（serde camelCase）。
+ *
+ * 这是**仓库状态观测**，不是产出归因：四类计数是快照时刻的工作区状态，
+ * UI 只能说「会话期间的变更」，绝不能声称这些变更是谁写的（规划 R5）。
+ */
+export type SessionGitSnapshot = {
+  hubSessionId: string;
+  phase: SnapshotPhase;
+  capturedAt: string;
+  worktreeRoot: string;
+  /** 40 位 hex；仓库还没有任何提交（unborn HEAD）时为 null。 */
+  head: string | null;
+  stagedFiles: number;
+  unstagedFiles: number;
+  untrackedFiles: number;
+  conflictedFiles: number;
+};
+
+const SNAPSHOT_PHASES: readonly SnapshotPhase[] = ['start', 'end'];
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `SessionGitSnapshot`。
+ *
+ * 拿不到 `hubSessionId` 或 `phase` 非法 → 丢弃该行：不知道属于哪个会话、
+ * 不知道是开始还是结束的快照没有观测意义，宁可少显示也不猜。
+ * 四类计数缺省 0，`head` 只认字符串或 null。
+ */
+export function normalizeSessionGitSnapshot(raw: unknown): SessionGitSnapshot | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const hubSessionId = typeof source.hubSessionId === 'string' ? source.hubSessionId.trim() : '';
+  if (hubSessionId.length === 0) {
+    return null;
+  }
+
+  const phase = SNAPSHOT_PHASES.find((candidate) => candidate === source.phase);
+  if (phase === undefined) {
+    return null;
+  }
+
+  return {
+    hubSessionId,
+    phase,
+    capturedAt: typeof source.capturedAt === 'string' ? source.capturedAt : '',
+    worktreeRoot: typeof source.worktreeRoot === 'string' ? source.worktreeRoot : '',
+    head: asStringOrNull(source.head),
+    stagedFiles: asNumber(source.stagedFiles),
+    unstagedFiles: asNumber(source.unstagedFiles),
+    untrackedFiles: asNumber(source.untrackedFiles),
+    conflictedFiles: asNumber(source.conflictedFiles),
+  };
+}
+
+/** 某个会话的 Git 快照（start / end 各至多一条）。**纯读**：不碰外部仓库、不写库。 */
+export async function getSessionGitSnapshots(
+  hubSessionId: string,
+): Promise<IpcResult<SessionGitSnapshot[]>> {
+  const result = await invokeCommand<unknown>('session_git_snapshots', { hubSessionId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const snapshots = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeSessionGitSnapshot)
+        .filter((snapshot): snapshot is SessionGitSnapshot => snapshot !== null)
+    : [];
+
+  return { ok: true, data: snapshots };
+}

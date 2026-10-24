@@ -182,6 +182,7 @@ pub fn run() {
             commands::register_project,
             commands::remove_project,
             commands::resize_terminal,
+            commands::session_git_snapshots,
             commands::start_terminal,
             commands::usage_summary,
             commands::write_terminal

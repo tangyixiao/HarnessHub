@@ -6,7 +6,9 @@ import { harnessIdentity } from '@/lib/harness-colors';
 import { cn } from '@/lib/utils';
 import {
   NOT_IN_TAURI,
+  getSessionGitSnapshots,
   listSessions,
+  type SessionGitSnapshot,
   type SessionRecord,
   type SessionStatus,
   type TerminationReason,
@@ -169,6 +171,24 @@ export function SessionsPage() {
 
 function SessionCard({ session }: { session: SessionRecord }) {
   const identity = harnessIdentity(session.harnessId ?? '');
+  const [gitSnapshots, setGitSnapshots] = useState<SessionGitSnapshot[] | null>(null);
+
+  // Git 快照是 best-effort 观测：读取失败或没有快照（cwd 缺失 / 非 Git 仓库）时
+  // 完全不渲染区块 —— 不报错也不转圈，绝不影响卡片其余内容。
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const result = await getSessionGitSnapshots(session.hubSessionId);
+      if (cancelled) return;
+
+      setGitSnapshots(result.ok && result.data.length > 0 ? result.data : null);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session.hubSessionId]);
 
   return (
     <section aria-label={session.hubSessionId}>
@@ -221,8 +241,51 @@ function SessionCard({ session }: { session: SessionRecord }) {
             ? ' · 无外部 source session id（由 Harness Hub 创建）'
             : ` · 外部 session：${session.sourceSessionId}`}
         </p>
+
+        {gitSnapshots !== null ? <GitSnapshotBlock snapshots={gitSnapshots} /> : null}
       </Card>
     </section>
+  );
+}
+
+/** head 短 sha（前 7 位）。仓库还没有任何提交（unborn HEAD）时如实显示，不编造 sha。 */
+function shortHead(head: string | null): string {
+  return head === null ? 'unborn（无提交）' : head.slice(0, 7);
+}
+
+/**
+ * 「Git · 会话期间的变更」区块。
+ *
+ * 用词纪律（规划 R5）：这里展示的是**仓库状态**（head 迁移 + 四类文件计数），
+ * 不是产出归因 —— 绝不能写「AI 写了 N 行」这类声称变更是谁做的文案。
+ */
+function GitSnapshotBlock({ snapshots }: { snapshots: SessionGitSnapshot[] }) {
+  const start = snapshots.find((snapshot) => snapshot.phase === 'start') ?? null;
+  const end = snapshots.find((snapshot) => snapshot.phase === 'end') ?? null;
+  // 四类计数是快照时刻的工作区状态：优先取会话结束时刻；只有 start 时如实展示 start 的。
+  const summary = end ?? start;
+
+  if (summary === null) {
+    return null;
+  }
+
+  // 两端都有快照时展示 head 的迁移；只有一端时只展示那一端，不编造另一端。
+  const head =
+    start !== null && end !== null
+      ? `${shortHead(start.head)} → ${shortHead(end.head)}`
+      : shortHead(summary.head);
+
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-3">
+      <p className="text-[11px] font-medium text-content-muted">Git · 会话期间的变更</p>
+      <dl className="mt-2 grid gap-3 text-xs sm:grid-cols-5">
+        <Field label="HEAD" value={head} mono />
+        <Field label="已暂存文件" value={String(summary.stagedFiles)} />
+        <Field label="未暂存文件" value={String(summary.unstagedFiles)} />
+        <Field label="未跟踪文件" value={String(summary.untrackedFiles)} />
+        <Field label="冲突文件" value={String(summary.conflictedFiles)} />
+      </dl>
+    </div>
   );
 }
 

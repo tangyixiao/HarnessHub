@@ -11,6 +11,7 @@ import {
   getAppInfo,
   getDbHealth,
   getProjectSessions,
+  getSessionGitSnapshots,
   getUsageSources,
   getUsageSummary,
   invokeCommand,
@@ -24,6 +25,7 @@ import {
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProjectRecord,
+  normalizeSessionGitSnapshot,
   normalizeSessionRecord,
   normalizeUsageCapabilities,
   normalizeUsageImport,
@@ -1278,5 +1280,114 @@ describe('plugin IPC wrappers', () => {
     expect(invokeSpy).toHaveBeenCalledTimes(1);
     expect(invokeSpy.mock.calls[0]?.[0]).toBe('plugin_refresh');
     expect(result).toEqual({ ok: true, data: { registered: ['a'], errors: [] } });
+  });
+});
+
+/**
+ * IPC 契约 `session_git_snapshots` 的返回项（serde camelCase），
+ * 形状手工复刻自冻结的契约：head 为 40 位 hex 或 null，四类计数非负整数。
+ */
+const SNAPSHOT_PAYLOAD = {
+  hubSessionId: '6f1c0f7e-0000-4000-8000-000000000001',
+  phase: 'start',
+  capturedAt: '2026-10-24T10:00:00Z',
+  worktreeRoot: 'D:/work/harness-hub',
+  head: '1234567890abcdef1234567890abcdef12345678',
+  stagedFiles: 2,
+  unstagedFiles: 1,
+  untrackedFiles: 3,
+  conflictedFiles: 0,
+};
+
+describe('normalizeSessionGitSnapshot', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeSessionGitSnapshot(SNAPSHOT_PAYLOAD)).toEqual(SNAPSHOT_PAYLOAD);
+  });
+
+  it('缺 hubSessionId 的条目返回 null，由调用方丢弃', () => {
+    expect(normalizeSessionGitSnapshot({ phase: 'start' })).toBeNull();
+    expect(normalizeSessionGitSnapshot({ hubSessionId: '   ', phase: 'start' })).toBeNull();
+    expect(normalizeSessionGitSnapshot(null)).toBeNull();
+    expect(normalizeSessionGitSnapshot('start')).toBeNull();
+  });
+
+  it('非法 phase 丢弃该行，绝不猜成 start 或 end', () => {
+    expect(normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, phase: 'middle' })).toBeNull();
+    expect(normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, phase: undefined })).toBeNull();
+  });
+
+  it('计数缺省 0，head / 字符串字段缺省安全空值', () => {
+    expect(normalizeSessionGitSnapshot({ hubSessionId: 'h1', phase: 'end' })).toEqual({
+      hubSessionId: 'h1',
+      phase: 'end',
+      capturedAt: '',
+      worktreeRoot: '',
+      head: null,
+      stagedFiles: 0,
+      unstagedFiles: 0,
+      untrackedFiles: 0,
+      conflictedFiles: 0,
+    });
+  });
+
+  it('head 只认字符串或 null，unborn 仓库不会被当成空字符串', () => {
+    expect(normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, head: null })?.head).toBeNull();
+    expect(normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, head: 42 })?.head).toBeNull();
+    expect(normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, head: 'abc' })?.head).toBe('abc');
+  });
+
+  it('计数里的非数字收敛为 0，不把字符串渲染出来', () => {
+    const snapshot = normalizeSessionGitSnapshot({ ...SNAPSHOT_PAYLOAD, stagedFiles: '2' });
+
+    expect(snapshot?.stagedFiles).toBe(0);
+  });
+});
+
+describe('getSessionGitSnapshots', () => {
+  it('使用 session_git_snapshots 命令名并传 hubSessionId', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [SNAPSHOT_PAYLOAD]);
+    stubTauri(invokeSpy);
+
+    const result = await getSessionGitSnapshots('h1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('session_git_snapshots');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ hubSessionId: 'h1' });
+    expect(result).toEqual({ ok: true, data: [SNAPSHOT_PAYLOAD] });
+  });
+
+  it('丢弃无法解析的条目而不是让整页失败', async () => {
+    stubTauri(async () => [SNAPSHOT_PAYLOAD, { phase: 'start' }, null]);
+
+    const result = await getSessionGitSnapshots('h1');
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.hubSessionId).toBe(SNAPSHOT_PAYLOAD.hubSessionId);
+    }
+  });
+
+  it('后端返回非数组时按空列表处理', async () => {
+    stubTauri(async () => null);
+
+    await expect(getSessionGitSnapshots('h1')).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('命令抛错时把错误原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error('snapshot read failed');
+    });
+
+    await expect(getSessionGitSnapshots('h1')).resolves.toEqual({
+      ok: false,
+      error: 'snapshot read failed',
+    });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(getSessionGitSnapshots('h1')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
   });
 });

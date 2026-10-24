@@ -12,6 +12,8 @@ export default tseslint.config(
       'node_modules/**',
       'src-tauri/target/**',
       'src-tauri/gen/**',
+      // 工具自管的运行时产物（工作流脚本/日志），不是本仓库的源码。
+      '.zcode/**',
     ],
   },
   js.configs.recommended,
