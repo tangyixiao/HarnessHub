@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 连环 push 只保留最新一次（PR #17 曾出现依赖安装 stalled 后排队堆积）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,6 +17,8 @@ jobs:
   frontend:
     name: 前端（lint / typecheck / test / build）
     runs-on: ubuntu-latest
+    # stalled 的依赖安装应该快速失败，而不是挂满 6 小时默认上限。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # **不要**在这里再写 `version:`：`package.json` 的 `packageManager`（pnpm@11.0.9）是
@@ -28,10 +35,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # AGENTS.md「完成前」九项门里的 format:check 此前不在 CI，补齐。
+      - run: pnpm format:check
 
   rust:
     name: Rust Control Plane（fmt / clippy / test）
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,6 +65,7 @@ jobs:
   python:
     name: Python sidecar（unittest）
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
