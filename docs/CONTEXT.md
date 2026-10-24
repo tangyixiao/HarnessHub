@@ -129,7 +129,17 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   各经**后台线程**补拍一次（短锁读 cwd → 无锁跑 git → 短锁落行，观测 best-effort、
   失败不落行也不影响会话状态机）；IPC `session_git_snapshots` 纯读；Sessions 页
   展示「Git · 会话期间的变更」（R5：不得声称 AI 贡献）。
+  会话窗口摘要已完成（ROADMAP A3）：`git::window` 用有界 `rev-list --count` +
+  `diff --shortstat` 现算 start..end 的 commits/±行数（**不落库**；同 HEAD 零摘要
+  不起进程；shortstat 形态不认识 → None）；IPC `session_git_summary` 短锁读输入、
+  锁外跑 git；Sessions 页在 Git 区块标题展示「N commits · +X / −Y」。
   多命令观察不保证文件系统原子性，也不表示 AI 贡献；真实仓库集成测试见
   `src-tauri/tests/git_snapshot.rs` 与 terminal 生命周期用例。
-  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
-- 实施计划见 `docs/plans/`。
+  Usage 覆盖（ROADMAP A2）：解析层无 harness 白名单（ccusage session 行按 agent
+  原样落库）；opencode 已有真机 fixture 覆盖；gemini 行形状已从 ccusage v20.0.24
+  源码逐字段取证并以 **synthetic fixture** 锁定回归（thoughts 残差落
+  unattributed_tokens、不伪标 reasoning；本机暂无 gemini 使用数据，README 已如实
+  标注待真机回填）。注意 ccusage 的 focused 子命令（如 `gemini session`）是独立
+  schema，不进导入层，导入只用 unified session 报告。
+  尚未实现：CodeBuddy 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非 capability）。
+- 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
