@@ -200,8 +200,35 @@ pub fn finish_session(
     exit_code: Option<i32>,
     reason: TerminationReason,
 ) -> Result<bool> {
+    let updated = {
+        let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+        SessionService::new(database.connection()).finish(&hub_session_id, exit_code, reason)
+    }?;
+
+    // 终态真的写入后才补拍 end 快照（best-effort，后台线程；git 子进程不进数据库锁）。
+    if updated {
+        crate::git::service::spawn_capture(
+            Arc::clone(&state.db),
+            &hub_session_id,
+            crate::git::SnapshotPhase::End,
+        );
+    }
+
+    Ok(updated)
+}
+
+/// 某个会话的 Git 快照（start / end）。**纯读**：只查 SQLite（ADR-0012）。
+///
+/// 没有行不代表「没有变化」：cwd 缺失 / 非 Git 仓库 / 拍摄失败都不落行
+/// （见 `git::service`）。UI 文案必须遵守 R5：快照只描述
+/// 「会话期间的变更」，不得声称代码由 AI 编写。
+#[tauri::command]
+pub fn session_git_snapshots(
+    state: State<'_, AppState>,
+    hub_session_id: String,
+) -> Result<Vec<crate::git::SessionGitSnapshot>> {
     let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
-    SessionService::new(database.connection()).finish(&hub_session_id, exit_code, reason)
+    crate::git::GitSnapshotStore::new(database.connection()).list_by_session(&hub_session_id)
 }
 
 /// 最近会话，按开始时间倒序。
@@ -576,6 +603,61 @@ mod tests {
         assert_eq!(json["reconciliation"]["costMicrounitsDelta"], 4);
         assert_eq!(json["reconciliation"]["tokensIdentityHolds"], true);
         assert!(json.get("import").is_some() && json.get("reconciliation").is_some());
+    }
+
+    /// 跨 IPC 契约测试：`session_git_snapshots` 返回的快照形状（ROADMAP A1）。
+    ///
+    /// 前端 `normalizeSessionGitSnapshot`（src/lib/ipc.ts）按这些键取值：
+    /// 结构体 camelCase，phase 枚举值 snake_case（"start" / "end"）。
+    #[test]
+    fn session_git_snapshot_serializes_with_camel_case_keys() {
+        let snapshot = crate::git::SessionGitSnapshot {
+            hub_session_id: "hub-1".to_string(),
+            phase: crate::git::SnapshotPhase::Start,
+            captured_at: "2026-10-24T10:00:01Z".to_string(),
+            worktree_root: "D:/work/demo".to_string(),
+            head: Some("a".repeat(40)),
+            staged_files: 1,
+            unstaged_files: 2,
+            untracked_files: 3,
+            conflicted_files: 0,
+        };
+
+        let json = serde_json::to_value(&snapshot).expect("序列化");
+
+        assert_eq!(json["hubSessionId"], "hub-1");
+        assert_eq!(json["phase"], "start");
+        assert_eq!(json["capturedAt"], "2026-10-24T10:00:01Z");
+        assert_eq!(json["worktreeRoot"], "D:/work/demo");
+        assert_eq!(json["head"], "a".repeat(40));
+        assert_eq!(json["stagedFiles"], 1);
+        assert_eq!(json["unstagedFiles"], 2);
+        assert_eq!(json["untrackedFiles"], 3);
+        assert_eq!(json["conflictedFiles"], 0);
+        for snake in [
+            "hub_session_id",
+            "captured_at",
+            "worktree_root",
+            "staged_files",
+            "unstaged_files",
+            "untracked_files",
+            "conflicted_files",
+        ] {
+            assert!(
+                json.get(snake).is_none(),
+                "不得输出 snake_case 键 {snake}：{json}"
+            );
+        }
+
+        // unborn HEAD（空仓库）必须是 null，而不是缺失或空串。
+        let unborn = crate::git::SessionGitSnapshot {
+            phase: crate::git::SnapshotPhase::End,
+            head: None,
+            ..snapshot
+        };
+        let unborn_json = serde_json::to_value(&unborn).expect("序列化");
+        assert!(unborn_json["head"].is_null(), "实际：{unborn_json}");
+        assert_eq!(unborn_json["phase"], "end");
     }
 
     /// 跨 IPC 契约测试：`register_project` / `list_projects` 的返回形状。
