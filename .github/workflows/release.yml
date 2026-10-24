@@ -105,6 +105,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.linux.outputs.version }}
+          # download-artifact 不带仓库上下文，gh 需要显式指定 repo
+          # （首次 tag run 因此失败：not a git repository）。
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --draft --prerelease \
