@@ -14,9 +14,8 @@ HEAD 未变（start==end）时摘要为「0 commit」，但仍展示快照计数
 
 ## Acceptance Criteria
 
-- [ ] 新模块 `git::window`（或 service 扩展）：`window_summary(worktree_root,
-  start_head, end_head) -> Option<WindowSummary>`，内部用现有 runner 限时限量执行
-      `git log --oneline <start>..<end>`（数 commit）与
+- [ ] 新模块 `git::window`（或 service 扩展）：`window_summary(worktree_root, start_head, end_head) -> Option<WindowSummary>`，
+      内部用现有 runner 限时限量执行 `git log --oneline <start>..<end>`（数 commit）与
       `git diff --shortstat <start> <end>`（+/-行数）。
 - [ ] start_head == end_head → 直接返回零摘要，不起进程。
 - [ ] 任一 head 缺失（unborn）或快照缺失 → `None`，UI 不显示该行，不报错。
