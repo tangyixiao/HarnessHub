@@ -27,7 +27,12 @@ pub struct WindowSummary {
 fn git_at(root: &Path, tail: &[&str]) -> std::result::Result<Vec<u8>, GitCaptureError> {
     let mut args = vec![OsString::from("-C"), root.as_os_str().to_owned()];
     args.extend(tail.iter().map(OsString::from));
-    let output = runner::run(&OsString::from("git"), &args, root, runner::Limits::default())?;
+    let output = runner::run(
+        &OsString::from("git"),
+        &args,
+        root,
+        runner::Limits::default(),
+    )?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -110,8 +115,12 @@ pub struct WindowInputs {
 /// 再调用 [`window_summary`]（会跑 git 子进程），见 commands.rs 的锁纪律。
 pub fn window_inputs(conn: &Connection, hub_session_id: &str) -> Result<Option<WindowInputs>> {
     let snapshots = GitSnapshotStore::new(conn).list_by_session(hub_session_id)?;
-    let start = snapshots.iter().find(|item| item.phase == SnapshotPhase::Start);
-    let end = snapshots.iter().find(|item| item.phase == SnapshotPhase::End);
+    let start = snapshots
+        .iter()
+        .find(|item| item.phase == SnapshotPhase::Start);
+    let end = snapshots
+        .iter()
+        .find(|item| item.phase == SnapshotPhase::End);
 
     let (Some(start), Some(end)) = (start, end) else {
         return Ok(None);
@@ -130,10 +139,7 @@ pub fn window_inputs(conn: &Connection, hub_session_id: &str) -> Result<Option<W
 }
 
 /// 便捷路径：读输入并计算（**会执行 git 子进程**，调用方不得持数据库锁）。
-pub fn session_summary(
-    conn: &Connection,
-    hub_session_id: &str,
-) -> Result<Option<WindowSummary>> {
+pub fn session_summary(conn: &Connection, hub_session_id: &str) -> Result<Option<WindowSummary>> {
     let Some(inputs) = window_inputs(conn, hub_session_id)? else {
         return Ok(None);
     };
