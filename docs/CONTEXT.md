@@ -119,5 +119,12 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   `plugin_list` / `plugin_refresh`（v0.1 不加 UI）；`plugins/sdk/` 有协议契约与 manifest
   schema，`plugins/examples/` 有 connect 型与 skill 型两个示例。权限边界完全 observe-only
   （决策恒为 `observed`，只记录不拦截，依据 ADR-0018）。
+  Git 观察层已实现内部只读 `git::capture(&Path)`：返回工作树根、git/common 目录、
+  完整 HEAD（SHA-1 / SHA-256，合法 unborn 为 None）与 staged / unstaged /
+  untracked / conflicted 文件计数；支持 detached HEAD 和 linked worktree。
+  系统 Git 命令按每条 3 秒、每流 1 MiB 限制执行，禁用可选锁和 fsmonitor；
+  多命令观察不保证文件系统原子性，也不表示 AI 贡献。真实仓库集成测试见
+  `src-tauri/tests/git_snapshot.rs`。本阶段没有 DB、Session、IPC 或 UI 接线，
+  不代表完整 Git Session Snapshot gate 已满足。
   尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
 - 实施计划见 `docs/plans/`。

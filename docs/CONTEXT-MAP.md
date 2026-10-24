@@ -13,7 +13,7 @@
 | Session 生命周期与索引             | `src-tauri/src/session/`                                                                                                                                                  |
 | SQLite schema / 迁移               | `src-tauri/src/db/`（`migrations/` 下为 SQL，`migrations.rs` 为执行器）                                                                                                   |
 | 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`（Windows 进程包含 = `pty/containment.rs`，Job Object；真机 Gate = `src-tauri/tests/process_tree_ownership.rs`）            |
-| Git / Worktree 观察                | `src-tauri/src/git/`                                                                                                                                                      |
+| Git / Worktree 观察                | `src-tauri/src/git/`（生产 `capture`；真实仓库测试 `src-tauri/tests/git_snapshot.rs`）                                                                                    |
 | Project Registry（repo root/登记） | `src-tauri/src/project/`、真机测试 `src-tauri/tests/project_registry.rs`                                                                                                  |
 | 文件监听                           | `src-tauri/src/watcher/`                                                                                                                                                  |
 | Python Sidecar 生命周期 / JSON-RPC | `src-tauri/src/sidecar/`（Rust 侧）、`python/harness_hub_runtime/`（Python 侧）                                                                                           |
@@ -56,6 +56,12 @@ Project Registry：`src-tauri/src/project/{mod,git_root,service,store}.rs` —�
 remove_project / get_project_sessions；前端 `src/features/projects/`、
 `src/lib/ipc.ts` Project 段；真机测试 `src-tauri/tests/project_registry.rs`；
 spec `docs/specs/2026-10-12-project-registry-design.md`。
+Git 只读快照：`src-tauri/src/git/{mod,snapshot,runner,status}.rs` ——
+`git::capture(&Path)` 返回 root/git_dir/common_dir、完整 HEAD 和四类文件计数；
+runner 限时限量执行系统 Git，status 按 porcelain v1 NUL 字节协议解析。
+真实仓库矩阵与当前仓库只读 smoke 在 `src-tauri/tests/git_snapshot.rs`；
+spec `docs/specs/2026-10-23-git-snapshot-capture-design.md`。
+本阶段无 DB / Session / IPC / UI 接线，不保证跨查询原子快照。
 Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
 Harnesses 三处永远同色，未知 id 中性灰）。
 插件宿主：`src-tauri/src/plugins/{manifest,rpc,adapters,host_api,registry,discovery,service,supervisor}.rs`
