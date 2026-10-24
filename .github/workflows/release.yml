@@ -1,0 +1,114 @@
+name: Release
+
+# ROADMAP 阶段 A4：Linux 打包 + 发布流水线。
+# 依据与风险记录：docs/plans/2026-10-24-linux-packaging-ci.md。
+#
+# 流程：tag（v*）或手动触发 → 版本一致性校验 → Linux 打包（deb + AppImage）
+# → 资产重命名（去空格，alpha.4 先例）+ SHA256SUMS → 上传 artifact
+# → 仅 tag 触发时创建 **draft pre-release**（发布语义见草案 §4.5：
+# 自动化产 draft，人工核对后 publish，保留证据纪律）。
+#
+# 与草案 §3.2 的差异：不用 tauri-action，直接 `pnpm tauri build` + `gh release`——
+# 复刻 alpha.4 已验证的手工流程，少一层 action 行为假设。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux 打包（deb + AppImage）
+    # glibc 兼容面：Tauri 要求「用打算支持的最老基座构建」。
+    # ubuntu-22.04 现仍可用但已进入弃用流程（约 2027-04 退役），
+    # 退役前需迁移到容器构建或宣布 24.04 基线（草案 §4 风险 1）。
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # 版本以 package.json 的 packageManager 为唯一事实来源（同 ci.yml 的教训）。
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: 安装 Tauri Linux 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+
+      # alpha.4 先例：package.json / tauri.conf.json / Cargo.toml 三处版本必须同步。
+      # workflow_dispatch（分支触发）没有可对的 tag，跳过校验。
+      - name: 校验版本一致性（tag 触发时）
+        id: version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          test "$(node -p "require('./package.json').version")" = "$TAG" || { echo "package.json 与 tag 不一致"; exit 1; }
+          test "$(node -p "require('./src-tauri/tauri.conf.json').version")" = "$TAG" || { echo "tauri.conf.json 与 tag 不一致"; exit 1; }
+          grep -q "^version = \"$TAG\"" src-tauri/Cargo.toml || { echo "Cargo.toml 与 tag 不一致"; exit 1; }
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      # runner 无 FUSE 时 AppImage 打包工具链的兜底（草案 §4 风险 3）。
+      - name: 打包（deb + AppImage）
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: pnpm tauri build --bundles deb,appimage
+
+      # "Harness Hub_…" 带空格，上传资产名统一去空格（alpha.4 先例）。
+      - name: 重命名资产并生成 SHA256SUMS
+        run: |
+          mkdir -p renamed
+          for f in src-tauri/target/release/bundle/deb/*.deb \
+                   src-tauri/target/release/bundle/appimage/*.AppImage; do
+            cp "$f" "renamed/$(basename "$f" | tr ' ' '-')"
+          done
+          cd renamed
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          path: renamed/*
+          if-no-files-found: error
+
+  release:
+    name: 草稿 pre-release
+    needs: linux
+    # 仅 tag 触发才发版；workflow_dispatch 只出 artifact 供试跑验收。
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: bundles
+      - name: 创建 draft pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.linux.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft --prerelease \
+            --title "Harness Hub $GITHUB_REF_NAME" \
+            --notes "Automated Linux build (deb + AppImage) from tag $GITHUB_REF_NAME.
+          Manual verification pending; publish after checking artifacts and SHA256SUMS." \
+            bundles/*
