@@ -79,6 +79,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0009_plugins.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 10,
+        name: "0010_git_snapshots",
+        sql: include_str!("migrations/0010_git_snapshots.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -237,6 +243,7 @@ mod tests {
         "git_events",
         "permission_decisions",
         "plugins",
+        "git_snapshots",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -715,6 +722,100 @@ mod tests {
             .expect("外键检查");
         assert_eq!(enabled, 1);
         assert_eq!(violations, 0);
+    }
+
+    /// 迁移 0010：v9 老库升级后 `git_snapshots` 可用，且约束真实生效。
+    ///
+    /// 必须用裸 `Connection` + `apply_until(9)` 控制版本（AGENTS.md 冷启动纪律）：
+    /// 真实用户是从 v9（alpha.4 的 schema）升上来的。
+    #[test]
+    fn migration_0010_adds_git_snapshots_to_a_v9_database() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 9).expect("建到 v9");
+        // v9 确实还没有这张表 —— 否则下面的断言可能只是「表本来就在」。
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'git_snapshots'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v9 表检查");
+        assert_eq!(missing, 0);
+
+        // v9 已支持的最小会话行（外键需要 harness / runtime target）。
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness");
+        conn.execute(
+            "INSERT INTO runtime_targets (id, kind, display_name, created_at)
+             VALUES ('local', 'local', '本机', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("runtime target");
+        conn.execute(
+            "INSERT INTO sessions
+                (hub_session_id, harness_id, runtime_target_id, status, launch_mode,
+                 started_at, created_at, updated_at)
+             VALUES ('hub-1', 'codex', 'local', 'created', 'terminal',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("会话");
+
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(applied, vec!["0010_git_snapshots".to_string()]);
+        assert_eq!(current_version(&conn).expect("版本"), 10);
+
+        const INSERT_SNAPSHOT: &str = "INSERT INTO git_snapshots
+            (hub_session_id, phase, captured_at, worktree_root, head,
+             staged_files, unstaged_files, untracked_files, conflicted_files)
+            VALUES (?1, ?2, '2026-01-01T00:00:01Z', 'D:/work/demo', ?3, 1, 2, 3, 0)";
+
+        conn.execute(INSERT_SNAPSHOT, params!["hub-1", "start", "a".repeat(40)])
+            .expect("start 快照必须可写");
+
+        // 同一 (session, phase) 只允许一行 —— 终态路径可能重复触发补拍。
+        let duplicate = conn.execute(INSERT_SNAPSHOT, params!["hub-1", "start", "b".repeat(40)]);
+        assert!(duplicate.is_err(), "重复 (session, phase) 必须被主键拒绝");
+
+        let bad_phase = conn.execute(INSERT_SNAPSHOT, params!["hub-1", "middle", "c".repeat(40)]);
+        assert!(bad_phase.is_err(), "非法 phase 必须被 CHECK 拒绝");
+
+        let orphan = conn.execute(INSERT_SNAPSHOT, params!["nope", "end", "d".repeat(40)]);
+        assert!(orphan.is_err(), "不存在的会话必须被外键拒绝");
+
+        let negative = conn.execute(
+            "INSERT INTO git_snapshots
+                (hub_session_id, phase, captured_at, worktree_root, head,
+                 staged_files, unstaged_files, untracked_files, conflicted_files)
+             VALUES ('hub-1', 'end', '2026-01-01T00:00:02Z', 'D:/work/demo', NULL, -1, 0, 0, 0)",
+            [],
+        );
+        assert!(negative.is_err(), "负数计数必须被 CHECK 拒绝");
+
+        // 合法的 unborn HEAD（空仓库）为 NULL。
+        conn.execute(
+            "INSERT INTO git_snapshots
+                (hub_session_id, phase, captured_at, worktree_root, head,
+                 staged_files, unstaged_files, untracked_files, conflicted_files)
+             VALUES ('hub-1', 'end', '2026-01-01T00:05:00Z', 'D:/work/demo', NULL, 0, 0, 0, 0)",
+            [],
+        )
+        .expect("unborn HEAD 快照必须可写");
+
+        // 会话删除时快照随之消失：快照不允许比会话活得久。
+        conn.execute("DELETE FROM sessions WHERE hub_session_id = 'hub-1'", [])
+            .expect("删除会话");
+        let remaining: i64 = conn
+            .query_row("SELECT count(*) FROM git_snapshots", [], |row| row.get(0))
+            .expect("计数");
+        assert_eq!(remaining, 0, "会话删除后快照必须级联删除");
     }
 
     /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
