@@ -19,6 +19,8 @@ use serde::Serialize;
 
 use crate::db::Database;
 use crate::error::{Error, Result};
+use crate::git::service as git_service;
+use crate::git::store::SnapshotPhase;
 use crate::harness::adapter::{HarnessId, LaunchRequest};
 use crate::harness::registry::HarnessRegistry;
 use crate::harness::store::find_installation;
@@ -104,22 +106,32 @@ impl TerminalRuntime {
                 .and_then(|mut map| map.remove(session))
                 .unwrap_or(TerminationReason::NaturalExit);
 
+            let mut finished = false;
             if let Ok(database) = exit_db.lock() {
                 let service = SessionService::new(database.connection());
                 // 终态写入失败不能静默：至少让事件里带上错误。
-                if let Err(error) = service.finish(session, exit_code, reason) {
-                    if let Some(emitter) = exit_emitters
-                        .lock()
-                        .ok()
-                        .and_then(|mut map| map.remove(session))
-                    {
-                        emitter(PtyEvent::Error {
-                            session_id: session.to_string(),
-                            message: format!("写入会话终态失败：{error}"),
-                        });
+                match service.finish(session, exit_code, reason) {
+                    Ok(updated) => finished = updated,
+                    Err(error) => {
+                        if let Some(emitter) = exit_emitters
+                            .lock()
+                            .ok()
+                            .and_then(|mut map| map.remove(session))
+                        {
+                            emitter(PtyEvent::Error {
+                                session_id: session.to_string(),
+                                message: format!("写入会话终态失败：{error}"),
+                            });
+                        }
+                        return;
                     }
-                    return;
                 }
+            }
+
+            // 终态真的写入后才补拍 end 快照（best-effort，后台线程，git 子进程在锁外跑）。
+            // finish 返回 false（早已终态）时不再拍：重复补拍没有意义。
+            if finished {
+                git_service::spawn_capture(Arc::clone(&exit_db), session, SnapshotPhase::End);
             }
 
             if let Some(emitter) = exit_emitters
@@ -236,6 +248,14 @@ impl TerminalRuntime {
                 })?;
                 self.pty.start_reading(&session_id)?;
 
+                // start 快照（ROADMAP A1）：进程真正跑起来之后、在后台线程拍，
+                // 绝不让 git 子进程（每条 3 秒上限）拖住 start_terminal 的返回。
+                git_service::spawn_capture(
+                    Arc::clone(&self.db),
+                    &session_id,
+                    SnapshotPhase::Start,
+                );
+
                 self.emit(PtyEvent::Started {
                     session_id: session_id.clone(),
                     pid: handle.pid,
@@ -334,6 +354,7 @@ mod concurrency_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::store::{GitSnapshotStore, SnapshotPhase};
     use crate::harness::adapters::codex::CodexAdapter;
     use crate::pty::manager::fake::FakePtyBackend;
     use crate::session::SessionStatus;
@@ -560,6 +581,74 @@ mod tests {
             finished.exit_code,
             Some(137),
             "退出码必须来自 reaper 的真实观测，而不是猜的"
+        );
+    }
+
+    /// 生命周期接线（ROADMAP A1）：mark_running 之后拍 start 快照，
+    /// 终态写入成功后拍 end 快照 —— 都在后台线程，best-effort。
+    #[test]
+    fn terminal_lifecycle_captures_git_snapshots() {
+        let repo = crate::git::test_support::Repo::new();
+        std::fs::write(repo.0.join("file"), b"data").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "initial"]);
+
+        let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
+        let db = crate::test_support::empty_db();
+        crate::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
+        crate::harness::inventory::reconcile_harnesses(
+            db.connection(),
+            &[detected_codex_summary()],
+            RUNTIME_TARGET_ID,
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("同步清单");
+
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(CodexAdapter::new(Arc::new(installed_host()))));
+        let installation = crate::harness::inventory::installation_id("codex", RUNTIME_TARGET_ID);
+
+        let db = Arc::new(Mutex::new(db));
+        let runtime = TerminalRuntime::new(
+            Arc::clone(&db),
+            Arc::new(registry),
+            Arc::clone(&backend) as Arc<dyn PtyBackend>,
+        );
+
+        let session = runtime
+            .start(
+                &installation,
+                Some(repo.0.to_string_lossy().as_ref()),
+                80,
+                24,
+                None,
+            )
+            .expect("启动");
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
+        assert_eq!(finished.status, SessionStatus::Exited);
+
+        // 快照在后台线程落行：有界等待，而不是假设已就绪。
+        let mut snapshots = Vec::new();
+        for _ in 0..160 {
+            snapshots = GitSnapshotStore::new(db.lock().expect("db").connection())
+                .list_by_session(&session.hub_session_id)
+                .expect("列出");
+            if snapshots.len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "start 与 end 快照都必须落行：{snapshots:?}"
+        );
+        assert_eq!(snapshots[0].phase, SnapshotPhase::Start);
+        assert_eq!(snapshots[1].phase, SnapshotPhase::End);
+        assert_eq!(snapshots[0].head, snapshots[1].head, "没有新 commit");
+        assert!(
+            snapshots[0].head.is_some(),
+            "有初始 commit 的仓库 HEAD 不应为空"
         );
     }
 
