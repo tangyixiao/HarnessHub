@@ -231,6 +231,30 @@ pub fn session_git_snapshots(
     crate::git::GitSnapshotStore::new(database.connection()).list_by_session(&hub_session_id)
 }
 
+/// 会话窗口 Git 摘要（ROADMAP A3）：start..end 的 commit 数与 ±行数。
+///
+/// 纯读 + 按需现算（不落库、不缓存）：短锁读快照输入，**锁外**跑至多两条
+/// 有界 git 命令（每条 3 秒上限）。`None` = 没有窗口（缺快照 / unborn HEAD /
+/// 仓库不可达 / 同 HEAD 之外形态不认识）—— UI 如实不显示，不猜。
+#[tauri::command]
+pub fn session_git_summary(
+    state: State<'_, AppState>,
+    hub_session_id: String,
+) -> Result<Option<crate::git::WindowSummary>> {
+    let inputs = {
+        let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+        crate::git::window::window_inputs(database.connection(), &hub_session_id)?
+    };
+
+    Ok(inputs.and_then(|inputs| {
+        crate::git::window::window_summary(
+            &inputs.worktree_root,
+            &inputs.start_head,
+            &inputs.end_head,
+        )
+    }))
+}
+
 /// 最近会话，按开始时间倒序。
 #[tauri::command]
 pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<SessionRecord>> {
@@ -658,6 +682,31 @@ mod tests {
         let unborn_json = serde_json::to_value(&unborn).expect("序列化");
         assert!(unborn_json["head"].is_null(), "实际：{unborn_json}");
         assert_eq!(unborn_json["phase"], "end");
+    }
+
+    /// 跨 IPC 契约测试：`session_git_summary` 的返回形状（ROADMAP A3）。
+    ///
+    /// `Some` 时三个 camelCase 计数；`None`（没有窗口）必须是 JSON `null`——
+    /// 前端据此区分「0 commits」与「没有摘要」。
+    #[test]
+    fn window_summary_serializes_with_camel_case_keys() {
+        let summary = crate::git::WindowSummary {
+            commits: 2,
+            insertions: 41,
+            deletions: 7,
+        };
+
+        let json = serde_json::to_value(summary).expect("序列化");
+        assert_eq!(json["commits"], 2);
+        assert_eq!(json["insertions"], 41);
+        assert_eq!(json["deletions"], 7);
+        for snake in ["commit_count", "insertions_total"] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
+        }
+
+        let none =
+            serde_json::to_value(Option::<crate::git::WindowSummary>::None).expect("序列化 None");
+        assert!(none.is_null(), "None 必须是 null：{none}");
     }
 
     /// 跨 IPC 契约测试：`register_project` / `list_projects` 的返回形状。
