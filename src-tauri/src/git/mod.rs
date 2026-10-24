@@ -10,8 +10,8 @@ pub mod store;
 pub(crate) mod test_support;
 
 pub use snapshot::{capture, GitObservation, GitSnapshot};
-pub use store::{GitSnapshotStore, SessionGitSnapshot, SnapshotPhase};
 use std::fmt;
+pub use store::{GitSnapshotStore, SessionGitSnapshot, SnapshotPhase};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusCounts {

@@ -88,14 +88,16 @@ impl<'conn> GitSnapshotStore<'conn> {
         Ok(inserted > 0)
     }
 
-    /// 某个会话的快照，按拍摄时间升序；同一秒内连拍时按插入顺序
-    /// （start 先拍先插，不能让主键索引的字典序 `end` < `start` 决定展示顺序）。
+    /// 某个会话的快照，start 永远在前、end 在后。
+    ///
+    /// **phase 优先于时间**：秒退的会话里 start / end 两个后台线程可能乱序落行
+    /// （谁先完成 git 子进程谁先插），展示顺序必须由 phase 决定，不能交给线程调度。
     pub fn list_by_session(&self, hub_session_id: &str) -> Result<Vec<SessionGitSnapshot>> {
         let mut statement = self.conn.prepare(
             "SELECT hub_session_id, phase, captured_at, worktree_root, head,
                     staged_files, unstaged_files, untracked_files, conflicted_files
              FROM git_snapshots WHERE hub_session_id = ?1
-             ORDER BY captured_at ASC, rowid ASC",
+             ORDER BY CASE phase WHEN 'start' THEN 0 ELSE 1 END, captured_at ASC",
         )?;
         let rows = statement.query_map(params![hub_session_id], map_snapshot_row)?;
 
@@ -153,7 +155,12 @@ mod tests {
 
     fn session(db: &crate::db::Database, id: &str) {
         SessionStore::new(db.connection())
-            .insert(&NewSession::new(id, HARNESS_ID, RUNTIME_TARGET_ID, "2026-01-01T10:00:00Z"))
+            .insert(&NewSession::new(
+                id,
+                HARNESS_ID,
+                RUNTIME_TARGET_ID,
+                "2026-01-01T10:00:00Z",
+            ))
             .expect("插入会话");
     }
 
@@ -164,10 +171,18 @@ mod tests {
         let store = GitSnapshotStore::new(db.connection());
 
         assert!(store
-            .insert(&snapshot("hub-1", SnapshotPhase::End, "2026-01-01T10:05:00Z"))
+            .insert(&snapshot(
+                "hub-1",
+                SnapshotPhase::End,
+                "2026-01-01T10:05:00Z"
+            ))
             .expect("end"));
         assert!(store
-            .insert(&snapshot("hub-1", SnapshotPhase::Start, "2026-01-01T10:00:01Z"))
+            .insert(&snapshot(
+                "hub-1",
+                SnapshotPhase::Start,
+                "2026-01-01T10:00:01Z"
+            ))
             .expect("start"));
 
         let listed = store.list_by_session("hub-1").expect("列出");
@@ -186,7 +201,11 @@ mod tests {
         let store = GitSnapshotStore::new(db.connection());
 
         assert!(store
-            .insert(&snapshot("hub-1", SnapshotPhase::Start, "2026-01-01T10:00:01Z"))
+            .insert(&snapshot(
+                "hub-1",
+                SnapshotPhase::Start,
+                "2026-01-01T10:00:01Z"
+            ))
             .expect("首次"));
         let mut again = snapshot("hub-1", SnapshotPhase::Start, "2026-01-01T10:09:00Z");
         again.head = Some("f".repeat(40));
@@ -196,7 +215,10 @@ mod tests {
         );
 
         let stored = &store.list_by_session("hub-1").expect("列出")[0];
-        assert_eq!(stored.captured_at, "2026-01-01T10:00:01Z", "首次快照不得被改写");
+        assert_eq!(
+            stored.captured_at, "2026-01-01T10:00:01Z",
+            "首次快照不得被改写"
+        );
         let expected_head = "a".repeat(40);
         assert_eq!(stored.head.as_deref(), Some(expected_head.as_str()));
     }

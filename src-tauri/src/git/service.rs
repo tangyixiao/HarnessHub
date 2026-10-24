@@ -78,11 +78,7 @@ pub fn capture_for_session(
 ///
 /// 三段式锁纪律：短锁读 cwd → **丢锁**跑 git 子进程 → 短锁落行。
 /// 任何一步失败都静默放弃（不落行）；返回不通知调用方 —— 观测是 best-effort。
-pub fn spawn_capture(
-    db: Arc<Mutex<Database>>,
-    hub_session_id: &str,
-    phase: SnapshotPhase,
-) {
+pub fn spawn_capture(db: Arc<Mutex<Database>>, hub_session_id: &str, phase: SnapshotPhase) {
     let hub_session_id = hub_session_id.to_string();
     std::thread::spawn(move || {
         let cwd = db
@@ -131,15 +127,23 @@ mod tests {
         let db = seeded_db();
         let service = SessionService::new(db.connection());
         let session = service
-            .start_from_installation(&installation(), None, Some(repo.0.to_string_lossy().as_ref()))
+            .start_from_installation(
+                &installation(),
+                None,
+                Some(repo.0.to_string_lossy().as_ref()),
+            )
             .expect("登记会话");
         service
             .mark_running(&session.hub_session_id, Some(4242))
             .expect("启动");
 
         assert!(
-            capture_for_session(db.connection(), &session.hub_session_id, SnapshotPhase::Start)
-                .expect("start 快照"),
+            capture_for_session(
+                db.connection(),
+                &session.hub_session_id,
+                SnapshotPhase::Start
+            )
+            .expect("start 快照"),
             "真仓库的 start 快照必须落行"
         );
 
@@ -175,7 +179,11 @@ mod tests {
         let repo = Repo::new();
         let db = seeded_db();
         let session = SessionService::new(db.connection())
-            .start_from_installation(&installation(), None, Some(repo.0.to_string_lossy().as_ref()))
+            .start_from_installation(
+                &installation(),
+                None,
+                Some(repo.0.to_string_lossy().as_ref()),
+            )
             .expect("登记会话");
 
         assert!(capture_for_session(
@@ -189,7 +197,10 @@ mod tests {
             .list_by_session(&session.hub_session_id)
             .expect("列出");
         assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].head, None, "unborn HEAD 必须是 NULL 而不是空串");
+        assert_eq!(
+            snapshots[0].head, None,
+            "unborn HEAD 必须是 NULL 而不是空串"
+        );
     }
 
     /// 非 Git 仓库：不落行、不报错。
@@ -200,7 +211,11 @@ mod tests {
 
         let db = seeded_db();
         let session = SessionService::new(db.connection())
-            .start_from_installation(&installation(), None, Some(plain.to_string_lossy().as_ref()))
+            .start_from_installation(
+                &installation(),
+                None,
+                Some(plain.to_string_lossy().as_ref()),
+            )
             .expect("登记会话");
 
         assert!(!capture_for_session(
@@ -226,10 +241,16 @@ mod tests {
             .start_from_installation(&installation(), None, None)
             .expect("登记");
 
-        assert!(!capture_for_session(db.connection(), &no_cwd.hub_session_id, SnapshotPhase::Start)
-            .expect("无 cwd 不得报错"));
-        assert!(!capture_for_session(db.connection(), "does-not-exist", SnapshotPhase::Start)
-            .expect("未知会话不得报错"));
+        assert!(!capture_for_session(
+            db.connection(),
+            &no_cwd.hub_session_id,
+            SnapshotPhase::Start
+        )
+        .expect("无 cwd 不得报错"));
+        assert!(
+            !capture_for_session(db.connection(), "does-not-exist", SnapshotPhase::Start)
+                .expect("未知会话不得报错")
+        );
     }
 
     /// **冷启动纪律**（AGENTS.md）：空库起步，前置状态全部由生产代码填充
@@ -245,7 +266,11 @@ mod tests {
         let db = cold_start_db();
         let service = SessionService::new(db.connection());
         let session = service
-            .start_from_installation(&installation(), None, Some(repo.0.to_string_lossy().as_ref()))
+            .start_from_installation(
+                &installation(),
+                None,
+                Some(repo.0.to_string_lossy().as_ref()),
+            )
             .expect("冷启动会话");
         assert!(service
             .mark_running(&session.hub_session_id, Some(4242))
