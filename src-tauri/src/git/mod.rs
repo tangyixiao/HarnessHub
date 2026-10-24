@@ -1,9 +1,9 @@
-//! Git / Worktree 观察层。
-//!
-//! 职责：只读获取工作树状态；后续任务将扩展快照采集。
-//! `git_events` 只描述 Session 时间窗口内发生的代码变化，不能据此断言代码由 AI 编写。
-
+//! Git / Worktree 观察层：只读获取有界工作树快照。
+mod runner;
+mod snapshot;
 mod status;
+pub use snapshot::{capture, GitObservation, GitSnapshot};
+use std::fmt;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusCounts {
@@ -12,18 +12,36 @@ pub(crate) struct StatusCounts {
     pub(crate) untracked_files: u64,
     pub(crate) conflicted_files: u64,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GitCaptureError {
+#[derive(Clone, PartialEq, Eq)]
+pub enum GitCaptureError {
+    InvalidPath,
+    CommandNotFound,
+    LaunchFailed,
+    CommandFailed,
+    Timeout,
+    OutputLimit,
+    ReadFailed,
     MalformedOutput,
 }
-
-impl std::fmt::Display for GitCaptureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MalformedOutput => f.write_str("malformed Git status output"),
-        }
+impl fmt::Display for GitCaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPath => "invalid Git capture path",
+            Self::CommandNotFound => "Git command unavailable",
+            Self::LaunchFailed => "Git command could not be launched",
+            Self::CommandFailed => "Git command failed",
+            Self::Timeout => "Git command timed out",
+            Self::OutputLimit => "Git command output exceeded limit",
+            Self::ReadFailed => "Git command output could not be read",
+            Self::MalformedOutput => "malformed Git status output",
+        })
     }
 }
-
+impl fmt::Debug for GitCaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GitCaptureError(")?;
+        fmt::Display::fmt(self, f)?;
+        f.write_str(")")
+    }
+}
 impl std::error::Error for GitCaptureError {}
