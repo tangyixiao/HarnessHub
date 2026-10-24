@@ -250,11 +250,7 @@ impl TerminalRuntime {
 
                 // start 快照（ROADMAP A1）：进程真正跑起来之后、在后台线程拍，
                 // 绝不让 git 子进程（每条 3 秒上限）拖住 start_terminal 的返回。
-                git_service::spawn_capture(
-                    Arc::clone(&self.db),
-                    &session_id,
-                    SnapshotPhase::Start,
-                );
+                git_service::spawn_capture(Arc::clone(&self.db), &session_id, SnapshotPhase::Start);
 
                 self.emit(PtyEvent::Started {
                     session_id: session_id.clone(),
