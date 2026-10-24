@@ -463,6 +463,10 @@ mod tests {
     const EMPTY_FIXTURE: &str = include_str!("../../../fixtures/ccusage/empty.json");
     const UNSUPPORTED_SHAPE_FIXTURE: &str =
         include_str!("../../../fixtures/ccusage/unsupported-shape.json");
+    // A2：synthetic 夹具（本机无 gemini 数据，形状从 ccusage v20.0.24 源码取证，
+    // 见 fixtures/ccusage/README.md「第三轮取证」），待真机数据回填。
+    const GEMINI_SESSION_FIXTURE: &str =
+        include_str!("../../../fixtures/ccusage/gemini-session.json");
 
     fn normalize(raw: &str) -> NormalizedUsage {
         let report = parse_report(raw).expect("解析");
@@ -589,6 +593,89 @@ mod tests {
             "多模型行的 session 级推理 token 不得分摊到各模型"
         );
         assert_eq!(event(&usage, "gpt-5.6-terra").reasoning_tokens, None);
+    }
+
+    /// gemini 行（A2）：解析层没有 harness 白名单，gemini 必须按原样落库。
+    ///
+    /// ccusage v20.0.24 源码口径（见 fixtures/ccusage/README.md「第三轮取证」）：
+    /// unified 行 `agent="gemini"`；`period` 是日志 sessionId 原样（无日期可回退）；
+    /// `metadata` 只有 `lastActivity`（`reasoningOutputTokens` 是 codex 专属）；
+    /// thoughts token 不在四类之内，行 `totalTokens` 比四类之和多出 thoughts，
+    /// 与 opencode 的 +910 残差同机制。夹具是 synthetic，待真机数据回填。
+    #[test]
+    fn parses_gemini_rows_and_keeps_thoughts_tokens_unattributed() {
+        let usage = normalize(GEMINI_SESSION_FIXTURE);
+
+        assert_eq!(usage.sessions_seen, 2, "两条 gemini session 行");
+        assert_eq!(usage.events.len(), 3, "1 + 2 个 breakdown");
+        assert!(
+            usage.events.iter().all(|event| event.harness == "gemini"),
+            "gemini 行按 agent 原样落库"
+        );
+
+        let flash = event(&usage, "gemini-3-flash-preview");
+        assert_eq!(
+            flash.stable_source_key,
+            stable_source_key(&KeyDimensions {
+                source: SOURCE_ID,
+                report_kind: REPORT_KIND,
+                harness: "gemini",
+                source_session_id: "00000000-0000-4000-8000-000000000006",
+                model: "gemini-3-flash-preview",
+            }),
+            "键必须由 usage::key 生成，不能就地拼"
+        );
+        assert_eq!(
+            flash.source_session_id,
+            "00000000-0000-4000-8000-000000000006"
+        );
+        assert_eq!(flash.input_tokens, 1200);
+        assert_eq!(flash.output_tokens, 45);
+        assert_eq!(flash.cache_creation_tokens, 0, "gemini 恒无 cache creation");
+        assert_eq!(flash.cached_input_tokens, Some(9800));
+        assert_eq!(flash.total_tokens, 11_045, "四类之和；thoughts 不在明细里");
+        assert_eq!(flash.cost_microunits, Some(4_200));
+        assert_eq!(flash.currency.as_deref(), Some(CURRENCY));
+        assert_eq!(flash.token_source, TOKEN_SOURCE);
+        assert_eq!(
+            flash.reasoning_tokens, None,
+            "gemini 行没有 reasoningOutputTokens，不得伪标 reasoning"
+        );
+        assert_eq!(
+            flash.occurred_at.as_deref(),
+            Some("2026-10-18T09:30:12.000Z")
+        );
+        assert_eq!(
+            flash.occurred_at_source, "source_record",
+            "period 是裸 sessionId，没有日期可回退"
+        );
+        assert_eq!(flash.day.as_deref(), Some("2026-10-18"));
+
+        let pro = event(&usage, "gemini-3-pro-preview");
+        let older = event(&usage, "gemini-2.5-flash");
+        assert_ne!(
+            pro.stable_source_key, older.stable_source_key,
+            "同一会话的不同模型必须是不同的键"
+        );
+        assert_eq!(pro.reasoning_tokens, None);
+        assert_eq!(older.reasoning_tokens, None);
+        assert_eq!(older.total_tokens, 16_100);
+
+        assert_eq!(
+            usage.row_total_residual, 2_950,
+            "350 + 2600：两条行的 thoughts，只能显式计数，不得塞给某个模型"
+        );
+        assert_eq!(usage.timestampless, 0);
+
+        let totals = usage.totals.expect("夹具带 totals");
+        let summed = crate::usage::EventTotals::from_drafts(&usage.events);
+        assert_eq!(
+            summed.total_tokens + usage.row_total_residual,
+            totals.total_tokens,
+            "每一 token 都必须有归属：事件或明示的 thoughts 残差"
+        );
+        assert_eq!(summed.cost_microunits, totals.cost_microunits.unwrap_or(0));
+        assert_eq!(summed.events_without_cost, 0, "夹具里所有模型都有价格");
     }
 
     #[test]
