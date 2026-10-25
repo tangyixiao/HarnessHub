@@ -572,6 +572,101 @@ export async function getProjectSessions(
 }
 
 /* ------------------------------------------------------------------ *
+ * Worktree（ROADMAP C10）
+ *
+ * list 纯读；add 是**显式用户动作**（写磁盘 + 检出代码），调用方必须先
+ * `window.confirm` 二次确认。repoRoot 必须是已登记项目的 repo root，
+ * 否则后端 reject（错误串含「未登记的项目根」），原样传出交由 UI 展示。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一条 worktree（主树或链接树），与 Rust `WorktreeEntry`（serde camelCase）同形。
+ *
+ * `head` 是 40 位 hex（unborn HEAD 为 null）；`branch` 是短分支名
+ * （`refs/heads/main` → `main`），detached 时为 null。
+ */
+export type WorktreeEntry = {
+  /** 绝对路径（`git worktree list --porcelain` 原样）。 */
+  path: string;
+  head: string | null;
+  branch: string | null;
+  /** 是否主工作树（porcelain 首个条目）。 */
+  main: boolean;
+  detached: boolean;
+  bare: boolean;
+};
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `WorktreeEntry`。
+ *
+ * 拿不到 `path` 丢弃 —— 路径是 worktree 的唯一句柄（高亮 / 去重都靠它）；
+ * `head` / `branch` 只认字符串或 null；三个布尔只认 `true`，缺省 false，
+ * 「不确定」绝不能渲染成真。
+ */
+export function normalizeWorktreeEntry(raw: unknown): WorktreeEntry | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const path = typeof source.path === 'string' ? source.path.trim() : '';
+  if (path.length === 0) {
+    return null;
+  }
+
+  return {
+    path,
+    head: asStringOrNull(source.head),
+    branch: asStringOrNull(source.branch),
+    main: source.main === true,
+    detached: source.detached === true,
+    bare: source.bare === true,
+  };
+}
+
+/** 某个已登记项目的全部 worktree。**纯读**：不改仓库、不写库。 */
+export async function listWorktrees(repoRoot: string): Promise<IpcResult<WorktreeEntry[]>> {
+  const result = await invokeCommand<unknown>('worktree_list', { repoRoot });
+  if (!result.ok) {
+    return result;
+  }
+
+  const entries = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeWorktreeEntry)
+        .filter((entry): entry is WorktreeEntry => entry !== null)
+    : [];
+
+  return { ok: true, data: entries };
+}
+
+/**
+ * 创建 worktree（`git worktree add`，检出可能耗时几秒）。
+ *
+ * 错误语义（后端契约冻结，原样传出）：repoRoot 未登记、目标路径嵌套在仓库
+ * 内部（「不允许位于仓库内部」）、分支冲突、路径已占用，都 reject。
+ */
+export async function addWorktree(
+  repoRoot: string,
+  path: string,
+  branch: string,
+  createBranch: boolean,
+): Promise<IpcResult<WorktreeEntry>> {
+  const result = await invokeCommand<unknown>('worktree_add', {
+    repoRoot,
+    path,
+    branch,
+    createBranch,
+  });
+  if (!result.ok) {
+    return result;
+  }
+
+  const entry = normalizeWorktreeEntry(result.data);
+  return entry ? { ok: true, data: entry } : { ok: false, error: 'invalid-worktree-payload' };
+}
+
+/* ------------------------------------------------------------------ *
  * Harness 清单同步
  * ------------------------------------------------------------------ */
 

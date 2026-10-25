@@ -5,6 +5,7 @@ import opencodeSummary from '../../fixtures/opencode/summary.json';
 
 import {
   NOT_IN_TAURI,
+  addWorktree,
   createSession,
   finishSession,
   getActivityTimeline,
@@ -22,6 +23,7 @@ import {
   listReplaySessions,
   listSessions,
   listPlugins,
+  listWorktrees,
   normalizeActivityTimeline,
   normalizeHarnessSummary,
   normalizePlugin,
@@ -40,6 +42,7 @@ import {
   normalizeUsageReconciliation,
   normalizeUsageSource,
   normalizeUsageSummary,
+  normalizeWorktreeEntry,
   pluginRefresh,
   readReplaySession,
   reindexReplaySearch,
@@ -667,6 +670,125 @@ describe('Project registry IPC（§20 第 14 步）', () => {
     await expect(listProjects()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
     await expect(removeProject('proj-1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
     await expect(getProjectSessions('proj-1')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});
+
+describe('Worktree IPC（ROADMAP C10）', () => {
+  /** 与 Rust `WorktreeEntry`（serde camelCase，见 commands.rs 契约测试）同形。 */
+  const WORKTREE_PAYLOAD = {
+    path: 'D:/wt/feature',
+    head: '1234567890abcdef1234567890abcdef12345678',
+    branch: 'feature',
+    main: false,
+    detached: false,
+    bare: false,
+  };
+
+  it('normalizeWorktreeEntry 解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeWorktreeEntry(WORKTREE_PAYLOAD)).toEqual(WORKTREE_PAYLOAD);
+  });
+
+  it('path 为空 / 非字符串的条目返回 null，由调用方丢弃', () => {
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, path: '' })).toBeNull();
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, path: '   ' })).toBeNull();
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, path: 42 })).toBeNull();
+    expect(normalizeWorktreeEntry(null)).toBeNull();
+    expect(normalizeWorktreeEntry('D:/wt/feature')).toBeNull();
+  });
+
+  it('head / branch 只认字符串或 null，detached 不会被当成空字符串', () => {
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, head: null })?.head).toBeNull();
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, head: 7 })?.head).toBeNull();
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, head: 'abc' })?.head).toBe('abc');
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, branch: null })?.branch).toBeNull();
+    expect(normalizeWorktreeEntry({ ...WORKTREE_PAYLOAD, branch: true })?.branch).toBeNull();
+  });
+
+  it('三个布尔只认 true，缺省 false（「不确定」绝不能渲染成真）', () => {
+    expect(normalizeWorktreeEntry({ path: 'D:/wt/x' })).toEqual({
+      path: 'D:/wt/x',
+      head: null,
+      branch: null,
+      main: false,
+      detached: false,
+      bare: false,
+    });
+    expect(normalizeWorktreeEntry({ path: 'D:/wt/x', main: 'yes' })?.main).toBe(false);
+    expect(normalizeWorktreeEntry({ path: 'D:/wt/x', detached: true })?.detached).toBe(true);
+  });
+
+  it('listWorktrees 使用 worktree_list 并传 repoRoot，逐条归一化并丢弃残缺条目', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      WORKTREE_PAYLOAD,
+      { path: 'D:/wt/det', head: null, branch: null, main: false, detached: true, bare: false },
+      { branch: 'no-path' },
+      null,
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await listWorktrees('D:/work/demo');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('worktree_list');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ repoRoot: 'D:/work/demo' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toHaveLength(2);
+      expect(result.data[0]).toEqual(WORKTREE_PAYLOAD);
+      expect(result.data[1]?.detached).toBe(true);
+    }
+  });
+
+  it('listWorktrees 后端返回非数组时按空列表处理', async () => {
+    stubTauri(async () => 'unexpected');
+
+    await expect(listWorktrees('D:/work/demo')).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('listWorktrees 把后端 reject 原样传出（含未登记提示）', async () => {
+    stubTauri(async () => {
+      throw new Error('未登记的项目根：D:/nowhere（先在 Projects 页登记）');
+    });
+
+    await expect(listWorktrees('D:/nowhere')).resolves.toEqual({
+      ok: false,
+      error: '未登记的项目根：D:/nowhere（先在 Projects 页登记）',
+    });
+  });
+
+  it('addWorktree 使用 worktree_add 并传 repoRoot / path / branch / createBranch', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => WORKTREE_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await addWorktree('D:/work/demo', 'D:/wt/feature', 'feature', true);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('worktree_add');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      repoRoot: 'D:/work/demo',
+      path: 'D:/wt/feature',
+      branch: 'feature',
+      createBranch: true,
+    });
+    expect(result).toEqual({ ok: true, data: WORKTREE_PAYLOAD });
+  });
+
+  it('addWorktree 返回残缺单项时报 invalid-worktree-payload，不把鬼影交给 UI', async () => {
+    stubTauri(async () => ({ head: 'abc' }));
+
+    await expect(addWorktree('D:/work/demo', 'D:/wt/x', 'x', false)).resolves.toEqual({
+      ok: false,
+      error: 'invalid-worktree-payload',
+    });
+  });
+
+  it('worktree 命令不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(listWorktrees('D:/work/demo')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(addWorktree('D:/work/demo', 'D:/wt/x', 'x', true)).resolves.toEqual({
       ok: false,
       error: NOT_IN_TAURI,
     });

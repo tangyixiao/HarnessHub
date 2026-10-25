@@ -29,6 +29,34 @@ const PROJECT = {
   lastOpenedAt: '2026-10-12T00:00:01Z',
 };
 
+/** 与 Rust `WorktreeEntry`（serde camelCase）同形：主树 / 链接树 / detached 各一。 */
+const WORKTREE_LIST = [
+  {
+    path: 'D:/work/demo',
+    head: '1234567890abcdef1234567890abcdef12345678',
+    branch: 'main',
+    main: true,
+    detached: false,
+    bare: false,
+  },
+  {
+    path: 'D:/wt/feature',
+    head: 'abcdef1234567890abcdef1234567890abcdef12',
+    branch: 'feature',
+    main: false,
+    detached: false,
+    bare: false,
+  },
+  {
+    path: 'D:/wt/detached',
+    head: null,
+    branch: null,
+    main: false,
+    detached: true,
+    bare: false,
+  },
+];
+
 describe('ProjectsPage', () => {
   it('已登记的项目按最近打开倒序显示 repo root 与时间', async () => {
     stubInvoke((command) => {
@@ -150,5 +178,147 @@ describe('ProjectsPage', () => {
     render(<ProjectsPage />);
 
     expect(await screen.findByText(/请用 pnpm tauri dev 启动桌面应用/)).toBeInTheDocument();
+  });
+
+  describe('Worktrees 区（ROADMAP C10）', () => {
+    it('默认折叠不发请求；展开后渲染路径 / 分支 / detached / HEAD 前 7 位 / 主树徽标', async () => {
+      const user = userEvent.setup();
+      const invokeSpy = vi.fn(async (command: string) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+
+      const toggle = screen.getByRole('button', { name: 'Worktrees' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      // 折叠时绝不发 worktree_list（避免每张卡片自动请求）。
+      expect(invokeSpy).not.toHaveBeenCalledWith('worktree_list', expect.anything());
+
+      await user.click(toggle);
+
+      const region = screen.getByRole('region', { name: 'demo' });
+      expect(await within(region).findByText('D:/wt/feature')).toBeInTheDocument();
+      expect(within(region).getByText('feature')).toBeInTheDocument();
+      expect(within(region).getByText('abcdef1')).toBeInTheDocument(); // HEAD 前 7 位
+      expect(within(region).getByText('detached')).toBeInTheDocument();
+      expect(within(region).getByText('主工作树')).toBeInTheDocument();
+      expect(invokeSpy).toHaveBeenCalledWith('worktree_list', { repoRoot: 'D:/work/demo' });
+    });
+
+    it('提交创建前 confirm 被调用且文案含「将在磁盘上创建目录并检出代码」与目标路径；成功后刷新并高亮', async () => {
+      const user = userEvent.setup();
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      let worktrees: unknown[] = [];
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return worktrees;
+        if (command === 'worktree_add') {
+          expect(args).toEqual({
+            repoRoot: 'D:/work/demo',
+            path: 'D:/wt/feature',
+            branch: 'feature',
+            createBranch: true,
+          });
+          worktrees = [...worktrees, WORKTREE_LIST[1]];
+          return WORKTREE_LIST[1];
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+      await user.click(screen.getByRole('button', { name: 'Worktrees' }));
+      await user.click(await screen.findByRole('button', { name: '新建 Worktree' }));
+
+      await user.type(screen.getByLabelText('Worktree 路径'), 'D:/wt/feature');
+      await user.type(screen.getByLabelText('分支名'), 'feature');
+      // 复选框「创建新分支」默认勾选。
+      expect(screen.getByRole('checkbox', { name: '创建新分支' })).toBeChecked();
+
+      await user.click(screen.getByRole('button', { name: '创建' }));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('将在磁盘上创建目录并检出代码');
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('D:/wt/feature');
+
+      // 创建成功：列表刷新出新条目并带高亮样式。
+      const region = screen.getByRole('region', { name: 'demo' });
+      const row = await within(region).findByText('D:/wt/feature');
+      expect(row.closest('li')).toHaveClass('ring-accent/40');
+    });
+
+    it('confirm 取消时不调用 worktree_add', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const invokeSpy = vi.fn(async (command: string) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return [];
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+      await user.click(screen.getByRole('button', { name: 'Worktrees' }));
+      await user.click(screen.getByRole('button', { name: '新建 Worktree' }));
+      await user.type(screen.getByLabelText('Worktree 路径'), 'D:/wt/feature');
+      await user.type(screen.getByLabelText('分支名'), 'feature');
+      await user.click(screen.getByRole('button', { name: '创建' }));
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('worktree_add', expect.anything());
+    });
+
+    it('列表加载失败（未登记的项目根）显示行内错误', async () => {
+      const user = userEvent.setup();
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') {
+          throw new Error('未登记的项目根：D:/work/demo（先在 Projects 页登记）');
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+      await user.click(screen.getByRole('button', { name: 'Worktrees' }));
+
+      const region = screen.getByRole('region', { name: 'demo' });
+      expect(await within(region).findByRole('alert')).toHaveTextContent(/未登记的项目根/);
+    });
+
+    it('创建失败（路径已占用）在表单内原样显示错误', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return [];
+        if (command === 'worktree_add') {
+          throw new Error("fatal: 'D:/wt/feature' already exists");
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+      await user.click(screen.getByRole('button', { name: 'Worktrees' }));
+      await user.click(screen.getByRole('button', { name: '新建 Worktree' }));
+      await user.type(screen.getByLabelText('Worktree 路径'), 'D:/wt/feature');
+      await user.type(screen.getByLabelText('分支名'), 'feature');
+      await user.click(screen.getByRole('button', { name: '创建' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        "fatal: 'D:/wt/feature' already exists",
+      );
+    });
   });
 });
