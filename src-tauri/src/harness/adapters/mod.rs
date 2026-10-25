@@ -1,7 +1,8 @@
 //! 具体 Harness 适配器。
 //!
 //! Phase 1 Task「Codex 检测」起，每个 Harness 一个文件：
-//! `codex.rs`、`claude_code.rs`、`gemini_cli.rs`、`codebuddy.rs`、`opencode.rs`。
+//! `codex.rs`、`claude_code.rs`、`gemini_cli.rs`、`codebuddy.rs`、`opencode.rs`、
+//! `copilot.rs`。
 //!
 //! 新增一个适配器的准入条件（ADR-0022）：
 //!   1. `fixtures/<harness>/` 下有脱敏的真实日志夹具；
@@ -12,10 +13,11 @@
 //!
 //! 当前已实现：`codex`（完整纵向链路）、`claude_code`（Task 7B 起 detect / launch / terminal / usage）。
 //! `gemini_cli` 仅实现检测；`codebuddy` 仅实现检测；`opencode` 仅实现检测；
-//! 其余能力保持 false，Usage 解析与生命周期验收待后续任务。
+//! `copilot` 仅实现检测；其余能力保持 false，Usage 解析与生命周期验收待后续任务。
 
 pub mod claude_code;
 pub mod codebuddy;
 pub mod codex;
+pub mod copilot;
 pub mod gemini_cli;
 pub mod opencode;
