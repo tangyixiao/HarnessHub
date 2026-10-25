@@ -19,6 +19,11 @@ use crate::error::{Error, Result};
 
 const HARNESS_ID: &str = crate::harness::adapters::claude_code::CLAUDE_ID;
 
+/// 当前 harness id（index 模块与 IPC 层复用）。
+pub fn harness_id() -> &'static str {
+    HARNESS_ID
+}
+
 /// 单个转录文件的全文上限：回放按需现读，超过即拒绝（明确错误，不截断猜）。
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 /// 发现列表的预读上限：只为了首条 user 预览与时间范围。
@@ -171,7 +176,7 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
 /// 根形态：`<root>/projects/<project-dir>/<session-id>.jsonl`（取证见模块注释）。
 /// 预读窗口内找首条 user 消息做预览与首/末时间戳；找不到就如实 None。
 pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
-    discover(roots)
+    discover_with_paths(roots)
         .into_iter()
         .map(|(_, summary)| summary)
         .collect()
@@ -182,7 +187,7 @@ pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
 /// **路径白名单**：session_id 必须命中发现结果，路径由后端自己解析，
 /// IPC 层不接受文件系统路径（防任意文件读取）。找不到 → Ok(None)。
 pub fn read_session_by_id(roots: &[PathBuf], session_id: &str) -> Result<Option<ReplaySession>> {
-    let Some(path) = discover(roots)
+    let Some(path) = discover_with_paths(roots)
         .into_iter()
         .find(|(_, summary)| summary.session_id == session_id)
         .map(|(path, _)| path)
@@ -192,8 +197,9 @@ pub fn read_session_by_id(roots: &[PathBuf], session_id: &str) -> Result<Option<
     Ok(Some(read_session(&path)?))
 }
 
-/// 发现（路径, 摘要）对。路径只在后端内部流转，不进 DTO。
-fn discover(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
+/// 发现（路径, 摘要）对。路径只在后端内部流转，不进 DTO；
+/// `replay::index` 增量索引用它拿路径与指纹。
+pub fn discover_with_paths(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
     let mut found = Vec::new();
 
     for root in roots {

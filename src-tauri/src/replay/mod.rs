@@ -8,6 +8,7 @@
 //! 计数，绝不 panic、绝不编造（fixture 回归见 fixtures/claude/replay/）。
 
 pub mod claude;
+pub mod index;
 
 use std::collections::BTreeMap;
 
