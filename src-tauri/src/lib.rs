@@ -193,7 +193,10 @@ pub fn run() {
             commands::session_git_snapshots,
             commands::session_git_summary,
             commands::start_terminal,
+            commands::start_terminal_in_worktree,
             commands::usage_summary,
+            commands::worktree_add,
+            commands::worktree_list,
             commands::write_terminal
         ])
         .build(tauri::generate_context!())

@@ -6,6 +6,7 @@ mod status;
 pub mod service;
 pub mod store;
 pub mod window;
+pub mod worktree;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -14,6 +15,7 @@ pub use snapshot::{capture, GitObservation, GitSnapshot};
 use std::fmt;
 pub use store::{GitSnapshotStore, SessionGitSnapshot, SnapshotPhase};
 pub use window::WindowSummary;
+pub use worktree::WorktreeEntry;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusCounts {

@@ -46,6 +46,21 @@ impl<'conn> SessionService<'conn> {
         project_id: Option<&str>,
         cwd: Option<&str>,
     ) -> Result<SessionRecord> {
+        self.start_with_worktree(installation_id, project_id, cwd, None)
+    }
+
+    /// 同上，但显式记录 worktree 绑定（ROADMAP C10）。
+    ///
+    /// `worktree_path` 只应来自 Hub 自己的 `worktree add`/`worktree list`
+    /// 结果（cwd 已指向该路径时二者一致）；这里只落库，不做路径校验
+    /// （校验在 IPC 层与 git::worktree）。
+    pub fn start_with_worktree(
+        &self,
+        installation_id: &str,
+        project_id: Option<&str>,
+        cwd: Option<&str>,
+        worktree_path: Option<&str>,
+    ) -> Result<SessionRecord> {
         let installation = find_installation(self.conn, installation_id)?.ok_or_else(|| {
             Error::InvalidInput(format!(
                 "未知的安装：{installation_id}（先同步 Harness 清单）"
@@ -65,6 +80,7 @@ impl<'conn> SessionService<'conn> {
         session.project_id = project_id.map(str::to_string);
         // 缺省 cwd 写 NULL，而不是空串：空串会让「未记录 cwd」和「cwd 是空目录」混淆。
         session.cwd = cwd.map(str::to_string);
+        session.worktree_path = worktree_path.map(str::to_string);
 
         self.store.insert(&session)?;
 
@@ -405,6 +421,29 @@ mod tests {
             .expect("登记");
 
         assert_eq!(record.project_id.as_deref(), Some("p1"));
+    }
+
+    /// C10：start_with_worktree 落 worktree_path；不传时保持 NULL。
+    #[test]
+    fn start_with_worktree_records_the_binding() {
+        let db = seeded_db();
+        let service = service_from(&db);
+
+        let bound = service
+            .start_with_worktree(
+                &installation(),
+                None,
+                Some("D:/wt/feature"),
+                Some("D:/wt/feature"),
+            )
+            .expect("绑定会话");
+        assert_eq!(bound.worktree_path.as_deref(), Some("D:/wt/feature"));
+        assert_eq!(bound.cwd.as_deref(), Some("D:/wt/feature"));
+
+        let plain = service
+            .start_with_worktree(&installation(), None, None, None)
+            .expect("普通会话");
+        assert_eq!(plain.worktree_path, None, "不传必须保持 NULL");
     }
 
     #[test]

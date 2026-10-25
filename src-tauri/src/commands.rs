@@ -323,6 +323,69 @@ pub fn replay_read_session(
  * 写索引表），按 ADR-0012 的读写分离纪律不得在渲染路径自动触发。
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Worktree（ROADMAP C10）
+ *
+ * list 纯读；add 是**显式用户动作**（写磁盘），repo_root 必须命中已登记
+ * 项目（防任意路径写），目标路径不允许位于仓库内部（git::worktree 红线）。
+ * ------------------------------------------------------------------ */
+
+/// 按传入 repoRoot 找已登记项目（兼容 repo_root 的两种存储形态）。
+fn require_registered_project(
+    state: &State<'_, AppState>,
+    repo_root: &str,
+) -> Result<crate::project::ProjectRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let store = crate::project::store::ProjectStore::new(database.connection());
+    store
+        .get_by_repo_root(repo_root)?
+        .or_else(|| {
+            // projects.repo_root 由 GitRootProbe 落库（canonicalize 形态）；
+            // 前端可能传同一路径的其它表示。
+            std::path::Path::new(repo_root)
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| {
+                    store
+                        .get_by_repo_root(&canonical.to_string_lossy())
+                        .unwrap_or(None)
+                })
+        })
+        .ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "未登记的项目根：{repo_root}（先在 Projects 页登记）"
+            ))
+        })
+}
+
+/// 某个已登记项目的全部 worktree。**纯读**。
+#[tauri::command]
+pub fn worktree_list(
+    state: State<'_, AppState>,
+    repo_root: String,
+) -> Result<Vec<crate::git::WorktreeEntry>> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::list(std::path::Path::new(&repo_root))
+}
+
+/// 创建 worktree（显式用户动作；前端必须二次确认「将在磁盘创建目录」）。
+#[tauri::command]
+pub fn worktree_add(
+    state: State<'_, AppState>,
+    repo_root: String,
+    path: String,
+    branch: String,
+    create_branch: bool,
+) -> Result<crate::git::WorktreeEntry> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::add(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&path),
+        &branch,
+        create_branch,
+    )
+}
+
 /// 回放搜索设置（默认关闭；关闭时后端已清空索引）。
 #[tauri::command]
 pub fn replay_search_settings_get(
@@ -459,6 +522,34 @@ pub fn start_terminal(
     state
         .terminal
         .start(&installation_id, cwd.as_deref(), cols, rows, Some(emitter))
+}
+
+/// 启动并绑定 worktree 的终端会话（ROADMAP C10）。
+///
+/// `worktreePath` 必须是 `worktree_list(repoRoot)` 返回过的路径（前端从列表选）；
+/// 后端不重复校验路径合法性——校验发生在 `worktree_add` / `worktree_list`。
+#[tauri::command]
+pub fn start_terminal_in_worktree(
+    state: State<'_, AppState>,
+    installation_id: String,
+    cwd: Option<String>,
+    worktree_path: String,
+    cols: u16,
+    rows: u16,
+    output: Channel<PtyEvent>,
+) -> Result<SessionRecord> {
+    let emitter: Emitter = Arc::new(move |event| {
+        let _ = output.send(event);
+    });
+
+    state.terminal.start_with_worktree(
+        &installation_id,
+        cwd.as_deref(),
+        Some(&worktree_path),
+        cols,
+        rows,
+        Some(emitter),
+    )
 }
 
 /// 把用户输入（含终端协议响应，例如 xterm.js 对 DSR 的回答）写入 PTY。
@@ -908,6 +999,39 @@ mod tests {
         assert_eq!(json["modifiedMs"], 1_761_000_000_000i64);
         assert_eq!(json["firstUserPreview"], "预览");
         assert_eq!(json["startedAt"], "2026-10-25T10:00:00.000Z");
+    }
+
+    /// 跨 IPC 契约测试：WorktreeEntry（ROADMAP C10）的键名形状。
+    #[test]
+    fn worktree_entry_serializes_with_camel_case_keys() {
+        let entry = crate::git::WorktreeEntry {
+            path: "D:/wt/feature".to_string(),
+            head: Some("a".repeat(40)),
+            branch: Some("feature".to_string()),
+            main: false,
+            detached: false,
+            bare: false,
+        };
+
+        let json = serde_json::to_value(&entry).expect("序列化");
+        assert_eq!(json["path"], "D:/wt/feature");
+        assert_eq!(json["branch"], "feature");
+        assert_eq!(json["main"], false);
+        assert_eq!(json["detached"], false);
+        assert_eq!(json["bare"], false);
+        assert!(json["head"].is_string());
+
+        // detached：branch 为 null 而不是缺失。
+        let detached = crate::git::WorktreeEntry {
+            branch: None,
+            head: None,
+            detached: true,
+            ..entry
+        };
+        let json = serde_json::to_value(&detached).expect("序列化");
+        assert!(json["branch"].is_null());
+        assert!(json["head"].is_null());
+        assert_eq!(json["detached"], true);
     }
 
     /// 跨 IPC 契约测试：回放搜索 DTO（ROADMAP B7）的键名形状。

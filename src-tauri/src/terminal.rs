@@ -197,11 +197,28 @@ impl TerminalRuntime {
         rows: u16,
         emitter: Option<Emitter>,
     ) -> Result<SessionRecord> {
+        self.start_with_worktree(installation_id, cwd, None, cols, rows, emitter)
+    }
+
+    /// 启动并绑定 worktree（ROADMAP C10）：cwd 与 worktree_path 一同落库。
+    ///
+    /// `worktree_path` 必须来自 Hub 自己的 worktree 列表（IPC 层校验）；
+    /// 这里只透传。
+    pub fn start_with_worktree(
+        &self,
+        installation_id: &str,
+        cwd: Option<&str>,
+        worktree_path: Option<&str>,
+        cols: u16,
+        rows: u16,
+        emitter: Option<Emitter>,
+    ) -> Result<SessionRecord> {
         let session = self.with_db(|database| {
-            SessionService::new(database.connection()).start_from_installation(
+            SessionService::new(database.connection()).start_with_worktree(
                 installation_id,
                 None,
                 cwd,
+                worktree_path,
             )
         })?;
         let session_id = session.hub_session_id.clone();
