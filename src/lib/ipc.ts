@@ -2238,3 +2238,79 @@ export async function searchReplay(query: string): Promise<IpcResult<ReplaySearc
 
   return { ok: true, data: hits };
 }
+
+/* ------------------------------------------------------------------ *
+ * Provider 配置现状（ROADMAP E14，只读）
+ *
+ * 纯读：解析各 Harness 现有配置文件的选定键，只用于展示。不写任何外部
+ * 文件——投影 / 切换是 E15 的独立验收，本区 UI 不提供修改入口。
+ * secret 值已在 Rust 层脱敏（`<redacted>` / `set`/`unset`），前端原样展示。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一个 Harness 的当前配置形态（与 Rust `ProfileSummary`，serde camelCase 同形）。
+ *
+ * `fields` 的键用「点路径」表示嵌套（如 `env.ANTHROPIC_MODEL`）；
+ * secret 值已被 Rust 层替换为 `<redacted>`（gemini 的 key 只有 `set`/`unset`）。
+ */
+export type ProfileSummary = {
+  harnessId: string;
+  /** 配置文件绝对路径（展示用；文件不存在时为候选路径）。 */
+  sourcePath: string;
+  /** 已脱敏的键值对。只含字符串值，别的类型在解析时丢弃。 */
+  fields: Record<string, string>;
+  parsedAt: string;
+};
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `ProfileSummary`。
+ *
+ * 拿不到 `harnessId` 丢弃 —— 不知道属于哪个 Harness 的配置现状无法在 UI 定位；
+ * `fields` 非对象 → `{}`；值只认字符串，非字符串丢该键（与 `asCountMap` 同一
+ * 纪律：宁可少显示一行，也不把数字 / 布尔 / undefined 当成配置值渲染出来）。
+ */
+export function normalizeProfileSummary(raw: unknown): ProfileSummary | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const harnessId = typeof source.harnessId === 'string' ? source.harnessId.trim() : '';
+  if (harnessId.length === 0) {
+    return null;
+  }
+
+  const fields: Record<string, string> = {};
+  if (typeof source.fields === 'object' && source.fields !== null) {
+    for (const [key, value] of Object.entries(source.fields)) {
+      if (typeof value === 'string') {
+        fields[key] = value;
+      }
+    }
+  }
+
+  return {
+    harnessId,
+    sourcePath: typeof source.sourcePath === 'string' ? source.sourcePath : '',
+    fields,
+    parsedAt: typeof source.parsedAt === 'string' ? source.parsedAt : '',
+  };
+}
+
+/**
+ * 读取一个 Harness 的 Provider 配置现状（只读发现）。
+ *
+ * 三态：`data: null` = 配置文件不存在（未初始化），**不是错误**；
+ * `ok: false` = 真失败。未实现 harness（如 copilot）按后端契约 reject
+ * （错误串含「尚未实现」），原样传出交由 UI 行内展示。
+ */
+export async function discoverProfile(
+  harnessId: string,
+): Promise<IpcResult<ProfileSummary | null>> {
+  const result = await invokeCommand<unknown>('profile_discover', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeProfileSummary(result.data) };
+}

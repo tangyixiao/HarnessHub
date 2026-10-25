@@ -7,6 +7,7 @@ import {
   NOT_IN_TAURI,
   addWorktree,
   createSession,
+  discoverProfile,
   finishSession,
   getActivityTimeline,
   getAppInfo,
@@ -31,6 +32,7 @@ import {
   normalizeMergeOutcome,
   normalizePlugin,
   normalizePluginRefreshReport,
+  normalizeProfileSummary,
   normalizeProjectRecord,
   normalizeReindexReport,
   normalizeReplaySearchHit,
@@ -2403,5 +2405,109 @@ describe('replay search IPC wrappers（ROADMAP B7）', () => {
     });
     await expect(reindexReplaySearch()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
     await expect(searchReplay('排查报错')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+/**
+ * IPC 契约 `profile_discover` 的返回项（serde camelCase），形状手工复刻自
+ * Rust 契约测试 `profile_summary_serializes_with_camel_case_and_redaction`
+ * （src-tauri/src/commands.rs）：fields 是字符串→字符串的 map（键用点路径），
+ * secret 值在 Rust 层已替换为 `<redacted>`，前端原样展示、不再二次处理。
+ */
+const PROFILE_SUMMARY_PAYLOAD = {
+  harnessId: 'claude',
+  sourcePath: 'C:/Users/dev/.claude/settings.json',
+  fields: {
+    'env.ANTHROPIC_AUTH_TOKEN': '<redacted>',
+    'env.ANTHROPIC_BASE_URL': 'https://api.example.com',
+    'env.ANTHROPIC_MODEL': 'test-model',
+  },
+  parsedAt: '2026-10-25T10:00:00Z',
+};
+
+describe('normalizeProfileSummary（ROADMAP E14）', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留（<redacted> 原样传递）', () => {
+    expect(normalizeProfileSummary(PROFILE_SUMMARY_PAYLOAD)).toEqual(PROFILE_SUMMARY_PAYLOAD);
+  });
+
+  it('harnessId 为空 / 缺失时丢弃整条 —— 不知道是哪个 Harness 的现状无法展示', () => {
+    expect(normalizeProfileSummary({ ...PROFILE_SUMMARY_PAYLOAD, harnessId: '' })).toBeNull();
+    expect(normalizeProfileSummary({ ...PROFILE_SUMMARY_PAYLOAD, harnessId: '   ' })).toBeNull();
+    expect(normalizeProfileSummary({ sourcePath: 'C:/x' })).toBeNull();
+    expect(normalizeProfileSummary(null)).toBeNull();
+    expect(normalizeProfileSummary('claude')).toBeNull();
+  });
+
+  it('fields 非对象时收敛为空 map，不崩溃也不编造行', () => {
+    expect(normalizeProfileSummary({ ...PROFILE_SUMMARY_PAYLOAD, fields: 'oops' })?.fields).toEqual(
+      {},
+    );
+    expect(normalizeProfileSummary({ ...PROFILE_SUMMARY_PAYLOAD, fields: null })?.fields).toEqual(
+      {},
+    );
+    expect(normalizeProfileSummary({ harnessId: 'codex' })?.fields).toEqual({});
+  });
+
+  it('fields 的值只认字符串，非字符串丢该键（<redacted> / set / unset 也都是字符串）', () => {
+    const summary = normalizeProfileSummary({
+      ...PROFILE_SUMMARY_PAYLOAD,
+      fields: {
+        'env.ANTHROPIC_BASE_URL': 'https://api.example.com',
+        'env.ANTHROPIC_MAX_TOKENS': 8192,
+        'some.flag': true,
+        'some.missing': null,
+      },
+    });
+
+    expect(summary?.fields).toEqual({ 'env.ANTHROPIC_BASE_URL': 'https://api.example.com' });
+  });
+
+  it('sourcePath / parsedAt 缺省空字符串，字段缺失时不产生 undefined', () => {
+    expect(normalizeProfileSummary({ harnessId: 'codex' })).toEqual({
+      harnessId: 'codex',
+      sourcePath: '',
+      fields: {},
+      parsedAt: '',
+    });
+  });
+});
+
+describe('discoverProfile', () => {
+  it('使用 profile_discover 命令名并传 harnessId，归一化返回', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROFILE_SUMMARY_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await discoverProfile('claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('profile_discover');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: PROFILE_SUMMARY_PAYLOAD });
+  });
+
+  it('配置文件不存在时后端返回 null：这是「未初始化」空态，不是错误', async () => {
+    stubTauri(async () => null);
+
+    await expect(discoverProfile('codex')).resolves.toEqual({ ok: true, data: null });
+  });
+
+  it('payload 形状残缺时丢弃而不是渲染半截卡片', async () => {
+    stubTauri(async () => ({ sourcePath: 'C:/x', fields: {} }));
+
+    await expect(discoverProfile('gemini')).resolves.toEqual({ ok: true, data: null });
+  });
+
+  it('未实现 harness 的 reject（错误含「尚未实现」）原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error('copilot 的配置发现尚未实现（当前支持 claude/codex/gemini）');
+    });
+
+    await expect(discoverProfile('copilot')).resolves.toEqual({
+      ok: false,
+      error: 'copilot 的配置发现尚未实现（当前支持 claude/codex/gemini）',
+    });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(discoverProfile('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });
