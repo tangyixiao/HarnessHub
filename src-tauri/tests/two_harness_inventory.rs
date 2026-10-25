@@ -317,6 +317,10 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         opencode.terminal,
         "opencode terminal 已有真机 lifecycle 证据"
     );
+    assert!(
+        claude.replay,
+        "claude replay：B6 只读回放有 fixture 回归 + 真机只读 smoke（claude_replay_smoke.rs）"
+    );
 
     for (name, value) in [
         ("codex.resume", codex.resume),
@@ -326,7 +330,6 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("codex.live_state", codex.live_state),
         ("codex.worktree", codex.worktree),
         ("claude.resume", claude.resume),
-        ("claude.replay", claude.replay),
         ("claude.tool_calls", claude.tool_calls),
         ("claude.subagents", claude.subagents),
         ("claude.live_state", claude.live_state),
