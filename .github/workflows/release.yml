@@ -87,9 +87,75 @@ jobs:
           path: renamed/*
           if-no-files-found: error
 
+  # v0.1 Release Gate「Linux 可安装运行」的证据（ROADMAP A4 Task 3）：
+  # 装 deb → 隔离 XDG_DATA_HOME 冷启动（xvfb）→ 只读校验 SQLite → 干净退出。
+  smoke:
+    name: Linux 安装 + 冷启动冒烟
+    needs: linux
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: bundles
+      - name: 安装 deb（验证包元数据与依赖声明可解析）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./bundles/Harness-Hub_*_amd64.deb
+          dpkg -L harness-hub | grep -E '/bin/' || true
+      - name: 隔离冷启动冒烟
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          export XDG_DATA_HOME="$RUNNER_TEMP/hh-smoke-data"
+          rm -rf "$XDG_DATA_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          BIN="$(dpkg -L harness-hub | grep -E '/bin/[^/]+$' | head -n 1)"
+          echo "BIN=$BIN"
+          xvfb-run -a "$BIN" > "$RUNNER_TEMP/smoke.log" 2>&1 &
+          APP_PID=$!
+          DB="$XDG_DATA_HOME/dev.harnesshub.desktop/harness-hub.sqlite3"
+          for _ in $(seq 1 30); do
+            [ -f "$DB" ] && break
+            sleep 1
+          done
+          # 库文件出现后再给应用一点时间完成启动期迁移与清单同步。
+          sleep 8
+          DB="$DB" python3 - <<'EOF'
+          import os
+          import sqlite3
+
+          db = os.environ["DB"]
+          assert os.path.isfile(db), f"数据库未生成：{db}"
+          conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+          version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+          harnesses = conn.execute("SELECT count(*) FROM harnesses").fetchone()[0]
+          sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+          plugins = conn.execute("SELECT count(*) FROM plugins").fetchone()[0]
+          violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+          # >= 10：新增迁移后这里要同步抬高（当前最新 0010_git_snapshots）。
+          assert version >= 10, f"schema 版本异常：{version}"
+          assert harnesses == 5, f"harness 定义行异常：{harnesses}（应为 5 个内置定义）"
+          assert sessions == 0, sessions
+          assert plugins == 0, plugins
+          assert violations == [], violations
+          print(f"SMOKE_OK version={version} harnesses={harnesses} sessions={sessions} plugins={plugins}")
+          EOF
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
+          echo "--- smoke.log ---"
+          cat "$RUNNER_TEMP/smoke.log" || true
+      - name: 上传冒烟日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-smoke-log
+          path: ${{ runner.temp }}/smoke.log
+          if-no-files-found: ignore
+
   release:
     name: 草稿 pre-release
-    needs: linux
+    needs: [linux, smoke]
     # 仅 tag 触发才发版；workflow_dispatch 只出 artifact 供试跑验收。
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -109,8 +175,14 @@ jobs:
           # （首次 tag run 因此失败：not a git repository）。
           GH_REPO: ${{ github.repository }}
         run: |
+          # tag 带预发布段（如 v0.1.0-alpha.5）→ prerelease；正式版（v0.1.0）→ 正式。
+          PRE_FLAG="--prerelease"
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *) PRE_FLAG="" ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
-            --draft --prerelease \
+            --draft $PRE_FLAG \
             --title "Harness Hub $GITHUB_REF_NAME" \
             --notes "Automated Linux build (deb + AppImage) from tag $GITHUB_REF_NAME.
           Manual verification pending; publish after checking artifacts and SHA256SUMS." \
