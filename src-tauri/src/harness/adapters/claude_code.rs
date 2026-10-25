@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::harness::adapter::{
-    DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest,
+    DetectResult, HarnessAdapter, HarnessCapabilities, HarnessId, LaunchRequest, ResumeRequest,
 };
 use crate::harness::launch::{program_for, LaunchSpec};
 use crate::harness::probe::HostProbe;
@@ -119,6 +119,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             // B6：`~/.claude/projects/**/*.jsonl` 的只读回放解析已实现并有
             // fixture 回归（replay::claude + fixtures/claude/replay/）。
             replay: true,
+            // B9：`--resume <source_session_id>` 拼接有 fixture 锁定；
+            // 真机完整续聊验收随用户交互场景补充（readiness 维度）。
+            resume: true,
             ..HarnessCapabilities::default()
         }
     }
@@ -144,6 +147,26 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             cwd,
             // 与 Codex 一致：不隐式拼 shell 环境；需要时由上层显式注入。
             env: Vec::new(),
+            runtime_target_id: request.runtime_target_id,
+        })
+    }
+
+    /// 恢复已有会话（ROADMAP B9）：`claude --resume <source_session_id>`。
+    ///
+    /// 参数拼接在 launch-spec 边界（ADR-0008）：IPC/PTY 层不拼命令。
+    /// `source_session_id` 缺失（PTY 会话没有外部 id）是明确错误——
+    /// 恢复只对「有外部会话 id 的历史会话」有意义。
+    fn build_resume_spec(&self, request: ResumeRequest) -> Result<LaunchSpec> {
+        let source_session_id = request.source_session_id.as_deref().ok_or_else(|| {
+            Error::InvalidInput(
+                "该会话没有外部 source_session_id，无法恢复（只有导入/发现的历史会话支持）"
+                    .to_string(),
+            )
+        })?;
+        self.build_launch_spec(LaunchRequest {
+            project_id: None,
+            cwd: request.cwd,
+            args: vec!["--resume".to_string(), source_session_id.to_string()],
             runtime_target_id: request.runtime_target_id,
         })
     }
@@ -281,8 +304,11 @@ mod tests {
             capabilities.replay,
             "B6：只读回放解析有 fixture 回归 + 真机只读 smoke（tests/claude_replay_smoke.rs）"
         );
+        assert!(
+            capabilities.resume,
+            "B9：--resume 拼接有 fixture 锁定（resume_spec_appends_resume...）；真机完整续聊随交互场景补充"
+        );
         for (name, value) in [
-            ("resume", capabilities.resume),
             ("tool_calls", capabilities.tool_calls),
             ("subagents", capabilities.subagents),
             ("live_state", capabilities.live_state),
@@ -306,7 +332,69 @@ mod tests {
         assert_eq!(spec.args, vec!["--help".to_string()]);
         assert_eq!(spec.cwd, Some(PathBuf::from("D:/work")));
         assert_eq!(spec.runtime_target_id, "local");
-        assert!(!adapter.capabilities().resume, "spec 与 resume 无关");
+    }
+
+    /// B9：resume spec = `claude --resume <source_session_id>`，经同一 shim 地基。
+    #[test]
+    fn resume_spec_appends_resume_with_the_source_session_id() {
+        let adapter = adapter(installed());
+
+        let spec = adapter
+            .build_resume_spec(ResumeRequest {
+                hub_session_id: "hub-new".to_string(),
+                source_session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                cwd: "D:/work".to_string(),
+                runtime_target_id: "local".to_string(),
+            })
+            .expect("resume spec");
+
+        let joined = spec.args.join(" ");
+        assert!(
+            joined.contains("--resume 11111111-1111-4111-8111-111111111111"),
+            "参数必须包含 --resume 与会话 id：{joined}"
+        );
+        assert_eq!(spec.runtime_target_id, "local");
+        // capability 与实现同步（ADR-0005：实现即能力）。
+        assert!(adapter.capabilities().resume, "build_resume_spec 已实现");
+    }
+
+    /// 没有 source_session_id 的会话（PTY 会话）不能恢复：明确错误。
+    #[test]
+    fn resume_without_a_source_session_id_is_a_clear_error() {
+        let adapter = adapter(installed());
+
+        let error = adapter
+            .build_resume_spec(ResumeRequest {
+                hub_session_id: "hub-new".to_string(),
+                source_session_id: None,
+                cwd: "D:/work".to_string(),
+                runtime_target_id: "local".to_string(),
+            })
+            .expect_err("缺 id 必须报错");
+
+        assert!(
+            error.to_string().contains("source_session_id"),
+            "错误要说明原因：{error}"
+        );
+    }
+
+    /// 未实现 resume 的适配器走 trait 默认：明确错误（UI 不渲染入口）。
+    #[test]
+    fn resume_defaults_to_unsupported_for_other_adapters() {
+        // Codex 没覆写 build_resume_spec（capability resume 仍 false）。
+        let codex = crate::harness::adapters::codex::CodexAdapter::new(std::sync::Arc::new(
+            crate::test_support::FakeHostProbe::new().with_binary("codex", "D:/x/codex.cmd", "x"),
+        ));
+        let error = codex
+            .build_resume_spec(ResumeRequest {
+                hub_session_id: "hub".to_string(),
+                source_session_id: Some("abc".to_string()),
+                cwd: String::new(),
+                runtime_target_id: "local".to_string(),
+            })
+            .expect_err("默认实现必须拒绝");
+        assert!(error.to_string().contains("尚未支持恢复"), "{error}");
+        assert!(!codex.capabilities().resume);
     }
 
     /// `.ps1` shim 走通用地基（pwsh 宿主），Claude 不新增平台专用分支。

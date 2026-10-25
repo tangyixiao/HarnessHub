@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::clock;
 use crate::error::{Error, Result};
 use crate::harness::store::find_installation;
-use crate::session::store::{NewSession, SessionRecord, SessionStore, TerminationReason};
+use crate::session::store::{
+    LaunchMode, NewSession, SessionRecord, SessionStore, TerminationReason,
+};
 
 /// Session 表的编排入口。
 pub struct SessionService<'conn> {
@@ -62,6 +64,45 @@ impl<'conn> SessionService<'conn> {
         session.installation_id = Some(installation.id);
         session.project_id = project_id.map(str::to_string);
         // 缺省 cwd 写 NULL，而不是空串：空串会让「未记录 cwd」和「cwd 是空目录」混淆。
+        session.cwd = cwd.map(str::to_string);
+
+        self.store.insert(&session)?;
+
+        self.store
+            .get(&hub_session_id)?
+            .ok_or_else(|| Error::InvalidInput("刚写入的会话读不回来".to_string()))
+    }
+
+    /// 恢复一条外部会话（ROADMAP B9）：新 hub_session_id + 关联外部
+    /// `source_session_id` + `launch_mode = resume`。
+    ///
+    /// 同一 (harness, source_session_id) 重复恢复会被数据库唯一索引拒绝
+    /// —— 这是**幂等契约**而不是错误路径缺陷：该外部会话已在 Harness Hub
+    /// 有记录时应当续用既有记录，调用方把错误如实报给用户即可。
+    pub fn resume_from_installation(
+        &self,
+        installation_id: &str,
+        source_session_id: &str,
+        cwd: Option<&str>,
+    ) -> Result<SessionRecord> {
+        let installation = find_installation(self.conn, installation_id)?.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "未知的安装：{installation_id}（先同步 Harness 清单）"
+            ))
+        })?;
+
+        let hub_session_id = Uuid::new_v4().to_string();
+        let started_at = clock::now_rfc3339();
+
+        let mut session = NewSession::new(
+            hub_session_id.as_str(),
+            &installation.harness_id,
+            &installation.runtime_target_id,
+            started_at.as_str(),
+        )
+        .with_source_session_id(source_session_id)
+        .with_launch_mode(LaunchMode::Resume);
+        session.installation_id = Some(installation.id);
         session.cwd = cwd.map(str::to_string);
 
         self.store.insert(&session)?;

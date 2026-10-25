@@ -189,6 +189,7 @@ pub fn run() {
             commands::replay_search_settings_set,
             commands::remove_project,
             commands::resize_terminal,
+            commands::resume_terminal,
             commands::session_git_snapshots,
             commands::session_git_summary,
             commands::start_terminal,

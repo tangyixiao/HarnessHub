@@ -274,8 +274,7 @@ fn the_real_machine_detects_both_harnesses() {
         claude.data_paths
     );
     // 7A 阶段 Claude 只做 detection（当时这里断言全 false）。7B 通过真机 GUI 往返后
-    // 才能宣称 launch/terminal，权威断言在下面的矩阵回归测试里。
-    assert!(!claude.capabilities.resume, "resume 仍未实现，不得为 true");
+    // 才能宣称 launch/terminal；B9 后 resume 也有 fixture 锁定（权威断言在矩阵回归里）。
     let _ = clock::now_rfc3339();
 }
 
@@ -321,6 +320,10 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         claude.replay,
         "claude replay：B6 只读回放有 fixture 回归 + 真机只读 smoke（claude_replay_smoke.rs）"
     );
+    assert!(
+        claude.resume,
+        "claude resume：B9 --resume 拼接有 fixture 锁定；真机完整续聊随交互场景补充"
+    );
 
     for (name, value) in [
         ("codex.resume", codex.resume),
@@ -329,7 +332,6 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
         ("codex.subagents", codex.subagents),
         ("codex.live_state", codex.live_state),
         ("codex.worktree", codex.worktree),
-        ("claude.resume", claude.resume),
         ("claude.tool_calls", claude.tool_calls),
         ("claude.subagents", claude.subagents),
         ("claude.live_state", claude.live_state),

@@ -11,8 +11,10 @@ import {
   listReplaySessions,
   readReplaySession,
   reindexReplaySearch,
+  resumeTerminal,
   searchReplay,
   setReplaySearchSettings,
+  type HarnessSummary,
   type ReindexReport,
   type ReplayMessage,
   type ReplaySearchHit,
@@ -21,6 +23,7 @@ import {
   type ReplayToolCall,
   type SearchSettings,
   type SubagentThread,
+  type TerminationReason,
 } from '@/lib/ipc';
 
 /**
@@ -29,16 +32,35 @@ import {
  */
 const REPLAY_HARNESS_ID = 'claude';
 
+/** B9 恢复入口的默认终端尺寸：回放页没有 xterm 实例可测量，用固定值。 */
+const RESUME_DEFAULT_COLS = 120;
+const RESUME_DEFAULT_ROWS = 30;
+
+/**
+ * 与 TerminalPage 的 TERMINATION_LABEL 同一份文案。replay 不跨 feature import
+ *（那边未导出，也不能为 export 而改只读文件），本地保持逐字一致。
+ */
+const TERMINATION_LABEL: Record<TerminationReason, string> = {
+  natural_exit: '正常退出',
+  user_killed: '用户主动结束',
+  launch_failed: '启动失败',
+  runtime_error: '运行故障',
+  host_shutdown: 'Harness Hub 关闭',
+  lost: '失去联系',
+};
+
 /**
  * 能力门控状态：capability 矩阵说了算。没有任何 harness 实现 replay 时
  * 渲染说明卡 —— 这是「能力未实现」，不是错误，绝不能报错或白屏。
+ * `ready` 携带 summaries：B9 的恢复入口要用同一份 listHarnesses 结果做
+ * capabilities.resume 门控与 installationId 定位，不再发第二次 IPC。
  */
 type HarnessState =
   | { kind: 'loading' }
   | { kind: 'ipc-unavailable' }
   | { kind: 'error'; message: string }
   | { kind: 'no-replay-capability' }
-  | { kind: 'ready' };
+  | { kind: 'ready'; harnesses: HarnessSummary[] };
 
 type ListState =
   | { kind: 'loading' }
@@ -93,6 +115,22 @@ function skippedFooterText(session: ReplaySession): string {
   return `已跳过 ${total} 行非消息记录${breakdown} · 无法解析 ${session.malformedLines} 行`;
 }
 
+/** 传给会话详情区的恢复入口；null = 该 harness 不支持恢复，按钮整个不渲染（不置灰）。 */
+type ResumeEntry = { installationId: string };
+
+/**
+ * B9 恢复入口的 capability 门控：只有 capabilities.resume = true 且能定位到
+ * installationId 的 harness 才给入口。缺 installationId 时同样不渲染 ——
+ * 没有安装 id 就发不出 resume_terminal，与其点了才报错，不如不给假入口。
+ */
+function resolveResumeEntry(harnesses: HarnessSummary[]): ResumeEntry | null {
+  const entry = harnesses.find((harness) => harness.id === REPLAY_HARNESS_ID);
+  if (!entry || entry.capabilities.resume !== true || entry.installationId === null) {
+    return null;
+  }
+  return { installationId: entry.installationId };
+}
+
 /**
  * 会话回放页（ROADMAP B6 回放 + B7 搜索）。
  *
@@ -129,7 +167,7 @@ export function ReplayPage() {
       }
       setHarnessState(
         result.data.some((harness) => harness.capabilities.replay)
-          ? { kind: 'ready' }
+          ? { kind: 'ready', harnesses: result.data }
           : { kind: 'no-replay-capability' },
       );
     })();
@@ -336,6 +374,11 @@ export function ReplayPage() {
                 <SessionTimeline
                   key={detailState.session.sessionId}
                   session={detailState.session}
+                  resume={
+                    harnessState.kind === 'ready'
+                      ? resolveResumeEntry(harnessState.harnesses)
+                      : null
+                  }
                 />
               ) : null}
             </section>
@@ -381,7 +424,13 @@ function SessionListItem({
   );
 }
 
-function SessionTimeline({ session }: { session: ReplaySession }) {
+function SessionTimeline({
+  session,
+  resume,
+}: {
+  session: ReplaySession;
+  resume: ResumeEntry | null;
+}) {
   // 线程跳转用：seq → 消息卡外层节点。ref 回调随消息卡挂载 / 卸载自动增删；
   // 组件以 sessionId 为 key 重挂载（见调用处），映射不会残留上一个会话的节点。
   const messageRefs = useRef(new Map<number, HTMLElement>());
@@ -413,6 +462,12 @@ function SessionTimeline({ session }: { session: ReplaySession }) {
       <p className="mt-1 text-[11px] text-content-muted">
         {session.messages.length} 条消息 · 只读回放，不写任何数据
       </p>
+
+      {resume !== null ? (
+        // B9：「在终端中恢复」入口（capability 门控已在父级完成）。
+        // 转录时间线本身仍只读；恢复是显式用户动作，起的是一条**新的**终端会话。
+        <ResumeTerminalSection sessionId={session.sessionId} resume={resume} />
+      ) : null}
 
       {session.messages.length === 0 ? (
         <div className="mt-4 rounded-md border border-border-subtle bg-white/[0.03] px-3 py-4 text-center">
@@ -583,6 +638,115 @@ function ToolCallCard({ call }: { call: ReplayToolCall }) {
         </div>
       ) : null}
     </li>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * 在终端中恢复（ROADMAP B9）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 后端对「同一外部会话重复恢复」的 reject：SQLite 唯一索引错误串含 UNIQUE，
+ * 或带列名 source_session_id（见 src-tauri/src/terminal.rs 的重复 resume 测试）。
+ * 这是使用方式问题，不是故障 —— 渲染成行内提示，绝不套「恢复失败」错误卡。
+ */
+const DUPLICATE_RESUME_PATTERNS: readonly string[] = ['UNIQUE', 'source_session_id'];
+
+function isDuplicateResumeError(error: string): boolean {
+  return DUPLICATE_RESUME_PATTERNS.some((pattern) => error.includes(pattern));
+}
+
+type ResumeState =
+  | { kind: 'idle' }
+  | { kind: 'starting' }
+  | { kind: 'resumed'; hubSessionId: string }
+  | { kind: 'duplicate' }
+  | { kind: 'failed'; message: string };
+
+/**
+ * 「在终端中恢复」（ROADMAP B9）：以当前回放会话的 id 作为 sourceSessionId，
+ * 让后端起一条**新的**终端会话。只做页内反馈，不跳转 Terminal 页
+ * （现有导航结构不动）；成功后展示新会话的 hubSessionId，onEvent 的
+ * error / exited 落成一行简短状态（output 在回放页无处渲染，忽略）。
+ */
+function ResumeTerminalSection({ sessionId, resume }: { sessionId: string; resume: ResumeEntry }) {
+  const [state, setState] = useState<ResumeState>({ kind: 'idle' });
+  // 最近一条 error / exited 事件的简短状态；与成功提示两行并存，不互相覆盖。
+  const [eventLine, setEventLine] = useState<string | null>(null);
+
+  function startResume(): void {
+    if (state.kind === 'starting') return;
+    setState({ kind: 'starting' });
+
+    void (async () => {
+      const result = await resumeTerminal({
+        installationId: resume.installationId,
+        sourceSessionId: sessionId,
+        // 发现列表的 projectDir 是编码后的目录名（如 D--work-demo），还原真实
+        // 路径有连字符歧义 —— 不确定绝不猜，cwd 传 null 交给后端默认处理。
+        cwd: null,
+        cols: RESUME_DEFAULT_COLS,
+        rows: RESUME_DEFAULT_ROWS,
+        onEvent: (event) => {
+          // started 已由返回的 SessionRecord 覆盖，不再重复播报。
+          if (event.kind === 'error') {
+            setEventLine(`终端会话错误：${event.message}`);
+          } else if (event.kind === 'exited') {
+            const reason = TERMINATION_LABEL[event.reason];
+            setEventLine(
+              `终端会话已结束（${reason}${
+                event.exitCode === null ? '' : ` · 退出码 ${event.exitCode}`
+              }）`,
+            );
+          }
+        },
+      });
+
+      if (!result.ok) {
+        setState(
+          isDuplicateResumeError(result.error)
+            ? { kind: 'duplicate' }
+            : { kind: 'failed', message: result.error },
+        );
+        return;
+      }
+      setState({ kind: 'resumed', hubSessionId: result.data.hubSessionId });
+    })();
+  }
+
+  return (
+    <div className="mt-2">
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={startResume}
+        disabled={state.kind === 'starting'}
+      >
+        {state.kind === 'starting' ? '正在恢复…' : '在终端中恢复'}
+      </Button>
+
+      {state.kind === 'resumed' ? (
+        <p aria-live="polite" className="mt-1.5 text-[11px] text-content-secondary">
+          已在新终端会话恢复（{state.hubSessionId}）
+        </p>
+      ) : null}
+
+      {state.kind === 'duplicate' ? (
+        <p className="mt-1.5 text-[11px] text-content-secondary">该外部会话已有恢复记录</p>
+      ) : null}
+
+      {state.kind === 'failed' ? (
+        <p role="alert" className="mt-1.5 text-xs text-red-400">
+          恢复失败：{state.message}
+        </p>
+      ) : null}
+
+      {eventLine !== null ? (
+        <p aria-live="polite" className="mt-1.5 text-[11px] text-content-secondary">
+          {eventLine}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
