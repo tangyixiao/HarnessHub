@@ -55,9 +55,7 @@ fn real_claude_transcripts_list_and_read_read_only() {
             empty_seen += 1;
             continue;
         }
-        if with_tools.is_none()
-            && session.messages.iter().any(|m| !m.tool_calls.is_empty())
-        {
+        if with_tools.is_none() && session.messages.iter().any(|m| !m.tool_calls.is_empty()) {
             with_tools = Some(session.clone());
         }
         if non_empty.is_none() {

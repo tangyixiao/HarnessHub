@@ -1,5 +1,5 @@
 import userEvent from '@testing-library/user-event';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ReplayPage } from '@/features/replay/ReplayPage';
@@ -65,7 +65,8 @@ const CODEX_HARNESS = {
 
 /**
  * 与 Rust `ReplaySessionSummary` / `ReplaySession`（serde camelCase）同形，
- * 形状手工复刻自 Rust 契约测试 `replay_dtos_serialize_with_camel_case_keys`。
+ * 形状手工复刻自 Rust 契约测试 `replay_dtos_serialize_with_camel_case_keys`；
+ * B8 起含 toolCalls / subagentThreads 嵌套形状。
  */
 const SESSION_SUMMARY = {
   harnessId: 'claude',
@@ -91,7 +92,9 @@ const REPLAY_SESSION = {
       textParts: ['帮我看看这个报错'],
       thinkingParts: [],
       model: null,
-      unsupportedContentKinds: {},
+      toolCalls: [],
+      // B8 起 tool_use 展开为 toolCalls；仍不展开的种类（如 image）才进计数。
+      unsupportedContentKinds: { image: 1 },
     },
     {
       seq: 1,
@@ -101,7 +104,24 @@ const REPLAY_SESSION = {
       textParts: ['回答正文'],
       thinkingParts: ['先分析一下报错原因'],
       model: 'claude-sonnet-4-6',
-      unsupportedContentKinds: { tool_use: 2 },
+      toolCalls: [
+        {
+          id: 'call_1',
+          name: 'Grep',
+          inputJson: '{"pattern":"TODO"}',
+          resultJson: 'src/a.rs',
+          resultTruncated: false,
+          inputTruncated: false,
+        },
+      ],
+      unsupportedContentKinds: {},
+    },
+  ],
+  subagentThreads: [
+    {
+      messageSeqs: [1],
+      startedAt: '2026-10-25T10:00:05.000Z',
+      lastAt: '2026-10-25T10:00:09.000Z',
     },
   ],
   // BTreeMap 序列化按键排序：file-history-snapshot 在 summary 之前。
@@ -139,8 +159,21 @@ describe('ReplayPage', () => {
     expect(screen.getByText('先分析一下报错原因')).toBeInTheDocument();
     // sidechain 消息带「子代理」徽标。
     expect(screen.getByText('子代理')).toBeInTheDocument();
-    // unsupportedContentKinds 非空时在该消息卡脚注计数。
-    expect(screen.getByText(/未展开内容：tool_use ×2/)).toBeInTheDocument();
+    // B8：toolCalls 展开为等宽工具卡（工具名 + 原样 inputJson + 「→ 结果」）。
+    expect(screen.getByRole('list', { name: '工具调用' })).toBeInTheDocument();
+    expect(screen.getByText('Grep')).toBeInTheDocument();
+    expect(screen.getByText('{"pattern":"TODO"}')).toBeInTheDocument();
+    expect(screen.getByText('→ 结果')).toBeInTheDocument();
+    expect(screen.getByText('src/a.rs')).toBeInTheDocument();
+    // 子代理线程区在时间线下方渲染（seq 列表 + 起止时间）。
+    expect(screen.getByRole('region', { name: '子代理线程' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: /线程 1 · #1 · 2026-10-25 10:00:05 ~ 2026-10-25 10:00:09/,
+      }),
+    ).toBeInTheDocument();
+    // unsupportedContentKinds 非空时保留计数脚注（tool_use 已展开，剩下的才是未展开）。
+    expect(screen.getByText(/未展开内容：image ×1/)).toBeInTheDocument();
     // 底部脚注如实渲染 skippedKindCounts 与 malformedLines。
     expect(
       screen.getByText(/已跳过 2 行非消息记录（file-history-snapshot ×1、summary ×1）/),
@@ -153,6 +186,159 @@ describe('ReplayPage', () => {
       harnessId: 'claude',
       sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
     });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * 工具调用卡与子代理线程（ROADMAP B8）
+   * ---------------------------------------------------------------- */
+
+  it('工具卡标注截断：结果截断与输入截断分别显示，无结果的调用不渲染「→ 结果」', async () => {
+    const user = userEvent.setup();
+    const truncatedSession = {
+      ...REPLAY_SESSION,
+      subagentThreads: [],
+      messages: [
+        {
+          seq: 0,
+          role: 'assistant',
+          sidechain: false,
+          timestamp: '2026-10-25T10:00:05.000Z',
+          textParts: ['查一下 TODO'],
+          thinkingParts: [],
+          model: 'claude-sonnet-4-6',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'Grep',
+              inputJson: '{"pattern":"TODO"}',
+              resultJson: 'src/a.rs:1: TODO…',
+              resultTruncated: true,
+              inputTruncated: false,
+            },
+            {
+              id: 'call_2',
+              name: 'Bash',
+              inputJson: '{"command":"…被截断的命令…"}',
+              resultJson: null,
+              resultTruncated: false,
+              inputTruncated: true,
+            },
+          ],
+          unsupportedContentKinds: {},
+        },
+      ],
+    };
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return truncatedSession;
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+
+    expect(await screen.findByRole('list', { name: '工具调用' })).toBeInTheDocument();
+    expect(screen.getByText('Grep')).toBeInTheDocument();
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText('{"pattern":"TODO"}')).toBeInTheDocument();
+    expect(screen.getByText('{"command":"…被截断的命令…"}')).toBeInTheDocument();
+    // 只有 call_1 有结果：恰好一个「→ 结果」，结果原文 + 截断标注都在。
+    expect(screen.getAllByText('→ 结果')).toHaveLength(1);
+    expect(screen.getByText('src/a.rs:1: TODO…')).toBeInTheDocument();
+    expect(screen.getByText('结果已截断')).toBeInTheDocument();
+    // call_2 的输入被截断，单独标注。
+    expect(screen.getByText('输入已截断')).toBeInTheDocument();
+  });
+
+  it('点击子代理线程滚动到首条消息并高亮线程内消息（尽力而为）', async () => {
+    // jsdom 不实现 scrollIntoView：手动挂一个 spy 验证「找到消息时确实滚动」。
+    const scrollSpy = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      value: scrollSpy,
+      configurable: true,
+      writable: true,
+    });
+    const user = userEvent.setup();
+    const threadedSession = {
+      ...REPLAY_SESSION,
+      messages: [
+        REPLAY_SESSION.messages[0],
+        { ...REPLAY_SESSION.messages[1], textParts: ['子代理回答'] },
+        {
+          seq: 2,
+          role: 'assistant',
+          sidechain: true,
+          timestamp: '2026-10-25T10:00:07.000Z',
+          textParts: ['子代理继续'],
+          thinkingParts: [],
+          model: 'claude-sonnet-4-6',
+          toolCalls: [],
+          unsupportedContentKinds: {},
+        },
+      ],
+      subagentThreads: [
+        {
+          messageSeqs: [1, 2],
+          startedAt: '2026-10-25T10:00:05.000Z',
+          lastAt: '2026-10-25T10:00:09.000Z',
+        },
+      ],
+    };
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return threadedSession;
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+
+    await user.click(
+      await screen.findByRole('button', { name: /线程 1 · #1、#2 · 2026-10-25 10:00:05/ }),
+    );
+
+    // 线程内两条消息都命中：滚动一次（到首条），高亮覆盖全部命中消息。
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('子代理回答').closest('article')).toHaveClass(
+      'ring-1',
+      'ring-accent/40',
+    );
+    expect(screen.getByText('子代理继续').closest('article')).toHaveClass(
+      'ring-1',
+      'ring-accent/40',
+    );
+    // 线程外的消息不高亮。
+    expect(screen.getByLabelText('用户消息')).not.toHaveClass('ring-1');
+  });
+
+  it('无工具调用与无子代理线程的会话不渲染空区块（空区块纪律）', async () => {
+    const user = userEvent.setup();
+    const plainSession = {
+      ...REPLAY_SESSION,
+      subagentThreads: [],
+      messages: [
+        { ...REPLAY_SESSION.messages[0], unsupportedContentKinds: {} },
+        { ...REPLAY_SESSION.messages[1], sidechain: false, toolCalls: [] },
+      ],
+    };
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return plainSession;
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+
+    expect(await screen.findByText('回答正文')).toBeInTheDocument();
+    // 无工具调用 → 不渲染工具卡列表；无线程 → 整个子代理区都不出现。
+    expect(screen.queryByRole('list', { name: '工具调用' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '子代理线程' })).not.toBeInTheDocument();
+    // 没有未展开内容时计数脚注同样不渲染。
+    expect(screen.queryByText(/未展开内容/)).not.toBeInTheDocument();
   });
 
   it('会话列表保持后端返回顺序（mtime 倒序），前端不重排', async () => {
@@ -207,7 +393,8 @@ describe('ReplayPage', () => {
     render(<ReplayPage />);
     await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
 
-    expect(await screen.findByText(/转录超过 16 MiB 上限/)).toBeInTheDocument();
+    // B7 的搜索设置区读不到设置时也会显示同一错误串；这里限定时间线错误卡。
+    expect(await screen.findByText(/IPC 错误：转录超过 16 MiB 上限/)).toBeInTheDocument();
   });
 
   it('session 未命中发现结果（后端返回 null）时如实说明，不渲染空时间线', async () => {
@@ -229,7 +416,8 @@ describe('ReplayPage', () => {
     stubTauri(async (cmd: string) => {
       if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
       if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
-      if (cmd === 'replay_read_session') return { ...REPLAY_SESSION, messages: [] };
+      if (cmd === 'replay_read_session')
+        return { ...REPLAY_SESSION, messages: [], subagentThreads: [] };
       return null;
     });
 
@@ -254,5 +442,139 @@ describe('ReplayPage', () => {
     render(<ReplayPage />);
 
     expect(await screen.findByText(/请用 pnpm tauri dev 启动桌面应用/)).toBeInTheDocument();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * 搜索与索引（ROADMAP B7）
+   * ---------------------------------------------------------------- */
+
+  it('索引开关默认关闭：搜索框禁用并说明原因，隐私文案注明本地存储可关闭清除', async () => {
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_search_settings_get') {
+        return { enabled: false, excludedDirs: ['D--work-beta'] };
+      }
+      return null;
+    });
+
+    render(<ReplayPage />);
+
+    const toggle = await screen.findByRole('checkbox', { name: /启用回放索引/ });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByLabelText('搜索已索引的会话内容')).toBeDisabled();
+    expect(screen.getByText(/索引已关闭：打开并重建索引后才能搜索/)).toBeInTheDocument();
+    // 隐私文案纪律：索引在本地数据库、可关闭清除；绝不出现「上传 / 云端」类表述。
+    expect(screen.getByText(/索引内容保存在本地数据库，可随时关闭清除/)).toBeInTheDocument();
+  });
+
+  it('打开开关即保存设置（沿用排除名单），点击重建索引后显示审计计数', async () => {
+    const user = userEvent.setup();
+    const invokeSpy = vi.fn(async (cmd: string, _args?: Record<string, unknown>) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_search_settings_get') return { enabled: false, excludedDirs: [] };
+      if (cmd === 'replay_search_settings_set') return null;
+      if (cmd === 'replay_search_reindex') {
+        return { scanned: 68, indexed: 7, unchanged: 60, excluded: 1, removed: 0 };
+      }
+      return null;
+    });
+    stubTauri(invokeSpy);
+
+    render(<ReplayPage />);
+
+    await user.click(await screen.findByRole('checkbox', { name: /启用回放索引/ }));
+
+    // 开关即保存：settings_set 收到 enabled: true，排除名单原样沿用。
+    await waitFor(() =>
+      expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'replay_search_settings_set')).toBe(true),
+    );
+    const setCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'replay_search_settings_set');
+    expect(setCall?.[1]).toEqual({ settings: { enabled: true, excludedDirs: [] } });
+
+    // 重建索引是显式用户动作：未点击按钮前不得调用。
+    expect(invokeSpy.mock.calls.some(([cmd]) => cmd === 'replay_search_reindex')).toBe(false);
+    const reindexButton = screen.getByRole('button', { name: '重建索引' });
+    await waitFor(() => expect(reindexButton).toBeEnabled());
+    await user.click(reindexButton);
+
+    expect(
+      await screen.findByText(/扫描 68 · 索引 7 · 未变 60 · 排除 1 · 清理 0/),
+    ).toBeInTheDocument();
+    expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'replay_search_reindex')).toHaveLength(1);
+  });
+
+  it('搜索渲染命中片段（原样含 «» 标记）与 sessionId+seq 副标题，点击命中选中对应会话', async () => {
+    const user = userEvent.setup();
+    const invokeSpy = vi.fn(async (cmd: string, _args?: Record<string, unknown>) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return REPLAY_SESSION;
+      if (cmd === 'replay_search_settings_get') return { enabled: true, excludedDirs: [] };
+      if (cmd === 'replay_search') {
+        return [
+          {
+            harnessId: 'claude',
+            sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+            seq: 3,
+            role: 'user',
+            snippet: '…帮我«排查»报错…',
+            firstUserPreview: null,
+          },
+        ];
+      }
+      return null;
+    });
+    stubTauri(invokeSpy);
+
+    render(<ReplayPage />);
+
+    await user.type(await screen.findByLabelText('搜索已索引的会话内容'), '排查报错');
+    await user.click(screen.getByRole('button', { name: '搜索' }));
+
+    // snippet 原样渲染：«» 标记不解释、不转义、不重新排版。
+    expect(await screen.findByText('…帮我«排查»报错…')).toBeInTheDocument();
+    expect(
+      screen.getByText(/用户 · claude · 会话 b3a1b3a1-0000-4000-8000-000000000003 · #3/),
+    ).toBeInTheDocument();
+
+    const searchCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'replay_search');
+    expect(searchCall?.[1]).toEqual({ query: '排查报错' });
+
+    // 点击命中 → 左侧列表选中对应会话（sessionId 命中），右侧加载时间线。
+    await user.click(screen.getByText('…帮我«排查»报错…'));
+    expect(await screen.findByText('回答正文')).toBeInTheDocument();
+  });
+
+  it('「<3 字符」「未启用」类后端 reject 显示为行内提示，而不是「搜索失败」错误卡', async () => {
+    const user = userEvent.setup();
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_search_settings_get') return { enabled: true, excludedDirs: [] };
+      if (cmd === 'replay_search') {
+        throw new Error('搜索词至少需要 3 个字符（trigram 分词器的下限）');
+      }
+      return null;
+    });
+
+    render(<ReplayPage />);
+
+    await user.type(await screen.findByLabelText('搜索已索引的会话内容'), 'abc');
+    await user.click(screen.getByRole('button', { name: '搜索' }));
+
+    expect(await screen.findByText(/至少需要 3 个字符/)).toBeInTheDocument();
+    expect(screen.queryByText(/搜索失败/)).not.toBeInTheDocument();
+
+    // 索引未启用（例如设置被并发关闭）同理：提示，不是崩溃卡。
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_search_settings_get') return { enabled: true, excludedDirs: [] };
+      if (cmd === 'replay_search') throw new Error('回放索引未启用：先在设置里打开');
+      return null;
+    });
+    await user.click(screen.getByRole('button', { name: '搜索' }));
+
+    expect(await screen.findByText(/回放索引未启用/)).toBeInTheDocument();
+    expect(screen.queryByText(/搜索失败/)).not.toBeInTheDocument();
   });
 });

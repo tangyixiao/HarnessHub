@@ -1542,11 +1542,38 @@ export async function getSessionGitSummary(
 /** 回放消息的角色。与 Rust `ReplayRole`（serde snake_case）一致。 */
 export type ReplayRole = 'user' | 'assistant';
 
+/**
+ * 一次工具调用（与 Rust `ReplayToolCall`，serde camelCase 同形）。
+ *
+ * **只读、只摘要**：`inputJson` 是原样 JSON 字符串（后端截断到 2 KiB），
+ * 前端不解析工具语义；`resultJson` 只在转录里有对应 tool_result 时非 null。
+ */
+export type ReplayToolCall = {
+  /** 转录里的 tool_use id（与 tool_result 的关联键）。 */
+  id: string;
+  name: string;
+  inputJson: string;
+  /** 转录中没有对应 tool_result 时为 null（工具可能还在跑就断了）。 */
+  resultJson: string | null;
+  /** 结果被后端截断过（UI 必须标注「已截断」，不能静默丢内容）。 */
+  resultTruncated: boolean;
+  /** 输入被后端截断过。 */
+  inputTruncated: boolean;
+};
+
+/** 一条子代理线程（与 Rust `SubagentThread`，serde camelCase 同形）。 */
+export type SubagentThread = {
+  /** 线程内消息的 seq（指向 messages 里的 seq 字段）。 */
+  messageSeqs: number[];
+  startedAt: string | null;
+  lastAt: string | null;
+};
+
 /** 一条可回放的消息（与 Rust `ReplayMessage`，serde camelCase 同形）。 */
 export type ReplayMessage = {
   seq: number;
   role: ReplayRole;
-  /** sidechain（子代理链）里的消息；B8 会用它构建子代理树。 */
+  /** sidechain（子代理链）里的消息；B8 用它构建子代理线程。 */
   sidechain: boolean;
   timestamp: string | null;
   /** 正文 text 部分，按出现顺序。 */
@@ -1554,7 +1581,9 @@ export type ReplayMessage = {
   /** thinking 部分（UI 渲染为「思考」标注区，不与正文混排）。 */
   thinkingParts: string[];
   model: string | null;
-  /** 认识但 B6 不展开的内容种类（如 tool_use）→ 出现次数。 */
+  /** 工具调用（assistant 的 tool_use + user 行回填的 tool_result）。 */
+  toolCalls: ReplayToolCall[];
+  /** 认识但 B8 仍不展开的内容种类（如 image）→ 出现次数。 */
   unsupportedContentKinds: Record<string, number>;
 };
 
@@ -1565,6 +1594,8 @@ export type ReplaySession = {
   /** 转录文件的真实路径；只用于展示出处，UI 上不可点击、不可传回。 */
   sourcePath: string;
   messages: ReplayMessage[];
+  /** 子代理线程（sidechain 按 parentUuid 链分段，按出现顺序）。 */
+  subagentThreads: SubagentThread[];
   /** 被跳过的行类型（summary / file-history-snapshot / …）→ 次数。 */
   skippedKindCounts: Record<string, number>;
   /** 无法解析为 JSON 的行数。 */
@@ -1610,6 +1641,69 @@ function asCountMap(raw: unknown): Record<string, number> {
 }
 
 /**
+ * 收敛 IPC 边界上的一条工具调用。
+ *
+ * 缺 `id` 或 `name` 的条目直接丢弃：id 是与 tool_result 关联的键、name 是
+ * 工具卡的存在理由，残缺的工具卡既不能定位也不能展示。`inputJson` 非字符串
+ * 收敛为 "{}"；`resultJson` 只认字符串或 null；两个 truncated 只认 boolean，
+ * 缺省 false —— 截断标注绝不能凭一个字符串渲染出来。
+ */
+function normalizeReplayToolCall(raw: unknown): ReplayToolCall | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  const name = typeof source.name === 'string' ? source.name : '';
+  if (id.length === 0 || name.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    inputJson: typeof source.inputJson === 'string' ? source.inputJson : '{}',
+    resultJson: typeof source.resultJson === 'string' ? source.resultJson : null,
+    resultTruncated: source.resultTruncated === true,
+    inputTruncated: source.inputTruncated === true,
+  };
+}
+
+/**
+ * 收敛 IPC 边界上的一条子代理线程。
+ *
+ * 缺 `messageSeqs`、或 seq 里有任何一个非正整数（0 / 负数 / 小数 / 非数字）
+ * 的条目**整条丢弃**：线程的价值就在于点击后能按 seq 链定位消息，链不干净
+ * 就宁可少显示一条线程，也不渲染一条点不全的鬼影行。`startedAt` / `lastAt`
+ * 只认字符串或 null。
+ */
+function normalizeSubagentThread(raw: unknown): SubagentThread | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  if (!Array.isArray(source.messageSeqs) || source.messageSeqs.length === 0) {
+    return null;
+  }
+
+  const messageSeqs: number[] = [];
+  for (const seq of source.messageSeqs) {
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq <= 0) {
+      return null;
+    }
+    messageSeqs.push(seq);
+  }
+
+  return {
+    messageSeqs,
+    startedAt: asStringOrNull(source.startedAt),
+    lastAt: asStringOrNull(source.lastAt),
+  };
+}
+
+/**
  * 收敛 IPC 边界上的一条回放消息。
  *
  * `role` 只认 user / assistant：解析层认识的行形状就这两种，其它（未来的
@@ -1635,6 +1729,11 @@ function normalizeReplayMessage(raw: unknown): ReplayMessage | null {
     textParts: asStringArray(source.textParts),
     thinkingParts: asStringArray(source.thinkingParts),
     model: asStringOrNull(source.model),
+    toolCalls: Array.isArray(source.toolCalls)
+      ? source.toolCalls
+          .map(normalizeReplayToolCall)
+          .filter((call): call is ReplayToolCall => call !== null)
+      : [],
     unsupportedContentKinds: asCountMap(source.unsupportedContentKinds),
   };
 }
@@ -1663,11 +1762,18 @@ export function normalizeReplaySession(raw: unknown): ReplaySession | null {
         .filter((message): message is ReplayMessage => message !== null)
     : [];
 
+  const subagentThreads = Array.isArray(source.subagentThreads)
+    ? source.subagentThreads
+        .map(normalizeSubagentThread)
+        .filter((thread): thread is SubagentThread => thread !== null)
+    : [];
+
   return {
     harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
     sessionId,
     sourcePath: typeof source.sourcePath === 'string' ? source.sourcePath : '',
     messages,
+    subagentThreads,
     skippedKindCounts: asCountMap(source.skippedKindCounts),
     malformedLines: asNumber(source.malformedLines),
   };
@@ -1739,4 +1845,157 @@ export async function readReplaySession(
   }
 
   return { ok: true, data: normalizeReplaySession(result.data) };
+}
+
+/* ------------------------------------------------------------------ *
+ * 回放搜索（ROADMAP B7，migration 0011）
+ *
+ * 设置 / 搜索是纯 SQLite 操作；reindex 是显式用户动作（读外部转录、写索引
+ * 表），后端按 ADR-0012 不得在渲染路径自动触发，前端也不代替用户点它。
+ * 索引内容只落本地 SQLite —— 关闭开关时后端清空全部索引行。
+ * ------------------------------------------------------------------ */
+
+/** 回放搜索设置（与 Rust `SearchSettings`，serde camelCase 同形）。 */
+export type SearchSettings = {
+  enabled: boolean;
+  /** 排除的项目目录名（如 `D--work-beta`）；收紧名单时后端立即清掉对应索引行。 */
+  excludedDirs: string[];
+};
+
+/** 一次重建索引的审计报告（与 Rust `ReindexReport`，serde camelCase 同形）。 */
+export type ReindexReport = {
+  /** 发现的转录数（含排除的）。 */
+  scanned: number;
+  /** 新建或更新的索引条目。 */
+  indexed: number;
+  /** 指纹未变而跳过的。 */
+  unchanged: number;
+  /** 命中排除名单而完全不读的。 */
+  excluded: number;
+  /** 源文件已消失而被清理的旧索引。 */
+  removed: number;
+};
+
+/** 一条搜索命中（与 Rust `SearchHit`，serde camelCase 同形）。 */
+export type ReplaySearchHit = {
+  harnessId: string;
+  sessionId: string;
+  seq: number;
+  role: ReplayRole;
+  /** FTS5 snippet，命中词用 «» 包裹；UI 原样渲染，不解释标记。 */
+  snippet: string;
+  /** 会话首条 user 预览；无则 null。 */
+  firstUserPreview: string | null;
+};
+
+/**
+ * 收敛回放搜索设置。
+ *
+ * `enabled` 只认 `true`：默认关闭是隐私契约（migration 0011 的默认行就是关），
+ * 形状漂移时宁可显示「关」，绝不能把未知值渲染成「已开启」。
+ */
+export function normalizeReplaySearchSettings(raw: unknown): SearchSettings {
+  if (typeof raw !== 'object' || raw === null) {
+    return { enabled: false, excludedDirs: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    enabled: source.enabled === true,
+    excludedDirs: asStringArray(source.excludedDirs),
+  };
+}
+
+/**
+ * 收敛重建索引的审计报告。计数缺省 0：报告是展示用的审计数字，
+ * 形状漂移不能让 UI 显示 NaN / undefined。
+ */
+export function normalizeReindexReport(raw: unknown): ReindexReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { scanned: 0, indexed: 0, unchanged: 0, excluded: 0, removed: 0 };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    scanned: asNumber(source.scanned),
+    indexed: asNumber(source.indexed),
+    unchanged: asNumber(source.unchanged),
+    excluded: asNumber(source.excluded),
+    removed: asNumber(source.removed),
+  };
+}
+
+/**
+ * 收敛 IPC 边界上的一条搜索命中。
+ *
+ * 拿不到 `sessionId` 丢弃（点击后要用它定位会话，没有 id 的命中无法落地）；
+ * `snippet` 非字符串整条丢弃 —— 命中片段是这条结果的存在理由，宁可少显示
+ * 也不渲染 `undefined`。`seq` 缺省 0；`role` 只认 user / assistant，
+ * 未知值收窄为 user，绝不猜成 assistant 渲染。
+ */
+export function normalizeReplaySearchHit(raw: unknown): ReplaySearchHit | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const sessionId = typeof source.sessionId === 'string' ? source.sessionId.trim() : '';
+  if (sessionId.length === 0 || typeof source.snippet !== 'string') {
+    return null;
+  }
+
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    sessionId,
+    seq: asNumber(source.seq),
+    role: source.role === 'assistant' ? 'assistant' : 'user',
+    snippet: source.snippet,
+    firstUserPreview: asStringOrNull(source.firstUserPreview),
+  };
+}
+
+/** 读取回放搜索设置（默认关闭）。 */
+export async function getReplaySearchSettings(): Promise<IpcResult<SearchSettings>> {
+  const result = await invokeCommand<unknown>('replay_search_settings_get');
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeReplaySearchSettings(result.data) };
+}
+
+/** 更新回放搜索设置（关闭时后端清空全部索引行，隐私纪律：关掉就真的没了）。 */
+export async function setReplaySearchSettings(settings: SearchSettings): Promise<IpcResult<null>> {
+  return invokeCommand<null>('replay_search_settings_set', { settings });
+}
+
+/** 显式重建 / 增量更新索引（用户动作；未启用时后端报明确错误）。 */
+export async function reindexReplaySearch(): Promise<IpcResult<ReindexReport>> {
+  const result = await invokeCommand<unknown>('replay_search_reindex');
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeReindexReport(result.data) };
+}
+
+/**
+ * 搜索已索引的回放内容（纯读 SQLite）。
+ *
+ * 「索引未启用」与「查询 <3 字符」时后端 reject（错误串含「未启用」/「3 个字符」），
+ * 错误原样传出，由 UI 分类成行内提示而不是「搜索失败」错误卡。
+ */
+export async function searchReplay(query: string): Promise<IpcResult<ReplaySearchHit[]>> {
+  const result = await invokeCommand<unknown>('replay_search', { query });
+  if (!result.ok) {
+    return result;
+  }
+
+  const hits = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeReplaySearchHit)
+        .filter((hit): hit is ReplaySearchHit => hit !== null)
+    : [];
+
+  return { ok: true, data: hits };
 }
