@@ -19,6 +19,7 @@ pub mod plugins;
 pub mod process;
 pub mod project;
 pub mod pty;
+pub mod replay;
 pub mod runtime;
 pub mod session;
 pub mod sidecar;
