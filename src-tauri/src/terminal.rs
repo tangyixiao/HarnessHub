@@ -635,7 +635,9 @@ mod tests {
         // 只等终态就等于假设「终态可见 ⇒ 输出已全部送达」，那是拿测试的运气当契约。
         let expected = "codex-cli 0.152.1";
         let mut output = Vec::new();
-        for _ in 0..120 {
+        // 8 秒窗口：CI 负载下 REAP_INTERVAL + READER_DRAIN_GRACE 的串行耗时
+        // 可能超过 3 秒（真实抖动发生过），窗口只放宽等待，不改契约。
+        for _ in 0..320 {
             let recorded = events.lock().expect("events").clone();
             output = recorded
                 .iter()
