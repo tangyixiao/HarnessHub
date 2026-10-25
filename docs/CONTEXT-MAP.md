@@ -69,17 +69,27 @@ terminal 生命周期与 `finish_session` 触发补拍，IPC `session_git_snapsh
 spec `docs/specs/2026-10-23-git-snapshot-capture-design.md` 与
 `docs/specs/2026-10-24-git-session-snapshot-design.md`（A3 摘要见
 `docs/specs/2026-10-24-session-git-summary-design.md`）。不保证跨查询原子快照。
-Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
-Harnesses 三处永远同色，未知 id 中性灰）。
-插件宿主：`src-tauri/src/plugins/{manifest,rpc,adapters,host_api,registry,discovery,service,supervisor}.rs`
-—— manifest 解析校验与 capability 授权（唯一的「这方法能不能调」来源）、行分隔
-JSON-RPC codec、六类 Adapter trait（v0.1 只打通 usage 与 skill，其余 `Unsupported`
-返回 `-32001`）、受限 Host API（v0.1 只有 `host/log` 真实实现，7 个调用都写
-`permission_decisions` 观测行）、SQLite 持久化（迁移 0008/0009）、discovery 只碰文件系统、
-service 编排 refresh/import_usage、supervisor 负责 spawn/握手/超时/降级/懒重启；
-协议契约与 manifest schema 在 `plugins/sdk/`，两个示例在 `plugins/examples/`；
-IPC 命令 plugin_list / plugin_refresh；真机测试 `src-tauri/tests/real_plugins.rs`；
-spec `docs/specs/2026-10-16-plugins-host-design.md`，边界见 ADR-0018。
+只读回放与搜索（B6-B8）：`src-tauri/src/replay/{mod,claude,index}.rs` ——
+claude 转录解析（16 MiB 上限、未知类型计数、tool_use/tool_result 摘要 ≤2 KiB、
+sidechain 链分段）、FTS5 trigram 索引（migration 0011，指纹增量、默认关闭、
+关闭即清空、<3 字符查询报错）、路径白名单（IPC 只收 sessionId）；
+真机 smoke `src-tauri/tests/claude_replay_smoke.rs`；fixture `fixtures/claude/replay/`；
+前端 `/replay` 路由 `src/features/replay/ReplayPage.tsx`（搜索/索引设置/工具卡/
+子代理线程/恢复按钮）。恢复外部会话（B9）：`HarnessAdapter::build_resume_spec`
+
+- `TerminalRuntime::start_resume` + IPC `resume_terminal`；spec 三份
+  `docs/specs/2026-10-25-*.md`。仅 claude 开放（capability 门控）。
+  Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
+  Harnesses 三处永远同色，未知 id 中性灰）。
+  插件宿主：`src-tauri/src/plugins/{manifest,rpc,adapters,host_api,registry,discovery,service,supervisor}.rs`
+  —— manifest 解析校验与 capability 授权（唯一的「这方法能不能调」来源）、行分隔
+  JSON-RPC codec、六类 Adapter trait（v0.1 只打通 usage 与 skill，其余 `Unsupported`
+  返回 `-32001`）、受限 Host API（v0.1 只有 `host/log` 真实实现，7 个调用都写
+  `permission_decisions` 观测行）、SQLite 持久化（迁移 0008/0009）、discovery 只碰文件系统、
+  service 编排 refresh/import_usage、supervisor 负责 spawn/握手/超时/降级/懒重启；
+  协议契约与 manifest schema 在 `plugins/sdk/`，两个示例在 `plugins/examples/`；
+  IPC 命令 plugin_list / plugin_refresh；真机测试 `src-tauri/tests/real_plugins.rs`；
+  spec `docs/specs/2026-10-16-plugins-host-design.md`，边界见 ADR-0018。
 
 ```text
 src/features/*  →  src/components/*  →  src/lib/*
