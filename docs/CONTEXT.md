@@ -166,6 +166,6 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
     前端 Projects 卡片 Worktrees 区（创建 confirm 含磁盘警示、合并/删除 confirm
     含风险提示）。harness capability `worktree` 保持 false（Hub 自身能力 ≠
     harness 可在 worktree 中跑，后者需真机 E2E）。
-    尚未实现：CodeBuddy 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
+    尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
     capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
