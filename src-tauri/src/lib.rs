@@ -17,6 +17,7 @@ pub mod hhar;
 pub mod permissions;
 pub mod plugins;
 pub mod process;
+pub mod profile;
 pub mod project;
 pub mod pty;
 pub mod replay;
@@ -182,6 +183,7 @@ pub fn run() {
             commands::list_sessions,
             commands::plugin_list,
             commands::plugin_refresh,
+            commands::profile_discover,
             commands::refresh_harnesses,
             commands::refresh_usage,
             commands::register_project,
