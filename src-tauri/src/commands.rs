@@ -444,6 +444,30 @@ pub fn replay_search_settings_set(
     crate::replay::index::set_settings(database.connection_mut(), &settings)
 }
 
+/// Provider 配置现状的只读发现（ROADMAP E14）。
+///
+/// **纯读**：解析现有配置文件，不写任何外部文件（投影是 E15）。
+/// secret 值在 Rust 层 redact（`<redacted>` / `set`/`unset`），契约测试锁定。
+#[tauri::command]
+pub fn profile_discover(
+    _state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Option<crate::profile::ProfileSummary>> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    match harness_id.as_str() {
+        crate::harness::adapters::claude_code::CLAUDE_ID => crate::profile::claude::discover(&home),
+        "codex" => crate::profile::codex::discover(&home),
+        "gemini" => crate::profile::gemini::discover(&home),
+        other => Err(Error::InvalidInput(format!(
+            "{other} 的配置发现尚未实现（当前支持 claude/codex/gemini）"
+        ))),
+    }
+}
+
 /// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
 #[tauri::command]
 pub fn replay_search_reindex(
@@ -1071,6 +1095,43 @@ mod tests {
         assert!(json["branch"].is_null());
         assert!(json["head"].is_null());
         assert_eq!(json["detached"], true);
+    }
+
+    /// 跨 IPC 契约测试：ProfileSummary（E14）—— camelCase、嵌套字段 map、
+    /// secret redact 已在 Rust 层完成（此测试锁定序列化不再引入明文）。
+    #[test]
+    fn profile_summary_serializes_with_camel_case_and_redaction() {
+        let summary = crate::profile::ProfileSummary {
+            harness_id: "claude".to_string(),
+            source_path: "C:/Users/dev/.claude/settings.json".to_string(),
+            fields: [
+                (
+                    "env.ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (
+                    "env.ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.example.com".to_string(),
+                ),
+                ("env.ANTHROPIC_MODEL".to_string(), "test-model".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            parsed_at: "2026-10-25T10:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_value(&summary).expect("序列化");
+        assert_eq!(json["harnessId"], "claude");
+        assert_eq!(json["sourcePath"], "C:/Users/dev/.claude/settings.json");
+        assert_eq!(json["parsedAt"], "2026-10-25T10:00:00Z");
+        assert_eq!(json["fields"]["env.ANTHROPIC_AUTH_TOKEN"], "<redacted>");
+        assert_eq!(
+            json["fields"]["env.ANTHROPIC_BASE_URL"],
+            "https://api.example.com"
+        );
+        for snake in ["harness_id", "source_path", "parsed_at"] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键 {snake}");
+        }
     }
 
     /// 跨 IPC 契约测试：C11 的 status/merge DTO 键名形状。
