@@ -17,6 +17,14 @@
   tool_use（unsupported 计数）、sidechain 一对消息、未知类型行、坏行（非 JSON）、
   summary 行——用于锁定解析器的容错契约。
 
+## 真机只读 smoke（2026-10-25，tests/claude_replay_smoke.rs）
+
+- 发现 68 条转录；其中 61 条是「只有 permission-mode 一行」的空转录
+  （会话启动后没说话就退出，本机 E2E 测试的常态产物）——空转录是合法数据。
+- 深检一条非空转录：3 条消息正常解析；真机还出现了 fixture 未覆盖的
+  `ai-title` 与 `system` 行类型，解析器按未知类型计入 skipped 不崩——
+  容错契约经真机验证。后续若要解析这些类型，先在本文件登记取证。
+
 ## 夹具表
 
 | 文件          | 用途                                             |
