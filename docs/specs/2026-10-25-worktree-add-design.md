@@ -17,8 +17,8 @@
 ## Acceptance Criteria
 
 - [ ] `src-tauri/src/git/worktree.rs`：- `list(repo_root) -> Vec<WorktreeEntry>`（porcelain v1 解析：worktree/
-      HEAD/branch/detached/bare；解析失败如实报错不猜）；- `add(repo_root, path, branch) -> WorktreeEntry`（`git worktree add -b
-    <branch> <path>`；已存在的分支不带 -b；路径已占用/分支冲突 → 明确错误）；- 复用 `git::runner` 限时限量；add 允许更长超时（克隆检出耗时，10s）。
+      HEAD/branch/detached/bare；解析失败如实报错不猜）；- `add(repo_root, path, branch) -> WorktreeEntry`（`git worktree add -b <branch> <path>`；
+      已存在的分支不带 -b；路径已占用/分支冲突 → 明确错误）；- 复用 `git::runner` 限时限量；add 允许更长超时（克隆检出耗时，10s）。
 - [ ] IPC：`worktree_list(repo_root)`（纯读）、`worktree_add(repo_root, path, branch)`（显式写，前端二次确认文案）。
       repo_root 必须命中已登记项目（防任意路径写）。
 - [ ] `create_session` / `start_terminal` 已有 cwd 关联；新增：Terminal 页启动
