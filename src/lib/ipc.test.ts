@@ -24,8 +24,11 @@ import {
   listSessions,
   listPlugins,
   listWorktrees,
+  getWorktreeStatus,
+  mergeWorktree,
   normalizeActivityTimeline,
   normalizeHarnessSummary,
+  normalizeMergeOutcome,
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProjectRecord,
@@ -43,6 +46,7 @@ import {
   normalizeUsageSource,
   normalizeUsageSummary,
   normalizeWorktreeEntry,
+  normalizeWorktreeStatusCounts,
   pluginRefresh,
   readReplaySession,
   reindexReplaySearch,
@@ -50,6 +54,7 @@ import {
   refreshUsage,
   registerProject,
   removeProject,
+  removeWorktree,
   resumeTerminal,
   searchReplay,
   setReplaySearchSettings,
@@ -789,6 +794,197 @@ describe('Worktree IPC（ROADMAP C10）', () => {
       error: NOT_IN_TAURI,
     });
     await expect(addWorktree('D:/work/demo', 'D:/wt/x', 'x', true)).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});
+
+/**
+ * IPC 契约 `worktree_status` 的返回项（serde camelCase），形状手工复刻自
+ * Rust `WorktreeStatusCounts`（src-tauri/src/git/worktree.rs，C11）：
+ * 四类非负计数，干净树全部为 0。
+ */
+const WORKTREE_STATUS_PAYLOAD = {
+  stagedFiles: 2,
+  unstagedFiles: 1,
+  untrackedFiles: 3,
+  conflictedFiles: 0,
+};
+
+describe('normalizeWorktreeStatusCounts（ROADMAP C11）', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeWorktreeStatusCounts(WORKTREE_STATUS_PAYLOAD)).toEqual(WORKTREE_STATUS_PAYLOAD);
+  });
+
+  it('计数缺省 0：徽标的原料形状漂移不能渲染 NaN / undefined', () => {
+    expect(normalizeWorktreeStatusCounts({})).toEqual({
+      stagedFiles: 0,
+      unstagedFiles: 0,
+      untrackedFiles: 0,
+      conflictedFiles: 0,
+    });
+    expect(normalizeWorktreeStatusCounts(null)).toEqual({
+      stagedFiles: 0,
+      unstagedFiles: 0,
+      untrackedFiles: 0,
+      conflictedFiles: 0,
+    });
+    expect(normalizeWorktreeStatusCounts('oops')).toEqual({
+      stagedFiles: 0,
+      unstagedFiles: 0,
+      untrackedFiles: 0,
+      conflictedFiles: 0,
+    });
+  });
+
+  it('非数字计数收敛为 0，不把字符串渲染出来', () => {
+    const counts = normalizeWorktreeStatusCounts({
+      ...WORKTREE_STATUS_PAYLOAD,
+      stagedFiles: '2',
+      untrackedFiles: null,
+    });
+
+    expect(counts.stagedFiles).toBe(0);
+    expect(counts.untrackedFiles).toBe(0);
+    expect(counts.unstagedFiles).toBe(1);
+  });
+});
+
+/**
+ * IPC 契约 `worktree_merge` 的返回项（serde camelCase），形状手工复刻自
+ * Rust `MergeOutcome`（src-tauri/src/git/worktree.rs，C11）：两个 40 位 hex 或
+ * null（unborn HEAD），没有别的形状。
+ */
+const MERGE_OUTCOME_PAYLOAD = {
+  previousHead: '1234567890abcdef1234567890abcdef12345678',
+  newHead: 'fedcba9876543210fedcba9876543210fedcba98',
+};
+
+describe('normalizeMergeOutcome（ROADMAP C11）', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeMergeOutcome(MERGE_OUTCOME_PAYLOAD)).toEqual(MERGE_OUTCOME_PAYLOAD);
+  });
+
+  it('head 只认字符串或 null，unborn / 缺字段不会被当成空字符串', () => {
+    expect(normalizeMergeOutcome({ ...MERGE_OUTCOME_PAYLOAD, newHead: null }).newHead).toBeNull();
+    expect(normalizeMergeOutcome({ ...MERGE_OUTCOME_PAYLOAD, previousHead: 42 }).previousHead).toBe(
+      null,
+    );
+    expect(normalizeMergeOutcome({ newHead: 'abc' })).toEqual({
+      previousHead: null,
+      newHead: 'abc',
+    });
+    expect(normalizeMergeOutcome('oops')).toEqual({ previousHead: null, newHead: null });
+  });
+});
+
+describe('worktree 状态/合并/删除 IPC（ROADMAP C11）', () => {
+  it('getWorktreeStatus 使用 worktree_status 并传 repoRoot + worktreePath，返回归一化计数', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => WORKTREE_STATUS_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await getWorktreeStatus('D:/work/demo', 'D:/wt/feature');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('worktree_status');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      repoRoot: 'D:/work/demo',
+      worktreePath: 'D:/wt/feature',
+    });
+    expect(result).toEqual({ ok: true, data: WORKTREE_STATUS_PAYLOAD });
+  });
+
+  it('getWorktreeStatus 把后端错误原样传出（如非本仓库的 worktree）', async () => {
+    stubTauri(async () => {
+      throw new Error('不是本仓库的 worktree：D:/elsewhere');
+    });
+
+    await expect(getWorktreeStatus('D:/work/demo', 'D:/elsewhere')).resolves.toEqual({
+      ok: false,
+      error: '不是本仓库的 worktree：D:/elsewhere',
+    });
+  });
+
+  it('removeWorktree 使用 worktree_remove 并传 repoRoot + worktreePath', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => null);
+    stubTauri(invokeSpy);
+
+    const result = await removeWorktree('D:/work/demo', 'D:/wt/feature');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('worktree_remove');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      repoRoot: 'D:/work/demo',
+      worktreePath: 'D:/wt/feature',
+    });
+    expect(result).toEqual({ ok: true, data: null });
+  });
+
+  it('removeWorktree 把脏树 / 主树的 reject 原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error(
+        'worktree 有未提交修改，拒绝删除（暂存 2 / 未暂存 1 / 未跟踪 3 / 冲突 0）——请先处理或手动清理',
+      );
+    });
+
+    await expect(removeWorktree('D:/work/demo', 'D:/wt/feature')).resolves.toEqual({
+      ok: false,
+      error:
+        'worktree 有未提交修改，拒绝删除（暂存 2 / 未暂存 1 / 未跟踪 3 / 冲突 0）——请先处理或手动清理',
+    });
+
+    stubTauri(async () => {
+      throw new Error('主工作树 / bare 仓库不能通过 worktree 删除');
+    });
+
+    await expect(removeWorktree('D:/work/demo', 'D:/work/demo')).resolves.toEqual({
+      ok: false,
+      error: '主工作树 / bare 仓库不能通过 worktree 删除',
+    });
+  });
+
+  it('mergeWorktree 使用 worktree_merge 并传 repoRoot + branch，归一化合并结果', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MERGE_OUTCOME_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await mergeWorktree('D:/work/demo', 'feature');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('worktree_merge');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ repoRoot: 'D:/work/demo', branch: 'feature' });
+    expect(result).toEqual({ ok: true, data: MERGE_OUTCOME_PAYLOAD });
+  });
+
+  it('mergeWorktree 把主树脏 / 非 ff 的 reject 原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error('主工作树有未提交修改，拒绝合并（暂存 1 / 未暂存 0 / 未跟踪 0）');
+    });
+
+    await expect(mergeWorktree('D:/work/demo', 'feature')).resolves.toEqual({
+      ok: false,
+      error: '主工作树有未提交修改，拒绝合并（暂存 1 / 未暂存 0 / 未跟踪 0）',
+    });
+
+    stubTauri(async () => {
+      throw new Error(
+        'error: merging is not possible because you have local changes merge --ff-only',
+      );
+    });
+
+    await expect(mergeWorktree('D:/work/demo', 'feature')).resolves.toEqual({
+      ok: false,
+      error: 'error: merging is not possible because you have local changes merge --ff-only',
+    });
+  });
+
+  it('worktree 状态/合并/删除命令不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(getWorktreeStatus('D:/work/demo', 'D:/wt/feature')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(removeWorktree('D:/work/demo', 'D:/wt/feature')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(mergeWorktree('D:/work/demo', 'feature')).resolves.toEqual({
       ok: false,
       error: NOT_IN_TAURI,
     });

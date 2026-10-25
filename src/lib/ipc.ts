@@ -667,6 +667,106 @@ export async function addWorktree(
 }
 
 /* ------------------------------------------------------------------ *
+ * Worktree 状态 / 合并 / 删除（ROADMAP C11）
+ *
+ * status 纯读（后端有界跑 `git status --porcelain`）；remove / merge 是
+ * **显式用户动作**：前端必须 window.confirm（文案写明「删除目录」/「快进合并」），
+ * 失败原样传出交由 UI 在行内展示。repoRoot 校验同 C10。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一条 worktree 的未提交修改计数（与 Rust `WorktreeStatusCounts`，serde camelCase 同形）。
+ *
+ * 干净树四类计数全部为 0；徽标的「修改 N 项」取四数之和。
+ */
+export type WorktreeStatusCounts = {
+  stagedFiles: number;
+  unstagedFiles: number;
+  untrackedFiles: number;
+  conflictedFiles: number;
+};
+
+/**
+ * 收敛 `worktree_status` 的返回。
+ *
+ * 计数缺省 0（与 `normalizeSessionGitSnapshot` 同一纪律）：形状漂移不能让
+ * 徽标渲染出 NaN / undefined。
+ */
+export function normalizeWorktreeStatusCounts(raw: unknown): WorktreeStatusCounts {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    stagedFiles: asNumber(source.stagedFiles),
+    unstagedFiles: asNumber(source.unstagedFiles),
+    untrackedFiles: asNumber(source.untrackedFiles),
+    conflictedFiles: asNumber(source.conflictedFiles),
+  };
+}
+
+/** 某条 worktree 的未提交修改计数。**纯读**：不改仓库、不写库。 */
+export async function getWorktreeStatus(
+  repoRoot: string,
+  worktreePath: string,
+): Promise<IpcResult<WorktreeStatusCounts>> {
+  const result = await invokeCommand<unknown>('worktree_status', { repoRoot, worktreePath });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeWorktreeStatusCounts(result.data) };
+}
+
+/** 快进合并结果（与 Rust `MergeOutcome`，serde camelCase 同形）。 */
+export type MergeOutcome = {
+  /** 合并前主树 HEAD（回溯用）；主树 unborn HEAD 时为 null。 */
+  previousHead: string | null;
+  /** 合并后主树 HEAD。 */
+  newHead: string | null;
+};
+
+/**
+ * 收敛 `worktree_merge` 的返回。
+ *
+ * head 只认字符串或 null（与 `normalizeWorktreeEntry` 的 head 同一纪律）：
+ * unborn HEAD 的 null 绝不能被折算成空字符串或编造的 hash。
+ */
+export function normalizeMergeOutcome(raw: unknown): MergeOutcome {
+  const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    previousHead: asStringOrNull(source.previousHead),
+    newHead: asStringOrNull(source.newHead),
+  };
+}
+
+/**
+ * 删除一条**干净**的链接 worktree（`git worktree remove`）。
+ *
+ * 错误语义（后端契约冻结，原样传出）：脏树（错误含「未提交修改」并列出计数）、
+ * 主树 / bare（「主工作树」）、不是本仓库的 worktree，都 reject。
+ */
+export function removeWorktree(repoRoot: string, worktreePath: string): Promise<IpcResult<null>> {
+  return invokeCommand<null>('worktree_remove', { repoRoot, worktreePath });
+}
+
+/**
+ * 把 worktree 的检出分支**快进**合并到主工作树（`git merge --ff-only`）。
+ *
+ * 错误语义（后端契约冻结，原样传出）：主树脏（「主工作树有未提交修改」）、
+ * 非 fast-forward（错误含「merge」）、分支不是任何 worktree 的检出分支，都 reject；
+ * 绝不做 rebase / force。
+ */
+export async function mergeWorktree(
+  repoRoot: string,
+  branch: string,
+): Promise<IpcResult<MergeOutcome>> {
+  const result = await invokeCommand<unknown>('worktree_merge', { repoRoot, branch });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeMergeOutcome(result.data) };
+}
+
+/* ------------------------------------------------------------------ *
  * Harness 清单同步
  * ------------------------------------------------------------------ */
 
