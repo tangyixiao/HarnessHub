@@ -69,6 +69,10 @@ terminal 生命周期与 `finish_session` 触发补拍，IPC `session_git_snapsh
 spec `docs/specs/2026-10-23-git-snapshot-capture-design.md` 与
 `docs/specs/2026-10-24-git-session-snapshot-design.md`（A3 摘要见
 `docs/specs/2026-10-24-session-git-summary-design.md`）。不保证跨查询原子快照。
+Worktree 编排（C10-C11）：`src-tauri/src/git/worktree.rs`（list/add/status_counts/remove/merge_ff_only，
+路径安全红线见 `docs/specs/2026-10-25-worktree-add-design.md` 与
+`docs/specs/2026-10-25-worktree-merge-delete-design.md`）；IPC 五命令 +
+`start_terminal_in_worktree`；前端 Projects 页 Worktrees 区。
 只读回放与搜索（B6-B8）：`src-tauri/src/replay/{mod,claude,index}.rs` ——
 claude 转录解析（16 MiB 上限、未知类型计数、tool_use/tool_result 摘要 ≤2 KiB、
 sidechain 链分段）、FTS5 trigram 索引（migration 0011，指纹增量、默认关闭、

@@ -157,6 +157,15 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
     为 true（参数拼接 fixture 锁定；完整续聊验收随交互场景，readiness 维度）。
     真机证据：`src-tauri/tests/claude_replay_smoke.rs`（68 会话发现、空转录属合法
     数据、带工具会话深检、路径白名单）。
+    Worktree 编排（ROADMAP C10-C11，v0.3.0）：`src-tauri/src/git/worktree.rs` ——
+    list（porcelain v1 有界解析）/ add（路径安全红线：目标不允许位于 repo_root 内部，
+    absolute + canonicalize 双层检查）/ status_counts（未提交修改计数）/ remove
+    （**只删干净树**：脏树列计数拒绝、主树/bare 拒绝）/ merge_ff_only（主树脏拒绝、
+    非快进拒绝——绝不 rebase/force）。IPC `worktree_list/add/status/remove/merge`
+    （repo_root 必须命中已登记项目）；`start_terminal_in_worktree` 落 worktree_path。
+    前端 Projects 卡片 Worktrees 区（创建 confirm 含磁盘警示、合并/删除 confirm
+    含风险提示）。harness capability `worktree` 保持 false（Hub 自身能力 ≠
+    harness 可在 worktree 中跑，后者需真机 E2E）。
     尚未实现：CodeBuddy 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
     capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
