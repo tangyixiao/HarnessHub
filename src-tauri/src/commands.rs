@@ -907,7 +907,7 @@ mod tests {
             excluded: 1,
             removed: 0,
         };
-        let json = serde_json::to_value(&report).unwrap();
+        let json = serde_json::to_value(report).unwrap();
         assert_eq!(json["scanned"], 68);
         assert_eq!(json["indexed"], 7);
         assert_eq!(json["unchanged"], 60);

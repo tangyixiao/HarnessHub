@@ -168,10 +168,12 @@ pub fn read_session(path: &Path) -> Result<ReplaySession> {
         let started_at = session.messages[start].timestamp.clone();
         let mut last_at = started_at.clone();
         let mut cursor = start;
-        loop {
-            let Some(&child) = parent_index_of.iter().find(|(_, parent)| **parent == cursor).map(|(child, _)| child) else {
-                break;
-            };
+        // 沿 parent 链向下走：child → parent(=cursor) 的反向匹配。
+        while let Some(&child) = parent_index_of
+            .iter()
+            .find(|(_, parent)| **parent == cursor)
+            .map(|(child, _)| child)
+        {
             message_seqs.push(child as u64);
             if let Some(timestamp) = &session.messages[child].timestamp {
                 last_at = Some(timestamp.clone());
@@ -260,12 +262,13 @@ fn parse_message(
                         let Some(tool_use_id) =
                             part.get("tool_use_id").and_then(serde_json::Value::as_str)
                         else {
-                            *unsupported.entry("tool_result<no-id>".to_string()).or_default() += 1;
+                            *unsupported
+                                .entry("tool_result<no-id>".to_string())
+                                .or_default() += 1;
                             continue;
                         };
-                        let (result_json, truncated) = bounded_json(
-                            part.get("content").unwrap_or(&serde_json::Value::Null),
-                        );
+                        let (result_json, truncated) =
+                            bounded_json(part.get("content").unwrap_or(&serde_json::Value::Null));
                         results_by_id.insert(tool_use_id.to_string(), (result_json, truncated));
                     }
                     other => {
@@ -467,10 +470,17 @@ mod tests {
         let call = &third.tool_calls[0];
         assert_eq!(call.name, "Grep");
         assert_eq!(call.id, "88888888-8888-4888-8888-888888888888");
-        assert!(call.input_json.contains("TODO"), "实际：{}", call.input_json);
+        assert!(
+            call.input_json.contains("TODO"),
+            "实际：{}",
+            call.input_json
+        );
         // tool_result 行（user content 数组里）按 id 回填到调用上。
         assert!(call.result_json.is_some(), "tool_result 必须被回填");
-        assert!(call.result_json.as_deref().is_some_and(|r| r.contains("src/a.rs")));
+        assert!(call
+            .result_json
+            .as_deref()
+            .is_some_and(|r| r.contains("src/a.rs")));
         assert!(!call.result_truncated);
 
         // sidechain 一对消息带标记。
@@ -489,7 +499,10 @@ mod tests {
 
         // 第二轮问答（主线）：tool_result 行（seq 5）是一条 user 消息但无 text。
         assert_eq!(session.messages[5].role, ReplayRole::User);
-        assert!(session.messages[5].text_parts.is_empty(), "tool_result 行无正文");
+        assert!(
+            session.messages[5].text_parts.is_empty(),
+            "tool_result 行无正文"
+        );
         assert_eq!(session.messages[6].role, ReplayRole::User);
         assert_eq!(
             session.messages[6].text_parts,
@@ -505,7 +518,10 @@ mod tests {
         assert_eq!(session.subagent_threads.len(), 1);
         let thread = &session.subagent_threads[0];
         assert_eq!(thread.message_seqs, vec![3, 4]);
-        assert_eq!(thread.started_at.as_deref(), Some("2026-10-25T10:00:08.000Z"));
+        assert_eq!(
+            thread.started_at.as_deref(),
+            Some("2026-10-25T10:00:08.000Z")
+        );
         assert_eq!(thread.last_at.as_deref(), Some("2026-10-25T10:00:09.000Z"));
 
         // 已知非消息类型与未知类型、坏行都如实计数。

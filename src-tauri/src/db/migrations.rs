@@ -780,7 +780,10 @@ mod tests {
         let applied = apply_pending(&mut conn).expect("升级到最新");
         assert_eq!(
             applied,
-            vec!["0010_git_snapshots".to_string(), "0011_replay_search".to_string()]
+            vec![
+                "0010_git_snapshots".to_string(),
+                "0011_replay_search".to_string()
+            ]
         );
         assert_eq!(current_version(&conn).expect("版本"), 11);
 

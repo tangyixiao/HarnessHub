@@ -21,20 +21,12 @@ use super::claude::{self, harness_id};
 use crate::error::{Error, Result};
 
 /// 搜索设置（单行表的应用层形状）。`excluded_dirs` 是 project_dir 名单。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Default = 隐私纪律的默认值：关闭 + 不排除任何目录。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchSettings {
     pub enabled: bool,
     pub excluded_dirs: Vec<String>,
-}
-
-impl Default for SearchSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            excluded_dirs: Vec::new(),
-        }
-    }
 }
 
 /// 一次 reindex 的结果审计。
@@ -111,9 +103,8 @@ pub fn set_settings(conn: &mut Connection, new_settings: &SearchSettings) -> Res
             statement.execute(params![dir, harness_id()])?;
         }
         drop(statement);
-        let mut statement = transaction.prepare(
-            "DELETE FROM replay_index_state WHERE project_dir = ?1 AND harness_id = ?2",
-        )?;
+        let mut statement = transaction
+            .prepare("DELETE FROM replay_index_state WHERE project_dir = ?1 AND harness_id = ?2")?;
         for dir in &new_settings.excluded_dirs {
             statement.execute(params![dir, harness_id()])?;
         }
@@ -147,9 +138,8 @@ pub fn reindex(conn: &mut Connection, roots: &[PathBuf]) -> Result<ReindexReport
              message_count, indexed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
     )?;
-    let mut clear_messages = transaction.prepare(
-        "DELETE FROM replay_messages WHERE harness_id = ?1 AND session_id = ?2",
-    )?;
+    let mut clear_messages = transaction
+        .prepare("DELETE FROM replay_messages WHERE harness_id = ?1 AND session_id = ?2")?;
     let mut insert_message = transaction.prepare(
         "INSERT INTO replay_messages (harness_id, session_id, seq, role, text_content)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -223,9 +213,7 @@ pub fn reindex(conn: &mut Connection, roots: &[PathBuf]) -> Result<ReindexReport
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        rows.flatten()
-            .filter(|key| !seen.contains(key))
-            .collect()
+        rows.flatten().filter(|key| !seen.contains(key)).collect()
     };
     for (harness_id, session_id) in &stale {
         transaction.execute(
@@ -334,8 +322,11 @@ mod tests {
                     "timestamp": "2026-10-25T10:00:00.000Z",
                     "message": {"role": "user", "content": content},
                 });
-                std::fs::write(project.join(format!("{session}.jsonl")), format!("{line}\n"))
-                    .unwrap();
+                std::fs::write(
+                    project.join(format!("{session}.jsonl")),
+                    format!("{line}\n"),
+                )
+                .unwrap();
             }
             Self(root)
         }
@@ -481,8 +472,12 @@ mod tests {
         assert_eq!(state_rows, 1, "排除目录不得留下指纹");
 
         // 排除目录的内容不可搜。
-        assert!(search(conn.connection(), "缓存策略的部署").unwrap().is_empty());
-        assert!(!search(conn.connection(), "数据库模块的迁移").unwrap().is_empty());
+        assert!(search(conn.connection(), "缓存策略的部署")
+            .unwrap()
+            .is_empty());
+        assert!(!search(conn.connection(), "数据库模块的迁移")
+            .unwrap()
+            .is_empty());
     }
 
     /// 源文件消失后 reindex 清理旧索引。
@@ -501,12 +496,15 @@ mod tests {
         reindex(conn.connection_mut(), &tree.roots()).unwrap();
 
         std::fs::remove_file(
-            tree.0.join("projects/D--work-alpha/aaaaaaaa-0000-4000-8000-000000000101.jsonl"),
+            tree.0
+                .join("projects/D--work-alpha/aaaaaaaa-0000-4000-8000-000000000101.jsonl"),
         )
         .unwrap();
         let report = reindex(conn.connection_mut(), &tree.roots()).unwrap();
         assert_eq!(report.removed, 1, "实际：{report:?}");
-        assert!(search(conn.connection(), "数据库模块的迁移").unwrap().is_empty());
+        assert!(search(conn.connection(), "数据库模块的迁移")
+            .unwrap()
+            .is_empty());
     }
 
     /// **冷启动真路径**（AGENTS.md）：空库 → 生产代码启用 → reindex → 搜索命中。
