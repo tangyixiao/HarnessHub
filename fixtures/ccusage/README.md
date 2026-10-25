@@ -259,14 +259,15 @@ npx --yes ccusage@20.0.24 gemini session --json
 
 ## 本目录的夹具
 
-| 文件                     | 用途                                                                                                                              |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `session.json`           | 主路径：`session` + `totals`，4 个 agent、含多模型行、reasoning tokens、`missingPricing`                                          |
-| `sections.json`          | 单次 `--sections daily --by-agent` 形状：`session` + `daily` + `totals`（子集自洽）                                               |
-| `noisy-cost.json`        | 决策六的金额边界 fixture（浮点噪声、`e` 记法、half-even、`missingPricing`）                                                       |
-| `empty.json`             | 合法但零 session → 必须是成功的空导入，不是错误                                                                                   |
-| `unsupported-shape.json` | 合法 JSON 但只有 `sessionId`、没有 `period`/`modelBreakdowns` → 必须报 `unsupported_shape`                                        |
-| `gemini-session.json`    | **synthetic**（A2，待真机数据回填）：gemini 行形状 —— 裸 UUID period、只有 lastActivity 的 metadata、totalTokens 含 thoughts 残差 |
+| 文件                     | 用途                                                                                                                               |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `session.json`           | 主路径：`session` + `totals`，4 个 agent、含多模型行、reasoning tokens、`missingPricing`                                           |
+| `sections.json`          | 单次 `--sections daily --by-agent` 形状：`session` + `daily` + `totals`（子集自洽）                                                |
+| `noisy-cost.json`        | 决策六的金额边界 fixture（浮点噪声、`e` 记法、half-even、`missingPricing`）                                                        |
+| `empty.json`             | 合法但零 session → 必须是成功的空导入，不是错误                                                                                    |
+| `unsupported-shape.json` | 合法 JSON 但只有 `sessionId`、没有 `period`/`modelBreakdowns` → 必须报 `unsupported_shape`                                         |
+| `gemini-session.json`    | **synthetic**（A2，待真机数据回填）：gemini 行形状 —— 裸 UUID period、只有 lastActivity 的 metadata、totalTokens 含 thoughts 残差  |
+| `multi-agent.json`       | **synthetic**（D13）：zcode / amp / goose 三个 Hub 未注册 agent 的直通契约 —— 任何 ccusage 报出的 agent 原样落库，不因不认识丢数据 |
 
 截断 / 语法错误的 JSON 不放夹具文件（`prettier --check .` 会覆盖 `fixtures/**/*.json`，
 放进来的话整个仓库的 format gate 会被一个故意损坏的文件卡住），改为在测试里内联字符串。
