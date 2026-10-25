@@ -688,6 +688,7 @@ mod tests {
     use super::*;
     use crate::usage::importer::Reconciliation;
     use crate::usage::{ImportStatus, RunnerKind, UsageImport};
+    use std::collections::BTreeMap;
     /// 跨 IPC 契约测试：`refresh_usage` 的返回形状。
     ///
     /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageRefreshReport` 依赖这些键，
@@ -795,6 +796,7 @@ mod tests {
     ///
     /// 结构体 camelCase；role 枚举值 snake_case；skipped/unsupported 计数是
     /// 字符串→数字的对象。前端 normalizeReplay*（src/lib/ipc.ts）按这些键取值。
+    /// B8 起含 toolCalls / subagentThreads 嵌套形状。
     #[test]
     fn replay_dtos_serialize_with_camel_case_keys() {
         let message = crate::replay::ReplayMessage {
@@ -805,7 +807,15 @@ mod tests {
             text_parts: vec!["回答".to_string()],
             thinking_parts: vec!["思考".to_string()],
             model: Some("claude-sonnet-4-6".to_string()),
-            unsupported_content_kinds: [("tool_use".to_string(), 2u64)].into_iter().collect(),
+            tool_calls: vec![crate::replay::ReplayToolCall {
+                id: "call_1".to_string(),
+                name: "Grep".to_string(),
+                input_json: "{\"pattern\":\"TODO\"}".to_string(),
+                result_json: Some("src/a.rs".to_string()),
+                result_truncated: false,
+                input_truncated: false,
+            }],
+            unsupported_content_kinds: BTreeMap::new(),
         };
         let json = serde_json::to_value(&message).expect("序列化消息");
         assert_eq!(json["seq"], 3);
@@ -813,11 +823,17 @@ mod tests {
         assert_eq!(json["sidechain"], true);
         assert_eq!(json["textParts"], serde_json::json!(["回答"]));
         assert_eq!(json["thinkingParts"], serde_json::json!(["思考"]));
-        assert_eq!(
-            json["unsupportedContentKinds"],
-            serde_json::json!({"tool_use": 2})
-        );
-        for snake in ["text_parts", "thinking_parts", "unsupported_content_kinds"] {
+        assert_eq!(json["toolCalls"][0]["id"], "call_1");
+        assert_eq!(json["toolCalls"][0]["name"], "Grep");
+        assert_eq!(json["toolCalls"][0]["inputJson"], "{\"pattern\":\"TODO\"}");
+        assert_eq!(json["toolCalls"][0]["resultJson"], "src/a.rs");
+        assert_eq!(json["toolCalls"][0]["inputTruncated"], false);
+        for snake in [
+            "text_parts",
+            "thinking_parts",
+            "unsupported_content_kinds",
+            "tool_calls",
+        ] {
             assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
         }
 
@@ -826,6 +842,11 @@ mod tests {
             session_id: "s1".to_string(),
             source_path: "D:/x.jsonl".to_string(),
             messages: vec![message],
+            subagent_threads: vec![crate::replay::SubagentThread {
+                message_seqs: vec![3, 4],
+                started_at: Some("2026-10-25T10:00:05.000Z".to_string()),
+                last_at: Some("2026-10-25T10:00:09.000Z".to_string()),
+            }],
             skipped_kind_counts: [("summary".to_string(), 1u64)].into_iter().collect(),
             malformed_lines: 1,
         };
@@ -834,6 +855,15 @@ mod tests {
         assert_eq!(json["skippedKindCounts"], serde_json::json!({"summary": 1}));
         assert_eq!(json["malformedLines"], 1);
         assert_eq!(json["messages"][0]["role"], "assistant");
+        assert_eq!(
+            json["subagentThreads"][0]["messageSeqs"],
+            serde_json::json!([3, 4])
+        );
+        assert_eq!(
+            json["subagentThreads"][0]["startedAt"],
+            "2026-10-25T10:00:05.000Z"
+        );
+        assert!(json.get("subagent_threads").is_none());
 
         let summary = crate::replay::ReplaySessionSummary {
             harness_id: "claude".to_string(),
