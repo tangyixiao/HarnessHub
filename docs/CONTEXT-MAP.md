@@ -43,6 +43,10 @@ Gemini 检测入口：`src-tauri/src/harness/adapters/gemini_cli.rs`；组合根
 `real_gemini_terminal.rs`、`gemini_lifecycle.rs`。Terminal 按 capability 过滤检测阶段适配器。
 CodeBuddy 检测入口：`src-tauri/src/harness/adapters/codebuddy.rs`（home 直发现，
 无 env 覆盖）；fixture 在 `fixtures/codebuddy/`，真机测试 `codebuddy_detection.rs`。
+Copilot CLI 检测入口：`src-tauri/src/harness/adapters/copilot.rs`（PATH `copilot` +
+`~/.copilot`，仅检测，能力全 false）；fixture `fixtures/copilot/`，真机测试
+`copilot_detection.rs`；spec `docs/specs/2026-10-25-copilot-detection-design.md`
+（真机版本输出 `1.0.91.`，尾点由共享 `parse_version` 剥离）。
 OpenCode 检测入口：`src-tauri/src/harness/adapters/opencode.rs`（按 XDG 规范解析
 data / config / state / cache 四个根，组合根 `lib.rs` 读一次环境注入
 `OpenCodeXdgRoots`，适配器本身不读环境）；fixture 在 `fixtures/opencode/`，
