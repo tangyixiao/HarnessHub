@@ -141,5 +141,22 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   unattributed_tokens、不伪标 reasoning；本机暂无 gemini 使用数据，README 已如实
   标注待真机回填）。注意 ccusage 的 focused 子命令（如 `gemini session`）是独立
   schema，不进导入层，导入只用 unified session 报告。
-  尚未实现：CodeBuddy 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非 capability）。
+  Session Observability（ROADMAP B6-B9，v0.2.0）已完成，仅对 capability
+  `replay`/`resume` 为 true 的 harness 开放（当前只有 Claude Code；其余 harness
+  UI 不渲染入口，适配器走 trait 默认拒绝）：
+  - 只读回放：`src-tauri/src/replay/` 解析 `~/.claude/projects/**/*.jsonl`
+    （16 MiB 上限；未知类型/坏行计数不崩；sidechain/tool_use/tool_result 已展开，
+    tool JSON 摘要 ≤2 KiB 截断标注）；IPC **不接受文件系统路径**（sessionId 由
+    后端白名单解析）。**不落库**：回放按需现读。
+  - 全文搜索：migration 0011 `replay_messages`（FTS5 **trigram**，中英混合子串
+    可搜，<3 字符查询显式报错）+ 指纹增量索引 + 设置单行表（**默认关闭**；
+    关闭即清空；排除目录连指纹都不写）。索引/搜索只写读自己的表，源转录只读。
+  - 恢复外部会话：`HarnessAdapter::build_resume_spec`（trait 默认拒绝；claude 覆写
+    `claude --resume <id>`）+ `TerminalRuntime::start_resume`（与 start 同一条
+    生命周期链）；同一外部会话幂等去重（唯一索引）。claude `resume` capability
+    为 true（参数拼接 fixture 锁定；完整续聊验收随交互场景，readiness 维度）。
+    真机证据：`src-tauri/tests/claude_replay_smoke.rs`（68 会话发现、空转录属合法
+    数据、带工具会话深检、路径白名单）。
+    尚未实现：CodeBuddy 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
+    capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
