@@ -467,6 +467,7 @@ mod tests {
     // 见 fixtures/ccusage/README.md「第三轮取证」），待真机数据回填。
     const GEMINI_SESSION_FIXTURE: &str =
         include_str!("../../../fixtures/ccusage/gemini-session.json");
+    const MULTI_AGENT_FIXTURE: &str = include_str!("../../../fixtures/ccusage/multi-agent.json");
 
     fn normalize(raw: &str) -> NormalizedUsage {
         let report = parse_report(raw).expect("解析");
@@ -593,6 +594,30 @@ mod tests {
             "多模型行的 session 级推理 token 不得分摊到各模型"
         );
         assert_eq!(event(&usage, "gpt-5.6-terra").reasoning_tokens, None);
+    }
+
+    /// D13：**多 agent 直通契约**——ccusage 报出的任何 agent（含 Hub 未注册
+    /// harness 的 zcode / amp / goose 等）原样落库，不因「不认识」丢数据。
+    /// 这是 D13「ccusage 已支持源的 usage-only 接入」的架构基础：
+    /// 不需要为每个新源加适配器，数据自动进 Dashboard 的动态 by-harness 桶。
+    #[test]
+    fn unregistered_agents_pass_through_untouched() {
+        let usage = normalize(MULTI_AGENT_FIXTURE);
+
+        assert_eq!(usage.sessions_seen, 3);
+        let harnesses: std::collections::BTreeSet<&str> = usage
+            .events
+            .iter()
+            .map(|event| event.harness.as_str())
+            .collect();
+        assert_eq!(
+            harnesses,
+            ["amp", "goose", "zcode"].into_iter().collect(),
+            "三个 agent 都要按原样落库"
+        );
+        // token 恒等式：events 之和 == totals。
+        let total: u64 = usage.events.iter().map(|event| event.total_tokens).sum();
+        assert_eq!(total, 2785, "三条行各 1 个 breakdown");
     }
 
     /// gemini 行（A2）：解析层没有 harness 白名单，gemini 必须按原样落库。
