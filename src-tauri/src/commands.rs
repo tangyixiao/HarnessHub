@@ -255,6 +255,67 @@ pub fn session_git_summary(
     }))
 }
 
+/* ------------------------------------------------------------------ *
+ * 只读会话回放（ROADMAP B6）
+ *
+ * 能力门控：只对 `replay` capability 为 true 的 Harness 开放（当前只有
+ * Claude Code）。**IPC 不接受文件系统路径**：按 session_id 由后端从自己的
+ * 发现结果解析（路径白名单，防任意文件读取）。
+ * ------------------------------------------------------------------ */
+
+/// 回放数据根：来自 harness 检测的 data_paths（只读发现，ADR-0003）。
+fn replay_roots(state: &State<'_, AppState>, harness_id: &str) -> Result<Vec<std::path::PathBuf>> {
+    let summary = state
+        .harnesses
+        .summaries(runtime::local::LOCAL_TARGET_ID)
+        .into_iter()
+        .find(|summary| summary.id == harness_id)
+        .ok_or_else(|| Error::InvalidInput(format!("未注册的 Harness：{harness_id}")))?;
+
+    if !summary.capabilities.replay {
+        return Err(Error::InvalidInput(format!(
+            "{harness_id} 不支持回放（capability replay = false）"
+        )));
+    }
+
+    Ok(summary
+        .data_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect())
+}
+
+/// 某个 Harness 的可回放会话列表（只读发现 + 有界预读，不落库）。
+#[tauri::command]
+pub fn replay_list_sessions(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::replay::ReplaySessionSummary>> {
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        // 其它 harness 尚未实现回放解析：空列表（capability 层也拦着，这里双保险）。
+        return Ok(Vec::new());
+    }
+    Ok(crate::replay::claude::list_sessions(&replay_roots(
+        &state,
+        &harness_id,
+    )?))
+}
+
+/// 读取一条回放（按 session_id，路径由后端白名单解析）。
+///
+/// 没有命中发现结果 → `None`；转录超过大小上限 → 明确报错（不猜）。
+#[tauri::command]
+pub fn replay_read_session(
+    state: State<'_, AppState>,
+    harness_id: String,
+    session_id: String,
+) -> Result<Option<crate::replay::ReplaySession>> {
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        return Ok(None);
+    }
+    crate::replay::claude::read_session_by_id(&replay_roots(&state, &harness_id)?, &session_id)
+}
+
 /// 最近会话，按开始时间倒序。
 #[tauri::command]
 pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<SessionRecord>> {
@@ -682,6 +743,66 @@ mod tests {
         let unborn_json = serde_json::to_value(&unborn).expect("序列化");
         assert!(unborn_json["head"].is_null(), "实际：{unborn_json}");
         assert_eq!(unborn_json["phase"], "end");
+    }
+
+    /// 跨 IPC 契约测试：回放 DTO（ROADMAP B6）的键名形状。
+    ///
+    /// 结构体 camelCase；role 枚举值 snake_case；skipped/unsupported 计数是
+    /// 字符串→数字的对象。前端 normalizeReplay*（src/lib/ipc.ts）按这些键取值。
+    #[test]
+    fn replay_dtos_serialize_with_camel_case_keys() {
+        let message = crate::replay::ReplayMessage {
+            seq: 3,
+            role: crate::replay::ReplayRole::Assistant,
+            sidechain: true,
+            timestamp: Some("2026-10-25T10:00:05.000Z".to_string()),
+            text_parts: vec!["回答".to_string()],
+            thinking_parts: vec!["思考".to_string()],
+            model: Some("claude-sonnet-4-6".to_string()),
+            unsupported_content_kinds: [("tool_use".to_string(), 2u64)].into_iter().collect(),
+        };
+        let json = serde_json::to_value(&message).expect("序列化消息");
+        assert_eq!(json["seq"], 3);
+        assert_eq!(json["role"], "assistant");
+        assert_eq!(json["sidechain"], true);
+        assert_eq!(json["textParts"], serde_json::json!(["回答"]));
+        assert_eq!(json["thinkingParts"], serde_json::json!(["思考"]));
+        assert_eq!(json["unsupportedContentKinds"], serde_json::json!({"tool_use": 2}));
+        for snake in ["text_parts", "thinking_parts", "unsupported_content_kinds"] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
+        }
+
+        let session = crate::replay::ReplaySession {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            source_path: "D:/x.jsonl".to_string(),
+            messages: vec![message],
+            skipped_kind_counts: [("summary".to_string(), 1u64)].into_iter().collect(),
+            malformed_lines: 1,
+        };
+        let json = serde_json::to_value(&session).expect("序列化会话");
+        assert_eq!(json["harnessId"], "claude");
+        assert_eq!(json["skippedKindCounts"], serde_json::json!({"summary": 1}));
+        assert_eq!(json["malformedLines"], 1);
+        assert_eq!(json["messages"][0]["role"], "assistant");
+
+        let summary = crate::replay::ReplaySessionSummary {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            project_dir: "D--work-demo".to_string(),
+            size_bytes: 1024,
+            modified_ms: 1_761_000_000_000,
+            first_user_preview: Some("预览".to_string()),
+            started_at: Some("2026-10-25T10:00:00.000Z".to_string()),
+            last_at: Some("2026-10-25T10:01:00.000Z".to_string()),
+        };
+        let json = serde_json::to_value(&summary).expect("序列化摘要");
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["projectDir"], "D--work-demo");
+        assert_eq!(json["sizeBytes"], 1024);
+        assert_eq!(json["modifiedMs"], 1_761_000_000_000i64);
+        assert_eq!(json["firstUserPreview"], "预览");
+        assert_eq!(json["startedAt"], "2026-10-25T10:00:00.000Z");
     }
 
     /// 跨 IPC 契约测试：`session_git_summary` 的返回形状（ROADMAP A3）。

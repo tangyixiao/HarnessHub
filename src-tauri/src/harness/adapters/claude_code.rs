@@ -116,6 +116,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             // 7C：真机 ccusage 里 claude 的新记录经现有 importer **逐 key** 入库
             // （tests/claude_usage.rs），因此这里可以宣称 usage。
             usage: true,
+            // B6：`~/.claude/projects/**/*.jsonl` 的只读回放解析已实现并有
+            // fixture 回归（replay::claude + fixtures/claude/replay/）。
+            replay: true,
             ..HarnessCapabilities::default()
         }
     }

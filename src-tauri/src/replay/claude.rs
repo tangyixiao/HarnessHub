@@ -165,7 +165,30 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
 /// 根形态：`<root>/projects/<project-dir>/<session-id>.jsonl`（取证见模块注释）。
 /// 预读窗口内找首条 user 消息做预览与首/末时间戳；找不到就如实 None。
 pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
-    let mut summaries = Vec::new();
+    discover(roots).into_iter().map(|(_, summary)| summary).collect()
+}
+
+/// 按 session id 解析并读取一条回放。
+///
+/// **路径白名单**：session_id 必须命中发现结果，路径由后端自己解析，
+/// IPC 层不接受文件系统路径（防任意文件读取）。找不到 → Ok(None)。
+pub fn read_session_by_id(
+    roots: &[PathBuf],
+    session_id: &str,
+) -> Result<Option<ReplaySession>> {
+    let Some(path) = discover(roots)
+        .into_iter()
+        .find(|(_, summary)| summary.session_id == session_id)
+        .map(|(path, _)| path)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(read_session(&path)?))
+}
+
+/// 发现（路径, 摘要）对。路径只在后端内部流转，不进 DTO。
+fn discover(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
+    let mut found = Vec::new();
 
     for root in roots {
         let projects = root.join("projects");
@@ -185,14 +208,14 @@ pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
                     continue;
                 }
                 if let Some(summary) = summarize(&path, &project_dir.file_name()) {
-                    summaries.push(summary);
+                    found.push((path, summary));
                 }
             }
         }
     }
 
-    summaries.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
-    summaries
+    found.sort_by(|(_, a), (_, b)| b.modified_ms.cmp(&a.modified_ms));
+    found
 }
 
 fn summarize(path: &Path, project_dir: &std::ffi::OsStr) -> Option<ReplaySessionSummary> {
@@ -451,5 +474,42 @@ mod tests {
             summary.started_at.as_deref(),
             Some("2026-10-25T10:00:00.000Z")
         );
+    }
+
+    /// read_session_by_id 的路径白名单：不认识的 session_id 必须 None，
+    /// 绝不能拼路径去读任意文件。
+    #[test]
+    fn read_session_by_id_only_resolves_discovered_sessions() {
+        // 根下没有 projects 结构 → 发现为空 → 任何 id 都 None。
+        let roots = [PathBuf::from("Z:/definitely/not/here")];
+        assert!(read_session_by_id(&roots, "whatever").unwrap().is_none());
+
+        // 伪造一个 projects 树，验证命中与未命中。
+        let temp = std::env::temp_dir().join(format!("hh-replay-id-{}", uuid::Uuid::new_v4()));
+        let project = temp.join("projects/P");
+        std::fs::create_dir_all(&project).unwrap();
+        let session_file = project.join("aaaaaaaa-0000-4000-8000-000000000020.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},",
+                "\"isSidechain\":false,\"timestamp\":\"2026-10-25T13:00:00.000Z\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let roots = [temp.clone()];
+        let hit = read_session_by_id(&roots, "aaaaaaaa-0000-4000-8000-000000000020")
+            .unwrap()
+            .expect("命中的 session 必须能读");
+        assert_eq!(hit.messages.len(), 1);
+        assert!(read_session_by_id(&roots, "does-not-exist").unwrap().is_none());
+        // 目录穿越 / 路径注入尝试同样只是「不认识」。
+        assert!(
+            read_session_by_id(&roots, "../../etc/passwd")
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

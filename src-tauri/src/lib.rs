@@ -181,6 +181,8 @@ pub fn run() {
             commands::refresh_harnesses,
             commands::refresh_usage,
             commands::register_project,
+            commands::replay_list_sessions,
+            commands::replay_read_session,
             commands::remove_project,
             commands::resize_terminal,
             commands::session_git_snapshots,
