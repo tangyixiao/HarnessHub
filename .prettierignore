@@ -4,3 +4,6 @@
 
 pnpm-lock.yaml
 HARNESS_HUB_PROJECT_PLAN.md
+
+# 工具自管的运行时产物（工作流脚本/journal），不是本仓库源码（同 eslint 的 ignore）。
+.zcode/
