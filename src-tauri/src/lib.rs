@@ -197,6 +197,9 @@ pub fn run() {
             commands::usage_summary,
             commands::worktree_add,
             commands::worktree_list,
+            commands::worktree_merge,
+            commands::worktree_remove,
+            commands::worktree_status,
             commands::write_terminal
         ])
         .build(tauri::generate_context!())

@@ -9,7 +9,7 @@
 //!     worktree 中跑」的声明），保持 false。
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +219,177 @@ pub fn add(
         .ok_or_else(|| Error::Git(format!("worktree add 后未在列表中找到 {}", path.display())))
 }
 
+/// 一条 worktree 的未提交修改计数（ROADMAP C11）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeStatusCounts {
+    pub staged_files: u64,
+    pub unstaged_files: u64,
+    pub untracked_files: u64,
+    pub conflicted_files: u64,
+}
+
+impl WorktreeStatusCounts {
+    pub fn is_clean(&self) -> bool {
+        self.staged_files == 0
+            && self.unstaged_files == 0
+            && self.untracked_files == 0
+            && self.conflicted_files == 0
+    }
+}
+
+/// 某 worktree 的未提交修改计数（纯读，有界）。
+///
+/// `worktree_path` 必须出现在 `list(repo_root)` 里（路径白名单）。
+pub fn status_counts(repo_root: &Path, worktree_path: &Path) -> Result<WorktreeStatusCounts> {
+    let known = list(repo_root)?
+        .into_iter()
+        .find(|entry| same_worktree(Path::new(&entry.path), worktree_path));
+    if known.is_none() {
+        return Err(Error::InvalidInput(format!(
+            "不是本仓库的 worktree：{}",
+            worktree_path.display()
+        )));
+    }
+
+    let stdout = git_at(
+        worktree_path,
+        vec![
+            "-c".into(),
+            "core.fsmonitor=false".into(),
+            "status".into(),
+            "--porcelain=v1".into(),
+            "-z".into(),
+            "--untracked-files=all".into(),
+        ],
+        Limits::default(),
+    )?;
+    let counts =
+        super::status::parse_status(&stdout).map_err(|error| Error::Git(error.to_string()))?;
+    Ok(WorktreeStatusCounts {
+        staged_files: counts.staged_files,
+        unstaged_files: counts.unstaged_files,
+        untracked_files: counts.untracked_files,
+        conflicted_files: counts.conflicted_files,
+    })
+}
+
+/// 两条 worktree 路径是否指向同一目录（分隔符/verbatim 前缀不敏感）。
+fn same_worktree(a: &Path, b: &Path) -> bool {
+    comparable_path(a) == comparable_path(b)
+}
+
+/// 查找主工作树（porcelain 首个非 bare 条目）。
+fn main_worktree(repo_root: &Path) -> Result<PathBuf> {
+    list(repo_root)?
+        .into_iter()
+        .find(|entry| entry.main)
+        .map(|entry| PathBuf::from(entry.path))
+        .ok_or_else(|| Error::Git("未找到主工作树".to_string()))
+}
+
+/// 删除一条**干净**的链接 worktree（显式用户动作）。
+///
+/// 安全边界：主树与 bare 不可删（它们不是「用完可清理」的工作副本）；
+/// 未提交修改 → 明确报错并列出计数，绝不静默丢弃。
+pub fn remove(repo_root: &Path, worktree_path: &Path) -> Result<()> {
+    let entries = list(repo_root)?;
+    let canonical_root = repo_root.canonicalize()?;
+    let entry = entries
+        .iter()
+        .find(|entry| same_worktree(Path::new(&entry.path), worktree_path))
+        .ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "不是本仓库的 worktree：{}",
+                worktree_path.display()
+            ))
+        })?;
+    if entry.bare || same_worktree(Path::new(&entry.path), &canonical_root) {
+        return Err(Error::InvalidInput(
+            "主工作树 / bare 仓库不能通过 worktree 删除".to_string(),
+        ));
+    }
+
+    let counts = status_counts(repo_root, worktree_path)?;
+    if !counts.is_clean() {
+        return Err(Error::Git(format!(
+            "worktree 有未提交修改，拒绝删除（暂存 {} / 未暂存 {} / 未跟踪 {} / 冲突 {}）——请先处理或手动清理",
+            counts.staged_files,
+            counts.unstaged_files,
+            counts.untracked_files,
+            counts.conflicted_files
+        )));
+    }
+
+    git_at(
+        repo_root,
+        vec![
+            "worktree".into(),
+            "remove".into(),
+            worktree_path.as_os_str().to_owned(),
+        ],
+        Limits::default(),
+    )?;
+    Ok(())
+}
+
+/// 快进合并结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeOutcome {
+    /// 合并前主树 HEAD（回溯用）。
+    pub previous_head: Option<String>,
+    /// 合并后主树 HEAD。
+    pub new_head: Option<String>,
+}
+
+/// 把 `branch` 快进合并到主工作树（显式用户动作，保守版）。
+///
+/// - 主树有未提交修改 → 拒绝（合并会污染工作区）；
+/// - `--ff-only`：非快进（历史分叉）→ 明确报错，绝不做 rebase/force；
+/// - 分支必须来自 `list`（路径/引用白名单语义）。
+pub fn merge_ff_only(repo_root: &Path, branch: &str) -> Result<MergeOutcome> {
+    let main_path = main_worktree(repo_root)?;
+    // 主树必须干净（有界只读检查）。
+    let main_counts = status_counts(repo_root, &main_path)?;
+    if !main_counts.is_clean() {
+        return Err(Error::Git(format!(
+            "主工作树有未提交修改，拒绝合并（暂存 {} / 未暂存 {} / 未跟踪 {}）",
+            main_counts.staged_files, main_counts.unstaged_files, main_counts.untracked_files
+        )));
+    }
+    // 分支必须真实存在且未被其它 worktree 检出（git 自身会拒绝，这里给出可读错误）。
+    let known_branch = list(repo_root)?
+        .iter()
+        .any(|entry| entry.branch.as_deref() == Some(branch));
+    if !known_branch {
+        return Err(Error::InvalidInput(format!(
+            "分支 {branch} 不是本仓库任何 worktree 的检出分支"
+        )));
+    }
+
+    let previous_head = list(repo_root)?
+        .into_iter()
+        .find(|entry| entry.main)
+        .and_then(|entry| entry.head);
+
+    git_at(
+        repo_root,
+        vec!["merge".into(), "--ff-only".into(), branch.into()],
+        Limits::default(),
+    )?;
+
+    let new_head = list(repo_root)?
+        .into_iter()
+        .find(|entry| entry.main)
+        .and_then(|entry| entry.head);
+
+    Ok(MergeOutcome {
+        previous_head,
+        new_head,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +506,98 @@ mod tests {
         let bare = parse_porcelain("worktree /bare.git\nbare\n").expect("bare");
         assert!(bare[0].bare);
         assert!(!bare[0].main);
+    }
+
+    /// C11：干净 worktree 可删；脏拒绝并列出计数；主树拒绝。
+    #[test]
+    fn remove_requires_a_clean_linked_worktree() {
+        let repo = Repo::new();
+        std::fs::write(repo.0.join("file"), b"data").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "initial"]);
+
+        let wt = repo
+            .0
+            .parent()
+            .unwrap()
+            .join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
+        add(&repo.0, &wt, "feature", true).expect("创建");
+
+        // 主树不可删。
+        assert!(remove(&repo.0, &repo.0).is_err());
+
+        // 弄脏 → 拒绝并列出计数。
+        std::fs::write(wt.join("dirty"), b"dirty").unwrap();
+        let error = remove(&repo.0, &wt).expect_err("脏树必须拒绝");
+        assert!(
+            error.to_string().contains("未提交修改") && error.to_string().contains("未跟踪 1"),
+            "错误要列出计数：{error}"
+        );
+
+        // 清理干净 → 可删。
+        std::fs::remove_file(wt.join("dirty")).unwrap();
+        remove(&repo.0, &wt).expect("干净树可删");
+        // 删除后目录已不存在，不能 canonicalize：用 comparable 路径比对。
+        assert!(
+            !list(&repo.0)
+                .unwrap()
+                .iter()
+                .any(|entry| comparable_path(Path::new(&entry.path)) == comparable_path(&wt)),
+            "删除后列表不得再包含该 worktree"
+        );
+    }
+
+    /// C11：ff-only 合并——成功/主树脏拒绝/非 ff 拒绝/未知分支拒绝。
+    #[test]
+    fn merge_ff_only_is_conservative() {
+        let repo = Repo::new();
+        std::fs::write(repo.0.join("file"), b"base").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "base"]);
+
+        let wt = repo
+            .0
+            .parent()
+            .unwrap()
+            .join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
+        add(&repo.0, &wt, "feature", true).expect("创建");
+        std::fs::write(wt.join("feature-file"), b"feature").unwrap();
+        repo.git_at_worktree(&wt, &["add", "feature-file"]);
+        repo.git_at_worktree(&wt, &["commit", "-qm", "feature"]);
+
+        // 未知分支拒绝。
+        assert!(merge_ff_only(&repo.0, "no-such-branch").is_err());
+
+        // ff 合并成功：主树 HEAD 前进到 feature HEAD。
+        let outcome = merge_ff_only(&repo.0, "feature").expect("ff 合并");
+        let feature_head = list(&repo.0)
+            .unwrap()
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some("feature"))
+            .and_then(|entry| entry.head.clone())
+            .expect("feature HEAD");
+        assert_eq!(outcome.new_head, Some(feature_head));
+        assert!(outcome.previous_head.is_some());
+
+        // 主树脏 → 拒绝。
+        std::fs::write(repo.0.join("main-dirty"), b"x").unwrap();
+        std::fs::write(wt.join("another"), b"y").unwrap();
+        repo.git_at_worktree(&wt, &["add", "another"]);
+        repo.git_at_worktree(&wt, &["commit", "-qm", "another"]);
+        let error = merge_ff_only(&repo.0, "feature").expect_err("主树脏必须拒绝");
+        assert!(
+            error.to_string().contains("主工作树有未提交修改"),
+            "{error}"
+        );
+        std::fs::remove_file(repo.0.join("main-dirty")).unwrap();
+
+        // 非 ff（分叉）→ 拒绝：主树上做一个 feature 没有的提交。
+        repo.git(&["commit", "--allow-empty", "-qm", "main-only"]);
+        let error = merge_ff_only(&repo.0, "feature").expect_err("非 ff 必须拒绝");
+        assert!(
+            error.to_string().contains("失败") || error.to_string().contains("merge"),
+            "错误来自 git 层：{error}"
+        );
     }
 
     /// 本机真实仓库的只读 smoke（不写任何东西）。
