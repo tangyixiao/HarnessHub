@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::launch::LaunchSpec;
 
 /// Harness 的规范标识，例如 `codex` / `claude-code` / `gemini-cli`。
@@ -129,6 +129,18 @@ pub trait HarnessAdapter: Send + Sync {
     /// 的可执行形态）全部在这一层解决。PTY 层只执行 [`LaunchSpec`]，
     /// **不得**自己拼 shell 命令字符串。
     fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec>;
+
+    /// 生成**恢复已有会话**的启动描述（ROADMAP B9）。
+    ///
+    /// 默认不支持：capability `resume` 为 false 的 harness 必须保持默认实现，
+    /// UI 也不会渲染恢复入口。覆写的适配器必须同步把 `capabilities.resume` 翻 true
+    /// 并给出证据（fixture 拼接 + 真机参数确认）。
+    fn build_resume_spec(&self, _request: ResumeRequest) -> Result<LaunchSpec> {
+        Err(Error::InvalidInput(format!(
+            "{} 尚未支持恢复会话（capability resume = false）",
+            self.display_name()
+        )))
+    }
 }
 
 #[cfg(test)]

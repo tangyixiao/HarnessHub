@@ -467,6 +467,32 @@ pub fn write_terminal(state: State<'_, AppState>, session_id: String, data: Vec<
     state.terminal.write(&session_id, &data)
 }
 
+/// 恢复一条外部会话（ROADMAP B9）：`--resume <source_session_id>`，
+/// capability `resume` 为 false 的 harness 在适配器层报明确错误。
+#[tauri::command]
+pub fn resume_terminal(
+    state: State<'_, AppState>,
+    installation_id: String,
+    source_session_id: String,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    output: Channel<PtyEvent>,
+) -> Result<SessionRecord> {
+    let emitter: Emitter = Arc::new(move |event| {
+        let _ = output.send(event);
+    });
+
+    state.terminal.start_resume(
+        &installation_id,
+        &source_session_id,
+        cwd.as_deref(),
+        cols,
+        rows,
+        Some(emitter),
+    )
+}
+
 /// 调整 PTY 尺寸。
 #[tauri::command]
 pub fn resize_terminal(
