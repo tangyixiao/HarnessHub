@@ -39,6 +39,7 @@ use crate::db::Database;
 use crate::harness::adapters::claude_code::ClaudeCodeAdapter;
 use crate::harness::adapters::codebuddy::CodeBuddyAdapter;
 use crate::harness::adapters::codex::CodexAdapter;
+use crate::harness::adapters::copilot::CopilotAdapter;
 use crate::harness::adapters::gemini_cli::GeminiCliAdapter;
 use crate::harness::adapters::opencode::{OpenCodeAdapter, OpenCodeXdgRoots};
 use crate::harness::inventory::reconcile_harnesses;
@@ -77,7 +78,7 @@ pub const DATABASE_FILE_NAME: &str = "harness-hub.sqlite3";
 /// 不依赖 HashMap 迭代顺序）。
 ///
 /// 只注册**已实现适配器**的 Harness：Codex 与 Claude Code 提供
-/// detect / launch / terminal / usage；Gemini CLI、CodeBuddy 与 OpenCode 仅检测，
+/// detect / launch / terminal / usage；Gemini CLI、CodeBuddy、OpenCode 与 GitHub Copilot CLI 仅检测，
 /// 能力矩阵为全 false。
 ///
 /// `pub` 是为了让集成测试用**生产组合**（而不是测试里重造一份注册表）验证
@@ -105,6 +106,9 @@ pub fn build_harness_registry() -> HarnessRegistry {
         Arc::new(SystemHostProbe::new()),
         OpenCodeXdgRoots::from_env(),
     )));
+    registry.register(Box::new(CopilotAdapter::new(Arc::new(
+        SystemHostProbe::new(),
+    ))));
     registry
 }
 

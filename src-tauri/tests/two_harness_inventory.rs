@@ -72,7 +72,14 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
 
     assert_eq!(
         ids(&registry),
-        vec!["codex", "claude", "gemini", "codebuddy", "opencode"]
+        vec![
+            "codex",
+            "claude",
+            "gemini",
+            "codebuddy",
+            "opencode",
+            "copilot"
+        ]
     );
     assert_eq!(
         ids(&registry),
@@ -81,12 +88,13 @@ fn the_registry_holds_executable_adapters_in_a_deterministic_order() {
     );
 
     let summaries = registry.summaries(LOCAL_TARGET_ID);
-    assert_eq!(summaries.len(), 5);
+    assert_eq!(summaries.len(), 6);
     assert_eq!(summaries[0].display_name, "Codex");
     assert_eq!(summaries[1].display_name, "Claude Code");
     assert_eq!(summaries[2].display_name, "Gemini CLI");
     assert_eq!(summaries[3].display_name, "CodeBuddy");
     assert_eq!(summaries[4].display_name, "OpenCode");
+    assert_eq!(summaries[5].display_name, "GitHub Copilot CLI");
     // 展示名由适配器声明，注册表只透传（前后端只有一份名字来源）。
     assert_eq!(
         summaries[1].installation_id.as_deref(),
@@ -104,11 +112,25 @@ fn a_cold_database_reconciles_all_registered_harnesses() {
 
     assert_eq!(
         reconciled,
-        vec!["codex", "claude", "gemini", "codebuddy", "opencode"]
+        vec![
+            "codex",
+            "claude",
+            "gemini",
+            "codebuddy",
+            "opencode",
+            "copilot"
+        ]
     );
     assert_eq!(
         definition_ids(&db),
-        vec!["claude", "codebuddy", "codex", "gemini", "opencode"]
+        vec![
+            "claude",
+            "codebuddy",
+            "codex",
+            "copilot",
+            "gemini",
+            "opencode"
+        ]
     );
     assert_eq!(
         installation_ids(&db),
@@ -116,6 +138,7 @@ fn a_cold_database_reconciles_all_registered_harnesses() {
             installation_id("claude", LOCAL_TARGET_ID),
             installation_id("codebuddy", LOCAL_TARGET_ID),
             installation_id("codex", LOCAL_TARGET_ID),
+            installation_id("copilot", LOCAL_TARGET_ID),
             installation_id("gemini", LOCAL_TARGET_ID),
             installation_id("opencode", LOCAL_TARGET_ID)
         ]
@@ -162,7 +185,14 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
 
     assert_eq!(
         definition_ids(&db),
-        vec!["claude", "codebuddy", "codex", "gemini", "opencode"]
+        vec![
+            "claude",
+            "codebuddy",
+            "codex",
+            "copilot",
+            "gemini",
+            "opencode"
+        ]
     );
     assert_eq!(
         installation_ids(&db),
@@ -170,11 +200,12 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
             "claude@local",
             "codebuddy@local",
             "codex@local",
+            "copilot@local",
             "gemini@local",
             "opencode@local"
         ]
     );
-    assert_eq!(installation_count(&db), 5, "不得重复插入");
+    assert_eq!(installation_count(&db), 6, "不得重复插入");
 
     let after: (Option<String>, String) = db
         .connection()
@@ -192,7 +223,7 @@ fn adding_harnesses_preserves_the_existing_codex_installation() {
 
     // 再同步一次：仍然不重复（幂等）。
     reconcile_with_production_registry(&db);
-    assert_eq!(installation_count(&db), 5);
+    assert_eq!(installation_count(&db), 6);
 }
 
 /// 加第二个 Harness **不需要** schema 变更。
@@ -353,4 +384,12 @@ fn the_capability_matrix_is_exactly_what_has_been_accepted() {
     ] {
         assert!(!value, "{name} 尚未验收，不得为 true");
     }
+
+    // GitHub Copilot CLI（D12）：检测阶段零宣称。
+    let copilot = capabilities("copilot");
+    assert_eq!(
+        copilot,
+        harness_hub_lib::harness::adapter::HarnessCapabilities::default(),
+        "copilot 仅实现检测，一个能力都不得为 true"
+    );
 }

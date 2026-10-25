@@ -1,0 +1,20 @@
+{
+  "id": "copilot",
+  "displayName": "GitHub Copilot CLI",
+  "installationId": "copilot@local",
+  "installed": true,
+  "binaryPath": "D:/npm-global/copilot.cmd",
+  "version": "1.0.91",
+  "capabilities": {
+    "launch": false,
+    "terminal": false,
+    "resume": false,
+    "usage": false,
+    "replay": false,
+    "toolCalls": false,
+    "subagents": false,
+    "liveState": false,
+    "worktree": false
+  },
+  "dataPaths": []
+}
