@@ -6,12 +6,16 @@ import { PageHeader } from '@/components/ui/page-header';
 import {
   addWorktree,
   getProjectSessions,
+  getWorktreeStatus,
   listProjects,
   listWorktrees,
+  mergeWorktree,
   registerProject,
   removeProject,
+  removeWorktree,
   type ProjectRecord,
   type WorktreeEntry,
+  type WorktreeStatusCounts,
 } from '@/lib/ipc';
 
 type PageState =
@@ -255,10 +259,24 @@ type WorktreeListState =
   | { kind: 'ready'; entries: WorktreeEntry[] }
   | { kind: 'failed'; message: string };
 
+/** 一次成功合并的行内回执：挂在合并来源行的 path 上（列表刷新后仍要显示）。 */
+type MergedNote = { path: string; head: string | null };
+
+/** 「已合并 <新 HEAD 前 7 位>」；note 不属于该行时返回 null（新 HEAD 未知时只显示「已合并」）。 */
+function formatMergedNote(note: MergedNote | null, path: string): string | null {
+  if (note === null || note.path !== path) {
+    return null;
+  }
+  return note.head === null ? '已合并' : `已合并 ${note.head.slice(0, 7)}`;
+}
+
 /**
  * 卡片内的 Worktrees 区：默认折叠，展开时才发 `worktree_list`（避免每张
  * 卡片自动请求）。创建是**显式用户动作**：提交前 window.confirm 二次确认
  * 「将在磁盘上创建目录并检出代码」，失败原样展示后端错误。
+ *
+ * C11 起每行由 `WorktreeRow` 渲染：惰性查询未提交修改徽标，并提供
+ * 「合并到主分支」（--ff-only）与「删除」两个保守闭环动作。
  */
 function ProjectWorktrees({ repoRoot }: { repoRoot: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -270,6 +288,7 @@ function ProjectWorktrees({ repoRoot }: { repoRoot: string }) {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [highlightPath, setHighlightPath] = useState<string | null>(null);
+  const [mergedNote, setMergedNote] = useState<MergedNote | null>(null);
 
   const loadWorktrees = useCallback(async () => {
     setListState({ kind: 'loading' });
@@ -367,35 +386,17 @@ function ProjectWorktrees({ repoRoot }: { repoRoot: string }) {
 
           {listState.kind === 'ready' && listState.entries.length > 0 ? (
             <ul className="space-y-1">
-              {listState.entries.map((entry) => {
-                const highlighted = entry.path === highlightPath;
-                return (
-                  <li
-                    key={entry.path}
-                    className={`flex items-center gap-2 rounded-md px-2 py-1 text-xs ring-1 ${
-                      highlighted ? 'bg-accent/[0.12] ring-accent/40' : 'ring-transparent'
-                    }`}
-                  >
-                    <span
-                      className="min-w-0 flex-1 truncate font-mono text-[11px]"
-                      title={entry.path}
-                    >
-                      {entry.path}
-                    </span>
-                    <span className="shrink-0 font-mono text-[11px] text-content-secondary">
-                      {entry.branch ?? (entry.detached ? 'detached' : '—')}
-                    </span>
-                    <span className="shrink-0 font-mono text-[11px] text-content-muted">
-                      {entry.head ? entry.head.slice(0, 7) : '—'}
-                    </span>
-                    {entry.main ? (
-                      <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-secondary">
-                        主工作树
-                      </span>
-                    ) : null}
-                  </li>
-                );
-              })}
+              {listState.entries.map((entry) => (
+                <WorktreeRow
+                  key={entry.path}
+                  repoRoot={repoRoot}
+                  entry={entry}
+                  highlighted={entry.path === highlightPath}
+                  mergedNote={formatMergedNote(mergedNote, entry.path)}
+                  onMerged={(newHead) => setMergedNote({ path: entry.path, head: newHead })}
+                  onRefresh={loadWorktrees}
+                />
+              ))}
             </ul>
           ) : null}
 
@@ -458,5 +459,217 @@ function ProjectWorktrees({ repoRoot }: { repoRoot: string }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+type WorktreeRowStatus =
+  { kind: 'loading' } | { kind: 'ready'; counts: WorktreeStatusCounts } | { kind: 'unknown' };
+
+/** 状态徽标：查询中显示 …，干净显示「干净」，有修改显示红色「修改 N 项」，失败显示「状态未知」。 */
+function WorktreeStatusBadge({ state }: { state: WorktreeRowStatus }) {
+  if (state.kind === 'loading') {
+    return (
+      <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-muted">
+        …
+      </span>
+    );
+  }
+  if (state.kind === 'unknown') {
+    return (
+      <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-muted">
+        状态未知
+      </span>
+    );
+  }
+
+  const total =
+    state.counts.stagedFiles +
+    state.counts.unstagedFiles +
+    state.counts.untrackedFiles +
+    state.counts.conflictedFiles;
+  return total === 0 ? (
+    <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-secondary">
+      干净
+    </span>
+  ) : (
+    <span className="shrink-0 rounded-sm bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-400">
+      修改 {total} 项
+    </span>
+  );
+}
+
+/**
+ * 单行 worktree（C11）。
+ *
+ * - 状态徽标：行挂载后惰性查询一次 `worktree_status`（纯读）；失败降级为
+ *   「状态未知」并把原始错误展示在行内，**不阻塞整行的操作按钮**。
+ * - 合并/删除是**显式用户动作**：confirm 文案必须写明「快进合并（非快进会被
+ *   拒绝）」与「删除目录（有未提交修改会被拒绝）」；失败原样展示在行内，
+ *   成功后刷新列表（数据以后端为准）。主树行不是「用完可清理」的工作副本，
+ *   不显示操作按钮。
+ */
+function WorktreeRow({
+  repoRoot,
+  entry,
+  highlighted,
+  mergedNote,
+  onMerged,
+  onRefresh,
+}: {
+  repoRoot: string;
+  entry: WorktreeEntry;
+  highlighted: boolean;
+  mergedNote: string | null;
+  onMerged: (newHead: string | null) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [statusState, setStatusState] = useState<WorktreeRowStatus>({ kind: 'loading' });
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [acting, setActing] = useState<null | 'merge' | 'remove'>(null);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const result = await getWorktreeStatus(repoRoot, entry.path);
+      if (cancelled) {
+        return;
+      }
+      if (result.ok) {
+        setStatusState({ kind: 'ready', counts: result.data });
+        setStatusError(null);
+      } else {
+        setStatusState({ kind: 'unknown' });
+        setStatusError(result.error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [repoRoot, entry.path]);
+
+  const handleMerge = async () => {
+    if (!entry.branch || acting !== null) {
+      return;
+    }
+
+    // 写仓库动作：确认文案必须写明这是快进合并、非快进会被拒绝。
+    const confirmed = window.confirm(
+      `把分支 ${entry.branch} 快进合并到主分支（--ff-only）？\n` +
+        `非快进会被拒绝；主工作树有未提交修改也会被拒绝。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setActing('merge');
+    setMergeError(null);
+    const result = await mergeWorktree(repoRoot, entry.branch);
+    if (!result.ok) {
+      setActing(null);
+      setMergeError(result.error);
+      return;
+    }
+
+    setActing(null);
+    onMerged(result.data.newHead);
+    await onRefresh();
+  };
+
+  const handleRemove = async () => {
+    if (acting !== null) {
+      return;
+    }
+
+    // 破坏性动作：确认文案必须写明目录会被删除、有未提交修改会被拒绝。
+    const confirmed = window.confirm(
+      `删除目录：\n${entry.path}\n` + `（有未提交修改会被拒绝；主工作树 / bare 仓库不能删除）`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setActing('remove');
+    setRemoveError(null);
+    const result = await removeWorktree(repoRoot, entry.path);
+    if (!result.ok) {
+      setActing(null);
+      setRemoveError(result.error);
+      return;
+    }
+
+    setActing(null);
+    await onRefresh();
+  };
+
+  return (
+    <li
+      className={`rounded-md px-2 py-1 text-xs ring-1 ${
+        highlighted ? 'bg-accent/[0.12] ring-accent/40' : 'ring-transparent'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={entry.path}>
+          {entry.path}
+        </span>
+        <span className="shrink-0 font-mono text-[11px] text-content-secondary">
+          {entry.branch ?? (entry.detached ? 'detached' : '—')}
+        </span>
+        <span className="shrink-0 font-mono text-[11px] text-content-muted">
+          {entry.head ? entry.head.slice(0, 7) : '—'}
+        </span>
+        {entry.main ? (
+          <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-secondary">
+            主工作树
+          </span>
+        ) : null}
+        <WorktreeStatusBadge state={statusState} />
+        {mergedNote !== null ? (
+          <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-secondary">
+            {mergedNote}
+          </span>
+        ) : null}
+        {!entry.main ? (
+          <>
+            {entry.branch !== null ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={acting !== null}
+                onClick={() => void handleMerge()}
+              >
+                合并到主分支
+              </Button>
+            ) : null}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={acting !== null}
+              onClick={() => void handleRemove()}
+            >
+              删除
+            </Button>
+          </>
+        ) : null}
+      </div>
+      {statusError !== null ? (
+        <p role="alert" className="mt-1 text-[11px] text-red-400">
+          状态查询失败：{statusError}
+        </p>
+      ) : null}
+      {mergeError !== null ? (
+        <p role="alert" className="mt-1 text-[11px] text-red-400">
+          合并失败：{mergeError}
+        </p>
+      ) : null}
+      {removeError !== null ? (
+        <p role="alert" className="mt-1 text-[11px] text-red-400">
+          删除失败：{removeError}
+        </p>
+      ) : null}
+    </li>
   );
 }

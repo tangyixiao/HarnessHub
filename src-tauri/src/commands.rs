@@ -386,6 +386,45 @@ pub fn worktree_add(
     )
 }
 
+/// 某 worktree 的未提交修改计数。**纯读**（ROADMAP C11）。
+#[tauri::command]
+pub fn worktree_status(
+    state: State<'_, AppState>,
+    repo_root: String,
+    worktree_path: String,
+) -> Result<crate::git::WorktreeStatusCounts> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::status_counts(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&worktree_path),
+    )
+}
+
+/// 删除一条**干净**的链接 worktree（显式用户动作；脏树/主树拒绝）。
+#[tauri::command]
+pub fn worktree_remove(
+    state: State<'_, AppState>,
+    repo_root: String,
+    worktree_path: String,
+) -> Result<()> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::remove(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&worktree_path),
+    )
+}
+
+/// 把分支快进合并到主工作树（显式用户动作；主树脏/非 ff 拒绝）。
+#[tauri::command]
+pub fn worktree_merge(
+    state: State<'_, AppState>,
+    repo_root: String,
+    branch: String,
+) -> Result<crate::git::MergeOutcome> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::merge_ff_only(std::path::Path::new(&repo_root), &branch)
+}
+
 /// 回放搜索设置（默认关闭；关闭时后端已清空索引）。
 #[tauri::command]
 pub fn replay_search_settings_get(
@@ -1032,6 +1071,42 @@ mod tests {
         assert!(json["branch"].is_null());
         assert!(json["head"].is_null());
         assert_eq!(json["detached"], true);
+    }
+
+    /// 跨 IPC 契约测试：C11 的 status/merge DTO 键名形状。
+    #[test]
+    fn worktree_c11_dtos_serialize_with_camel_case_keys() {
+        let counts = crate::git::WorktreeStatusCounts {
+            staged_files: 1,
+            unstaged_files: 2,
+            untracked_files: 3,
+            conflicted_files: 0,
+        };
+        let json = serde_json::to_value(counts).expect("序列化");
+        assert_eq!(json["stagedFiles"], 1);
+        assert_eq!(json["unstagedFiles"], 2);
+        assert_eq!(json["untrackedFiles"], 3);
+        assert_eq!(json["conflictedFiles"], 0);
+
+        let outcome = crate::git::MergeOutcome {
+            previous_head: Some("a".repeat(40)),
+            new_head: Some("b".repeat(40)),
+        };
+        let json = serde_json::to_value(&outcome).expect("序列化");
+        assert_eq!(json["previousHead"], "a".repeat(40));
+        assert_eq!(json["newHead"], "b".repeat(40));
+        for snake in [
+            "previous_head",
+            "new_head",
+            "staged_files",
+            "untracked_files",
+        ] {
+            assert!(
+                serde_json::to_value(counts).unwrap().get(snake).is_none()
+                    && json.get(snake).is_none(),
+                "不得输出 snake_case 键 {snake}"
+            );
+        }
     }
 
     /// 跨 IPC 契约测试：回放搜索 DTO（ROADMAP B7）的键名形状。

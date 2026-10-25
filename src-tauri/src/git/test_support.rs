@@ -16,6 +16,13 @@ pub(crate) fn fixture_git(root: &Path) -> Command {
     std::fs::create_dir_all(support.join("template")).unwrap();
     let config = support.join("empty-config");
     std::fs::write(&config, b"").unwrap();
+    build_isolated_command(root, &support)
+}
+
+/// 在 worktree 目录跑 git（C11 测试）：`.git` 是**文件**（gitdir 指针），
+/// 夹具资源必须用主仓 `.git/hh-fixture` 的**绝对路径**，不能在 worktree 里建。
+pub(crate) fn build_isolated_command(root: &Path, support: &Path) -> Command {
+    let config = support.join("empty-config");
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy().to_ascii_uppercase();
@@ -82,6 +89,18 @@ impl Repo {
     /// 跑一条 git 命令，失败即 panic（夹具本身必须可靠）。
     pub(crate) fn git(&self, args: &[&str]) {
         let status = fixture_git(&self.0).args(args).status().unwrap();
+        assert!(status.success());
+    }
+
+    /// 在 linked worktree 目录里跑 git（C11 测试用）：
+    /// 继承主仓的隔离 env（GIT_CONFIG_GLOBAL 等），但 cwd 指向 worktree；
+    /// 夹具资源用主仓 `.git/hh-fixture` 绝对路径（worktree 的 `.git` 是文件）。
+    pub(crate) fn git_at_worktree(&self, worktree: &Path, args: &[&str]) {
+        let support = self.0.join(".git/hh-fixture");
+        let status = build_isolated_command(worktree, &support)
+            .args(args)
+            .status()
+            .unwrap();
         assert!(status.success());
     }
 }

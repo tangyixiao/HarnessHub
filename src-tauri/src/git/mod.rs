@@ -15,7 +15,7 @@ pub use snapshot::{capture, GitObservation, GitSnapshot};
 use std::fmt;
 pub use store::{GitSnapshotStore, SessionGitSnapshot, SnapshotPhase};
 pub use window::WindowSummary;
-pub use worktree::WorktreeEntry;
+pub use worktree::{MergeOutcome, WorktreeEntry, WorktreeStatusCounts};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct StatusCounts {

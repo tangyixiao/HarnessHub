@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -319,6 +319,280 @@ describe('ProjectsPage', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent(
         "fatal: 'D:/wt/feature' already exists",
       );
+    });
+  });
+
+  /**
+   * 定位包含指定路径文本的 worktree 行（行内查询徽标 / 按钮要用 within 缩小范围，
+   * 因为项目卡片自己也带一个「删除」按钮；主树路径与 repo root 相同时卡片描述里
+   * 也有同文文本，所以要只认 <li> 内的匹配）。
+   */
+  function worktreeRow(path: string): HTMLElement {
+    const row = screen
+      .getAllByText(path)
+      .map((el) => el.closest('li'))
+      .find((li) => li !== null);
+    if (!(row instanceof HTMLElement)) {
+      throw new Error(`找不到 worktree 行：${path}`);
+    }
+    return row;
+  }
+
+  /** 展开前先等到列表出现（行挂载后才会各自惰性查询状态）。 */
+  async function expandWorktrees(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await screen.findByRole('region', { name: 'demo' });
+    await user.click(screen.getByRole('button', { name: 'Worktrees' }));
+    await screen.findByText('D:/wt/feature');
+  }
+
+  describe('Worktrees 区升级（ROADMAP C11）', () => {
+    it('每行惰性查询状态：干净显示「干净」，有修改显示「修改 N 项」；主树行没有操作按钮', async () => {
+      const user = userEvent.setup();
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          // C11 契约：worktree_status 传 repoRoot + worktreePath。
+          expect(args).toEqual({
+            repoRoot: 'D:/work/demo',
+            worktreePath: expect.any(String),
+          });
+          if (args?.worktreePath === 'D:/wt/feature') {
+            return { stagedFiles: 2, unstagedFiles: 1, untrackedFiles: 3, conflictedFiles: 0 };
+          }
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+
+      const featureRow = worktreeRow('D:/wt/feature');
+      // N = 四类计数之和：2 + 1 + 3 + 0 = 6。
+      expect(await within(featureRow).findByText('修改 6 项')).toBeInTheDocument();
+      expect(within(featureRow).getByRole('button', { name: '合并到主分支' })).toBeInTheDocument();
+      expect(within(featureRow).getByRole('button', { name: '删除' })).toBeInTheDocument();
+
+      // 干净的行（主树 + detached）显示「干净」徽标。
+      const mainRow = worktreeRow('D:/work/demo');
+      expect(await within(mainRow).findByText('干净')).toBeInTheDocument();
+      const detachedRow = worktreeRow('D:/wt/detached');
+      expect(await within(detachedRow).findByText('干净')).toBeInTheDocument();
+
+      // 主树行不显示操作按钮（合并/删除只属于链接树）。
+      expect(
+        within(mainRow).queryByRole('button', { name: '合并到主分支' }),
+      ).not.toBeInTheDocument();
+      expect(within(mainRow).queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
+      // detached 行没有分支 → 没有合并按钮，但删除按钮在。
+      expect(
+        within(detachedRow).queryByRole('button', { name: '合并到主分支' }),
+      ).not.toBeInTheDocument();
+      expect(within(detachedRow).getByRole('button', { name: '删除' })).toBeInTheDocument();
+    });
+
+    it('状态查询失败显示「状态未知」徽标与行内错误，不阻塞按钮', async () => {
+      const user = userEvent.setup();
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          throw new Error('git status 失败：退出码 128');
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+
+      const row = worktreeRow('D:/wt/feature');
+      expect(await within(row).findByText('状态未知')).toBeInTheDocument();
+      expect(await within(row).findByRole('alert')).toHaveTextContent(
+        'git status 失败：退出码 128',
+      );
+      // 徽标失败不阻塞整行：操作按钮仍然可用。
+      expect(within(row).getByRole('button', { name: '删除' })).toBeEnabled();
+    });
+
+    it('合并：confirm 文案含「快进合并」与分支名与「非快进会被拒绝」；成功显示「已合并 <前 7 位>」并刷新列表', async () => {
+      const user = userEvent.setup();
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        if (command === 'worktree_merge') {
+          expect(args).toEqual({ repoRoot: 'D:/work/demo', branch: 'feature' });
+          return {
+            previousHead: '1234567890abcdef1234567890abcdef12345678',
+            newHead: 'fedcba9876543210fedcba9876543210fedcba98',
+          };
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(
+        within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '合并到主分支' }),
+      );
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('快进合并');
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('feature');
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('非快进会被拒绝');
+
+      // 成功提示与列表刷新（worktree_list 被再次调用）。
+      expect(await screen.findByText('已合并 fedcba9')).toBeInTheDocument();
+      expect(invokeSpy).toHaveBeenCalledWith('worktree_list', { repoRoot: 'D:/work/demo' });
+    });
+
+    it('confirm 取消合并不调用 worktree_merge', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const invokeSpy = vi.fn(async (command: string) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(
+        within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '合并到主分支' }),
+      );
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('worktree_merge', expect.anything());
+    });
+
+    it('合并失败（主树脏被拒）在行内原样展示错误', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        if (command === 'worktree_merge') {
+          throw new Error('主工作树有未提交修改，拒绝合并（暂存 1 / 未暂存 0 / 未跟踪 0）');
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(
+        within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '合并到主分支' }),
+      );
+
+      expect(await within(worktreeRow('D:/wt/feature')).findByRole('alert')).toHaveTextContent(
+        '主工作树有未提交修改，拒绝合并（暂存 1 / 未暂存 0 / 未跟踪 0）',
+      );
+      // 失败后行仍在，可以重试。
+      expect(
+        within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '合并到主分支' }),
+      ).toBeEnabled();
+    });
+
+    it('删除：confirm 文案含「删除目录」与路径与「有未提交修改会被拒绝」；成功后行从列表移除', async () => {
+      const user = userEvent.setup();
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      let worktrees: unknown[] = WORKTREE_LIST;
+      stubInvoke((command, args) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return worktrees;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        if (command === 'worktree_remove') {
+          expect(args).toEqual({ repoRoot: 'D:/work/demo', worktreePath: 'D:/wt/feature' });
+          worktrees = worktrees.filter(
+            (entry) => (entry as { path: string }).path !== 'D:/wt/feature',
+          );
+          return null;
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '删除' }));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('删除目录');
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('D:/wt/feature');
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('有未提交修改会被拒绝');
+
+      // 成功后刷新列表，该行消失。
+      await waitFor(() => {
+        expect(screen.queryByText('D:/wt/feature')).not.toBeInTheDocument();
+      });
+    });
+
+    it('confirm 取消删除不调用 worktree_remove', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const invokeSpy = vi.fn(async (command: string) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '删除' }));
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('worktree_remove', expect.anything());
+    });
+
+    it('删除失败（脏树被拒）在行内原样展示错误', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'worktree_list') return WORKTREE_LIST;
+        if (command === 'worktree_status') {
+          return { stagedFiles: 0, unstagedFiles: 0, untrackedFiles: 0, conflictedFiles: 0 };
+        }
+        if (command === 'worktree_remove') {
+          throw new Error(
+            'worktree 有未提交修改，拒绝删除（暂存 2 / 未暂存 1 / 未跟踪 3 / 冲突 0）——请先处理或手动清理',
+          );
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandWorktrees(user);
+      await user.click(within(worktreeRow('D:/wt/feature')).getByRole('button', { name: '删除' }));
+
+      expect(await within(worktreeRow('D:/wt/feature')).findByRole('alert')).toHaveTextContent(
+        'worktree 有未提交修改，拒绝删除',
+      );
+      // 失败后行仍在。
+      expect(screen.getByText('D:/wt/feature')).toBeInTheDocument();
     });
   });
 });
