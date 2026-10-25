@@ -123,6 +123,50 @@ export async function startTerminal(input: {
 }
 
 /**
+ * 恢复一条外部会话（ROADMAP B9）：后端以 `--resume <source_session_id>` 启动 PTY，
+ * 返回的 `SessionRecord` 带 `launchMode = "resume"` 与传入的 `sourceSessionId`。
+ *
+ * 与 `startTerminal` 同构：Channel 先挂回调再 invoke（ready-before-spawn，ADR-0009），
+ * 返回值经 `normalizeSessionRecord` 校验。
+ *
+ * 错误语义（后端契约已冻结）：
+ * - capability `resume` = false 的 harness（如 codex）→ reject，错误串含「尚未支持恢复」；
+ * - 同一 `sourceSessionId` 重复恢复 → 唯一索引 reject（错误串含 UNIQUE 或 source_session_id）。
+ */
+export async function resumeTerminal(input: {
+  installationId: string;
+  sourceSessionId: string;
+  cwd?: string | null;
+  cols: number;
+  rows: number;
+  onEvent: (event: PtyEvent) => void;
+}): Promise<IpcResult<SessionRecord>> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: NOT_IN_TAURI };
+  }
+
+  try {
+    const output = new Channel<PtyEvent>();
+    // 先挂回调再 invoke：Channel 必须在 resume_terminal 之前 ready。
+    output.onmessage = input.onEvent;
+
+    const raw = await invoke('resume_terminal', {
+      installationId: input.installationId,
+      sourceSessionId: input.sourceSessionId,
+      cwd: input.cwd ?? null,
+      cols: input.cols,
+      rows: input.rows,
+      output,
+    });
+
+    const record = normalizeSessionRecord(raw);
+    return record ? { ok: true, data: record } : { ok: false, error: 'invalid-session-payload' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * 把**原始字节**写进 PTY。
  *
  * 不在 Rust 侧猜编码：onData 侧用 TextEncoder 编码，onBinary 侧按 code unit

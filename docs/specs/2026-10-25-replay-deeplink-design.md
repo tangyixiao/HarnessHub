@@ -18,8 +18,8 @@ source_session_id 关联原会话）。capability 不支持 → 按钮不渲染�
       默认实现 = 不支持（错误）；claude 覆写为 `claude --resume <id>`（Windows 走
       既有 program_for 地基）；codex/gemini/opencode 保持默认（capability resume
       仍 false，UI 不渲染按钮——不伪造）。
-- [ ] `terminal::TerminalRuntime::start_resume(installation_id, source_session_id,
-      cwd, cols, rows, emitter)`：与 start 同一生命周期（created → running → 终态），
+- [ ] `terminal::TerminalRuntime::start_resume(installation_id, source_session_id, cwd, cols, rows, emitter)`：
+      与 start 同一生命周期（created → running → 终态），
       但 SessionRecord 带 `source_session_id = <原会话 id>`、`launch_mode = resume`。
 - [ ] IPC `resume_terminal`；capability resume=false 的 harness 调用报明确错误。
 - [ ] claude capability `resume` 翻 true（实现即能力；spec 注明证据 = fixture +

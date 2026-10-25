@@ -47,6 +47,7 @@ import {
   refreshUsage,
   registerProject,
   removeProject,
+  resumeTerminal,
   searchReplay,
   setReplaySearchSettings,
 } from '@/lib/ipc';
@@ -346,6 +347,17 @@ describe('normalizeSessionRecord', () => {
     expect(record?.launchMode).toBe('terminal');
   });
 
+  it('launchMode = resume 与 sourceSessionId 原样保留（B9 resume_terminal 返回的契约）', () => {
+    const record = normalizeSessionRecord({
+      ...SESSION_PAYLOAD,
+      launchMode: 'resume',
+      sourceSessionId: 'b3a1-external',
+    });
+
+    expect(record?.launchMode).toBe('resume');
+    expect(record?.sourceSessionId).toBe('b3a1-external');
+  });
+
   it('字段缺失时补安全默认值', () => {
     const record = normalizeSessionRecord({ hubSessionId: 'h1' });
 
@@ -387,6 +399,87 @@ describe('normalizeSessionRecord', () => {
     });
 
     expect(record?.terminationReason).toBeNull();
+  });
+});
+
+describe('resumeTerminal', () => {
+  const onEvent = (): void => {};
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri，而不是抛异常', async () => {
+    await expect(
+      resumeTerminal({
+        installationId: 'claude@local',
+        sourceSessionId: 'ext-1',
+        cwd: null,
+        cols: 120,
+        rows: 30,
+        onEvent,
+      }),
+    ).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+
+  it('先挂 Channel 回调再 invoke，参数与返回值经 normalizeSessionRecord 校验', async () => {
+    const events: unknown[] = [];
+    const invokeSpy = vi.fn(async (cmd: string, _args?: Record<string, unknown>) => {
+      expect(cmd).toBe('resume_terminal');
+      return { ...SESSION_PAYLOAD, launchMode: 'resume', sourceSessionId: 'ext-1' };
+    });
+    (window as unknown as Internals).__TAURI_INTERNALS__ = {
+      invoke: invokeSpy,
+      // Channel 构造依赖 transformCallback（真实环境由 Tauri 注入），stub 补最小实现。
+      transformCallback: () => 1,
+    };
+
+    const handleEvent = (event: unknown): void => {
+      events.push(event);
+    };
+    const result = await resumeTerminal({
+      installationId: 'claude@local',
+      sourceSessionId: 'ext-1',
+      cwd: null,
+      cols: 120,
+      rows: 30,
+      onEvent: handleEvent,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: { ...SESSION_PAYLOAD, launchMode: 'resume', sourceSessionId: 'ext-1' },
+    });
+    expect(invokeSpy.mock.calls[0]?.[1]).toMatchObject({
+      installationId: 'claude@local',
+      sourceSessionId: 'ext-1',
+      cwd: null,
+      cols: 120,
+      rows: 30,
+    });
+
+    // ready-before-spawn（ADR-0009）：invoke 之前回调必须已经挂好 —— invoke 收到的
+    // output（Channel）上此刻就能读到我们的回调，事件直达 handleEvent。
+    const output = (invokeSpy.mock.calls[0]?.[1] as Record<string, unknown>).output as {
+      onmessage?: (event: unknown) => void;
+    };
+    expect(output.onmessage).toBe(handleEvent);
+    output.onmessage?.({ kind: 'error', sessionId: 'hub-1', message: 'boom' });
+    expect(events).toEqual([{ kind: 'error', sessionId: 'hub-1', message: 'boom' }]);
+  });
+
+  it('返回 payload 缺 hubSessionId 时报 invalid-session-payload，不渲染半截记录', async () => {
+    (window as unknown as Internals).__TAURI_INTERNALS__ = {
+      invoke: async () => ({ status: 'running' }),
+      transformCallback: () => 1,
+    };
+
+    await expect(
+      resumeTerminal({
+        installationId: 'claude@local',
+        sourceSessionId: 'ext-1',
+        cwd: null,
+        cols: 120,
+        rows: 30,
+        onEvent,
+      }),
+    ).resolves.toEqual({ ok: false, error: 'invalid-session-payload' });
   });
 });
 

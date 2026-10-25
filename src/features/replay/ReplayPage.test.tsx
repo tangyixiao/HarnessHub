@@ -1,5 +1,5 @@
 import userEvent from '@testing-library/user-event';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ReplayPage } from '@/features/replay/ReplayPage';
@@ -128,6 +128,42 @@ const REPLAY_SESSION = {
   skippedKindCounts: { 'file-history-snapshot': 1, summary: 1 },
   malformedLines: 2,
 };
+
+/**
+ * 与 Rust `SessionRecord`（serde camelCase）同形：B9 `resume_terminal` 的返回。
+ * `launchMode = "resume"`、`sourceSessionId` 为传入的外部会话 id。
+ */
+const RESUMED_SESSION_RECORD = {
+  hubSessionId: 'hub-resume-1',
+  sourceSessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+  harnessId: 'claude',
+  installationId: 'claude@local',
+  projectId: null,
+  runtimeTargetId: 'local',
+  parentSessionId: null,
+  status: 'running',
+  launchMode: 'resume',
+  cwd: null,
+  worktreePath: null,
+  startedAt: '2026-10-25T11:00:00.000Z',
+  endedAt: null,
+  exitCode: null,
+  terminationReason: null,
+  pid: 4242,
+};
+
+/**
+ * B9 的 resume_terminal 走 Tauri Channel：stub 里必须补 transformCallback
+ * （真实环境由 Tauri 注入），否则 `new Channel()` 在 jsdom 里直接抛。
+ */
+function stubTauriWithChannel(
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>,
+): void {
+  (window as unknown as Internals).__TAURI_INTERNALS__ = {
+    invoke,
+    transformCallback: () => 1,
+  };
+}
 
 describe('ReplayPage', () => {
   it('有 replay 能力时渲染会话列表，点击后渲染只读时间线（消息正文、思考、子代理徽标、skipped 脚注）', async () => {
@@ -576,5 +612,123 @@ describe('ReplayPage', () => {
 
     expect(await screen.findByText(/回放索引未启用/)).toBeInTheDocument();
     expect(screen.queryByText(/搜索失败/)).not.toBeInTheDocument();
+  });
+
+  /* ---------------------------------------------------------------- *
+   * 在终端中恢复（ROADMAP B9）
+   * ---------------------------------------------------------------- */
+
+  it('claude（resume=true）渲染「在终端中恢复」：点击后成功提示含新会话 id，exited/error 事件落成一行状态', async () => {
+    const user = userEvent.setup();
+    const invokeSpy = vi.fn(async (cmd: string, _args?: Record<string, unknown>) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return REPLAY_SESSION;
+      if (cmd === 'resume_terminal') return RESUMED_SESSION_RECORD;
+      return null;
+    });
+    stubTauriWithChannel(invokeSpy);
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+
+    await user.click(await screen.findByRole('button', { name: '在终端中恢复' }));
+
+    // 成功提示含新终端会话的 id（返回 SessionRecord 的 hubSessionId）。
+    expect(await screen.findByText(/已在新终端会话恢复（hub-resume-1）/)).toBeInTheDocument();
+
+    // resume_terminal 收到的正是 claude 的 installationId 与本会话 id；
+    // cwd 传 null（编码后的 projectDir 不可靠还原），cols/rows 用 120/30 默认值。
+    const resumeCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'resume_terminal');
+    expect(resumeCall).toBeDefined();
+    const resumeArgs = resumeCall?.[1] as Record<string, unknown>;
+    expect(resumeArgs).toMatchObject({
+      installationId: 'claude@local',
+      sourceSessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+      cwd: null,
+      cols: 120,
+      rows: 30,
+    });
+
+    // onEvent 的 exited / error 落成一行简短状态（output 在回放页无处渲染，忽略）。
+    const output = resumeArgs.output as { onmessage: (event: unknown) => void };
+    act(() => {
+      output.onmessage({
+        kind: 'exited',
+        sessionId: 'hub-resume-1',
+        exitCode: 0,
+        reason: 'natural_exit',
+      });
+    });
+    expect(screen.getByText(/终端会话已结束（正常退出 · 退出码 0）/)).toBeInTheDocument();
+
+    // 最新一条事件覆盖上一条：状态行只有一行。
+    act(() => {
+      output.onmessage({ kind: 'error', sessionId: 'hub-resume-1', message: 'pty io error' });
+    });
+    expect(screen.getByText('终端会话错误：pty io error')).toBeInTheDocument();
+    expect(screen.queryByText(/终端会话已结束/)).not.toBeInTheDocument();
+  });
+
+  it('capabilities.resume 不为 true 时不渲染「在终端中恢复」按钮（不置灰、不给假入口）', async () => {
+    const user = userEvent.setup();
+    stubTauri(async (cmd: string) => {
+      if (cmd === 'list_harnesses') {
+        return [
+          { ...CLAUDE_HARNESS, capabilities: { ...CLAUDE_HARNESS.capabilities, resume: false } },
+        ];
+      }
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return REPLAY_SESSION;
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+
+    // 时间线照常渲染，恢复入口整个不出现。
+    expect(await screen.findByText('回答正文')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '在终端中恢复' })).not.toBeInTheDocument();
+  });
+
+  it('重复恢复的后端 reject（唯一索引）显示为行内提示「该外部会话已有恢复记录」', async () => {
+    const user = userEvent.setup();
+    stubTauriWithChannel(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return REPLAY_SESSION;
+      if (cmd === 'resume_terminal') {
+        throw new Error('UNIQUE constraint failed: sessions.source_session_id');
+      }
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+    await user.click(await screen.findByRole('button', { name: '在终端中恢复' }));
+
+    expect(await screen.findByText('该外部会话已有恢复记录')).toBeInTheDocument();
+    // 使用方式问题渲染成行内提示，绝不套「恢复失败」错误卡。
+    expect(screen.queryByText(/恢复失败/)).not.toBeInTheDocument();
+  });
+
+  it('其它恢复错误原样显示', async () => {
+    const user = userEvent.setup();
+    stubTauriWithChannel(async (cmd: string) => {
+      if (cmd === 'list_harnesses') return [CLAUDE_HARNESS];
+      if (cmd === 'replay_list_sessions') return [SESSION_SUMMARY];
+      if (cmd === 'replay_read_session') return REPLAY_SESSION;
+      if (cmd === 'resume_terminal') throw new Error('spawn pty failed: permission denied');
+      return null;
+    });
+
+    render(<ReplayPage />);
+    await user.click(await screen.findByRole('button', { name: /D--work-demo/ }));
+    await user.click(await screen.findByRole('button', { name: '在终端中恢复' }));
+
+    expect(
+      await screen.findByText(/恢复失败：spawn pty failed: permission denied/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('该外部会话已有恢复记录')).not.toBeInTheDocument();
   });
 });
