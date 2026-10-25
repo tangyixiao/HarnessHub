@@ -9,7 +9,7 @@
 //!     worktree 中跑」的声明），保持 false。
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -214,6 +214,7 @@ pub fn add(
 mod tests {
     use super::*;
     use crate::git::test_support::Repo;
+    use std::path::PathBuf;
 
     #[test]
     fn lists_main_detached_and_linked_worktrees() {
