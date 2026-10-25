@@ -316,6 +316,52 @@ pub fn replay_read_session(
     crate::replay::claude::read_session_by_id(&replay_roots(&state, &harness_id)?, &session_id)
 }
 
+/* ------------------------------------------------------------------ *
+ * 回放搜索（ROADMAP B7，migration 0011）
+ *
+ * 设置与搜索是纯 SQLite 操作；reindex 是显式用户动作（读外部转录、
+ * 写索引表），按 ADR-0012 的读写分离纪律不得在渲染路径自动触发。
+ * ------------------------------------------------------------------ */
+
+/// 回放搜索设置（默认关闭；关闭时后端已清空索引）。
+#[tauri::command]
+pub fn replay_search_settings_get(
+    state: State<'_, AppState>,
+) -> Result<crate::replay::index::SearchSettings> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::settings(database.connection())
+}
+
+/// 更新设置：关闭 = 清空索引；收紧排除名单 = 立即清掉对应索引行。
+#[tauri::command]
+pub fn replay_search_settings_set(
+    state: State<'_, AppState>,
+    settings: crate::replay::index::SearchSettings,
+) -> Result<()> {
+    let mut database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::set_settings(database.connection_mut(), &settings)
+}
+
+/// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
+#[tauri::command]
+pub fn replay_search_reindex(
+    state: State<'_, AppState>,
+) -> Result<crate::replay::index::ReindexReport> {
+    let mut database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let roots = replay_roots(&state, crate::harness::adapters::claude_code::CLAUDE_ID)?;
+    crate::replay::index::reindex(database.connection_mut(), &roots)
+}
+
+/// 搜索已索引的回放内容（纯读 SQLite；<3 字符报错——trigram 下限）。
+#[tauri::command]
+pub fn replay_search(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<crate::replay::index::SearchHit>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::search(database.connection(), &query)
+}
+
 /// 最近会话，按开始时间倒序。
 #[tauri::command]
 pub fn list_sessions(state: State<'_, AppState>, limit: Option<u32>) -> Result<Vec<SessionRecord>> {
@@ -806,6 +852,51 @@ mod tests {
         assert_eq!(json["modifiedMs"], 1_761_000_000_000i64);
         assert_eq!(json["firstUserPreview"], "预览");
         assert_eq!(json["startedAt"], "2026-10-25T10:00:00.000Z");
+    }
+
+    /// 跨 IPC 契约测试：回放搜索 DTO（ROADMAP B7）的键名形状。
+    #[test]
+    fn replay_search_dtos_serialize_with_camel_case_keys() {
+        let settings = crate::replay::index::SearchSettings {
+            enabled: true,
+            excluded_dirs: vec!["D--work-beta".to_string()],
+        };
+        // 输入方向（TS → Rust）也要能按 camelCase 反序列化。
+        let roundtrip: crate::replay::index::SearchSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(roundtrip, settings);
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["excludedDirs"], serde_json::json!(["D--work-beta"]));
+
+        let report = crate::replay::index::ReindexReport {
+            scanned: 68,
+            indexed: 7,
+            unchanged: 60,
+            excluded: 1,
+            removed: 0,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["scanned"], 68);
+        assert_eq!(json["indexed"], 7);
+        assert_eq!(json["unchanged"], 60);
+        assert_eq!(json["excluded"], 1);
+        assert_eq!(json["removed"], 0);
+
+        let hit = crate::replay::index::SearchHit {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            seq: 3,
+            role: "assistant".to_string(),
+            snippet: "…«迁移»逻辑…".to_string(),
+            first_user_preview: None,
+        };
+        let json = serde_json::to_value(&hit).unwrap();
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["role"], "assistant");
+        assert!(json["snippet"].as_str().unwrap().contains('«'));
+        assert!(json["firstUserPreview"].is_null());
     }
 
     /// 跨 IPC 契约测试：`session_git_summary` 的返回形状（ROADMAP A3）。
