@@ -25,17 +25,11 @@ Hub 能发现并展示每个 Harness 的「当前配置形态」：环境变量�
     `[model_providers.*]` 的 `base_url`（toml crate 已在依赖树），**只读**。
   - `gemini.rs`：读 `~/.gemini/.env` 的 `GEMINI_API_KEY` 是否存在（值脱敏为
     `set`/`unset`，**绝不把 key 值带出 Rust 层**）。
-- [ ] `ProfileAdapter` trait：`fn discover(&self) -> Result<Option<ProfileSummary>>`
-  （None = 配置文件不存在，不是错误）。
-- [ ] IPC `profile_discover(harness_id) -> Option<ProfileSummary>`：纯读；
-  未注册 harness → 错误。
-- [ ] 契约测试（camelCase、脱敏字段、None 语义）+ 每个解析器各自的
-  fixture 测试（合法 / 缺文件 / 语法坏 / 键缺失）。
-- [ ] 前端 Settings 页新增「Provider 配置现状」区（flash 子 agent）：
-  harness 下拉 → 展示 fields（key=value 等宽），无配置显示空态。
-- [ ] **安全红线**：任何 API key / token / secret 值不得跨 IPC——
-  gemini 只报 `apiKey: "set" | "unset"`；claude/codex 的 env 块如有
-  `*KEY*` / `*TOKEN*` / `*SECRET*` 模式的键，值一律替换为 `<redacted>`。
+- [ ] `ProfileAdapter` trait：`fn discover(&self) -> Result<Option<ProfileSummary>>`（None = 配置文件不存在，不是错误）。
+- [ ] IPC `profile_discover(harness_id) -> Option<ProfileSummary>`：纯读；未注册 harness → 错误。
+- [ ] 契约测试（camelCase、脱敏字段、None 语义）+ 每个解析器各自的 fixture 测试（合法 / 缺文件 / 语法坏 / 键缺失）。
+- [ ] 前端 Settings 页新增「Provider 配置现状」区（flash 子 agent）：harness 下拉 → 展示 fields（key=value 等宽），无配置显示空态。
+- [ ] **安全红线**：任何 API key / token / secret 值不得跨 IPC——gemini 只报 `apiKey: "set" | "unset"`；claude/codex 的 env 块如有 `*KEY*` / `*TOKEN*` / `*SECRET*` 模式的键，值一律替换为 `<redacted>`。
 
 ## Non-goals
 
