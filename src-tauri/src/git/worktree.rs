@@ -73,7 +73,10 @@ fn parse_porcelain(stdout: &str) -> Result<Vec<WorktreeEntry>> {
                 pending.head = Some(value.to_string());
             } else if let Some(value) = line.strip_prefix("branch ") {
                 pending.branch = Some(
-                    value.strip_prefix("refs/heads/").unwrap_or(value).to_string(),
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
                 );
             } else if line == "detached" {
                 pending.detached = true;
@@ -84,16 +87,12 @@ fn parse_porcelain(stdout: &str) -> Result<Vec<WorktreeEntry>> {
             } else if line.is_empty() {
                 // 条目分隔：由下一个 worktree 前缀触发 flush。
             } else {
-                return Err(Error::Git(format!(
-                    "porcelain 输出含未知行：{line}"
-                )));
+                return Err(Error::Git(format!("porcelain 输出含未知行：{line}")));
             }
         } else if line.is_empty() {
             continue;
         } else {
-            return Err(Error::Git(format!(
-                "porcelain 输出以未知行开头：{line}"
-            )));
+            return Err(Error::Git(format!("porcelain 输出以未知行开头：{line}")));
         }
     }
     if let Some(pending) = current.take() {
@@ -139,7 +138,10 @@ fn git_at(repo_root: &Path, tail: Vec<OsString>, limits: Limits) -> Result<Vec<u
         Ok(output.stdout)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(Error::Git(format!("git worktree 操作失败：{}", stderr.trim())))
+        Err(Error::Git(format!(
+            "git worktree 操作失败：{}",
+            stderr.trim()
+        )))
     }
 }
 
@@ -167,11 +169,16 @@ pub fn add(
         return Err(Error::InvalidInput("分支名不能为空".to_string()));
     }
     // 路径安全红线：目标不允许位于仓库内部。
-    // 目标多半还不存在（canonicalize 会失败），用 absolute 做无 IO 归一化；
+    // 目标多半还不存在（canonicalize 会失败），所以先做无 IO 的绝对化 +
+    // 字符串前缀比较（`..` 段会以 `..\` 形态打断前缀或被多拦——方向安全）；
     // 已存在的目标再叠一层 canonicalize 防 `..` 与链接绕过。
-    // canonicalize 会产生 `\\?\` verbatim 前缀，比对前统一剥掉（Windows 大小写不敏感）。
+    // canonicalize 会产生 `\\?\` verbatim 前缀，is_inside 统一剥掉。
     let canonical_root = repo_root.canonicalize()?;
-    let absolute_target = std::path::absolute(path)?;
+    let absolute_target = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     if is_inside(&absolute_target, &canonical_root)
         || path
             .canonicalize()
@@ -193,8 +200,10 @@ pub fn add(
         tail.push(branch.into());
     }
     // 检出可能耗时（大仓库），10 秒上限。
-    let mut limits = Limits::default();
-    limits.timeout = std::time::Duration::from_secs(10);
+    let limits = Limits {
+        timeout: std::time::Duration::from_secs(10),
+        ..Default::default()
+    };
     git_at(repo_root, tail, limits)?;
 
     // add 成功后从 list 读回（形状归一，避免解析 add 的进度输出）。
@@ -224,10 +233,11 @@ mod tests {
         repo.git(&["commit", "-qm", "initial"]);
 
         let main_path = repo.0.canonicalize().unwrap();
-        let wt_dir = repo.0.parent().unwrap().join(format!(
-            "hh-wt-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let wt_dir = repo
+            .0
+            .parent()
+            .unwrap()
+            .join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
         // 显式创建：这正是被测函数——先手动跑一次保证 list 有 linked 条目。
         let entry = add(&repo.0, &wt_dir, "feature-x", true).expect("add");
         assert_eq!(entry.branch.as_deref(), Some("feature-x"));
@@ -257,7 +267,9 @@ mod tests {
         let detached = entries
             .iter()
             .find(|entry| {
-                Path::new(&entry.path).canonicalize().is_ok_and(|canonical| canonical == wt_canonical)
+                Path::new(&entry.path)
+                    .canonicalize()
+                    .is_ok_and(|canonical| canonical == wt_canonical)
             })
             .expect("链接树");
         assert!(detached.detached);
@@ -289,13 +301,19 @@ mod tests {
         // 已存在的分支：create_branch=false 复用（git 语义：该分支不能正被
         // 其它 worktree 检出，所以先建一个未检出的分支）；=true 由 git 报冲突。
         repo.git(&["branch", "reuse-me"]);
-        let reuse =
-            repo.0.parent().unwrap().join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
+        let reuse = repo
+            .0
+            .parent()
+            .unwrap()
+            .join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
         let reused = add(&repo.0, &reuse, "reuse-me", false).expect("复用分支");
         assert_eq!(reused.branch.as_deref(), Some("reuse-me"));
 
-        let conflict =
-            repo.0.parent().unwrap().join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
+        let conflict = repo
+            .0
+            .parent()
+            .unwrap()
+            .join(format!("hh-wt-{}", uuid::Uuid::new_v4()));
         assert!(add(&repo.0, &conflict, "reuse-me", true).is_err());
 
         let _ = std::fs::remove_dir_all(&reuse);

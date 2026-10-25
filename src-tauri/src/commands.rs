@@ -352,7 +352,9 @@ fn require_registered_project(
                 })
         })
         .ok_or_else(|| {
-            Error::InvalidInput(format!("未登记的项目根：{repo_root}（先在 Projects 页登记）"))
+            Error::InvalidInput(format!(
+                "未登记的项目根：{repo_root}（先在 Projects 页登记）"
+            ))
         })
 }
 
