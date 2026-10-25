@@ -6,6 +6,7 @@ import { ActivityPage } from '@/features/history/ActivityPage';
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { HarnessesPage } from '@/features/harnesses/HarnessesPage';
 import { ProjectsPage } from '@/features/projects/ProjectsPage';
+import { ReplayPage } from '@/features/replay/ReplayPage';
 import { SessionsPage } from '@/features/sessions/SessionsPage';
 import { SettingsPage } from '@/features/settings/SettingsPage';
 
@@ -42,6 +43,8 @@ export const routes: RouteObject[] = [
       { path: 'harnesses', element: <HarnessesPage /> },
       { path: 'projects', element: <ProjectsPage /> },
       { path: 'sessions', element: <SessionsPage /> },
+      // 只读回放（ROADMAP B6）：页面很轻（无 xterm 之类重依赖），静态导入即可。
+      { path: 'replay', element: <ReplayPage /> },
       {
         path: 'terminal',
         element: (

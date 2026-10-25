@@ -75,11 +75,17 @@ pub fn read_session(path: &Path) -> Result<ReplaySession> {
                 if let Some(message) = parse_message(kind, &value) {
                     session.messages.push(message);
                 } else {
-                    *session.skipped_kind_counts.entry(kind.to_string()).or_default() += 1;
+                    *session
+                        .skipped_kind_counts
+                        .entry(kind.to_string())
+                        .or_default() += 1;
                 }
             }
             other => {
-                *session.skipped_kind_counts.entry(other.to_string()).or_default() += 1;
+                *session
+                    .skipped_kind_counts
+                    .entry(other.to_string())
+                    .or_default() += 1;
             }
         }
     }
@@ -165,17 +171,17 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
 /// 根形态：`<root>/projects/<project-dir>/<session-id>.jsonl`（取证见模块注释）。
 /// 预读窗口内找首条 user 消息做预览与首/末时间戳；找不到就如实 None。
 pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
-    discover(roots).into_iter().map(|(_, summary)| summary).collect()
+    discover(roots)
+        .into_iter()
+        .map(|(_, summary)| summary)
+        .collect()
 }
 
 /// 按 session id 解析并读取一条回放。
 ///
 /// **路径白名单**：session_id 必须命中发现结果，路径由后端自己解析，
 /// IPC 层不接受文件系统路径（防任意文件读取）。找不到 → Ok(None)。
-pub fn read_session_by_id(
-    roots: &[PathBuf],
-    session_id: &str,
-) -> Result<Option<ReplaySession>> {
+pub fn read_session_by_id(roots: &[PathBuf], session_id: &str) -> Result<Option<ReplaySession>> {
     let Some(path) = discover(roots)
         .into_iter()
         .find(|(_, summary)| summary.session_id == session_id)
@@ -214,7 +220,7 @@ fn discover(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
         }
     }
 
-    found.sort_by(|(_, a), (_, b)| b.modified_ms.cmp(&a.modified_ms));
+    found.sort_by_key(|(_, summary)| std::cmp::Reverse(summary.modified_ms));
     found
 }
 
@@ -325,7 +331,10 @@ mod tests {
         // sidechain 一对消息带标记。
         assert!(session.messages[3].sidechain);
         assert!(session.messages[4].sidechain);
-        assert_eq!(session.messages[4].text_parts, vec!["tests 目录里没有 TODO。"]);
+        assert_eq!(
+            session.messages[4].text_parts,
+            vec!["tests 目录里没有 TODO。"]
+        );
 
         // 数组形态的 user content（sidechain 里的 text 数组）。
         assert_eq!(
@@ -411,7 +420,7 @@ mod tests {
         // 触发 mtime 排序差异：把 newer 的 mtime 拨到未来不可移植，改为先写 older、
         // 后写 newer 依赖写入顺序（同 tick 时按稳定排序兜底，断言只要求集合正确）。
 
-        let summaries = list_sessions(&[temp.clone()]);
+        let summaries = list_sessions(std::slice::from_ref(&temp));
         assert_eq!(summaries.len(), 2, "两个 jsonl 都要被发现");
         assert!(summaries
             .iter()
@@ -425,7 +434,11 @@ mod tests {
 
         // 非 jsonl / 空 projects / 根不存在的容错。
         std::fs::write(project.join("notes.txt"), b"not a transcript").unwrap();
-        assert_eq!(list_sessions(&[temp.clone()]).len(), 2, "txt 不计入");
+        assert_eq!(
+            list_sessions(std::slice::from_ref(&temp)).len(),
+            2,
+            "txt 不计入"
+        );
         assert!(list_sessions(&[temp.join("does-not-exist")]).is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -449,10 +462,14 @@ mod tests {
         )
         .unwrap();
 
-        let summaries = list_sessions(&[temp.clone()]);
+        let summaries = list_sessions(std::slice::from_ref(&temp));
         assert_eq!(summaries.len(), 1);
         let preview = summaries[0].first_user_preview.as_deref().unwrap();
-        assert_eq!(preview.chars().count(), PREVIEW_CHARS + 1, "120 字 + 省略号");
+        assert_eq!(
+            preview.chars().count(),
+            PREVIEW_CHARS + 1,
+            "120 字 + 省略号"
+        );
         assert!(preview.ends_with('…'));
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -460,11 +477,8 @@ mod tests {
     /// fixture 必须能被发现列表消费（同一解析路径，防 fixture 与解析器漂移）。
     #[test]
     fn fixture_directory_is_listable() {
-        let summary = summarize(
-            &fixture_path(),
-            std::ffi::OsStr::new("D--work-demo"),
-        )
-        .expect("fixture 可摘要");
+        let summary = summarize(&fixture_path(), std::ffi::OsStr::new("D--work-demo"))
+            .expect("fixture 可摘要");
         assert_eq!(summary.session_id, "basic");
         assert_eq!(
             summary.first_user_preview.as_deref(),
@@ -503,13 +517,13 @@ mod tests {
             .unwrap()
             .expect("命中的 session 必须能读");
         assert_eq!(hit.messages.len(), 1);
-        assert!(read_session_by_id(&roots, "does-not-exist").unwrap().is_none());
+        assert!(read_session_by_id(&roots, "does-not-exist")
+            .unwrap()
+            .is_none());
         // 目录穿越 / 路径注入尝试同样只是「不认识」。
-        assert!(
-            read_session_by_id(&roots, "../../etc/passwd")
-                .unwrap()
-                .is_none()
-        );
+        assert!(read_session_by_id(&roots, "../../etc/passwd")
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

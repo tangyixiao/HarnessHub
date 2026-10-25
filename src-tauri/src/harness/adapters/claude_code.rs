@@ -277,9 +277,12 @@ mod tests {
             "Claude 已通过真机 GUI 双向交互 + resize"
         );
         assert!(capabilities.usage, "Claude 已通过真机 ccusage 逐 key 对账");
+        assert!(
+            capabilities.replay,
+            "B6：只读回放解析有 fixture 回归 + 真机只读 smoke（tests/claude_replay_smoke.rs）"
+        );
         for (name, value) in [
             ("resume", capabilities.resume),
-            ("replay", capabilities.replay),
             ("tool_calls", capabilities.tool_calls),
             ("subagents", capabilities.subagents),
             ("live_state", capabilities.live_state),

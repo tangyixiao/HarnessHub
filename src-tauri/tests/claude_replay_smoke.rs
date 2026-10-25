@@ -36,7 +36,9 @@ fn real_claude_transcripts_list_and_read_read_only() {
 
     // 摘要的健康断言：id 非空、按 mtime 倒序、体积非零。
     assert!(summaries.iter().all(|s| !s.session_id.is_empty()));
-    assert!(summaries.windows(2).all(|pair| pair[0].modified_ms >= pair[1].modified_ms));
+    assert!(summaries
+        .windows(2)
+        .all(|pair| pair[0].modified_ms >= pair[1].modified_ms));
     assert!(summaries.iter().all(|s| s.size_bytes > 0));
 
     // 真机事实（2026-10-25）：存在大量「只有 permission-mode 一行」的空转录
@@ -65,8 +67,14 @@ fn real_claude_transcripts_list_and_read_read_only() {
         session.malformed_lines
     );
     assert!(!session.messages.is_empty());
-    assert!(session.messages.iter().enumerate().all(|(index, m)| m.seq == index as u64));
+    assert!(session
+        .messages
+        .iter()
+        .enumerate()
+        .all(|(index, m)| m.seq == index as u64));
 
     // 路径白名单：随机 id 必须 None。
-    assert!(read_session_by_id(&roots, "no-such-session-id").unwrap().is_none());
+    assert!(read_session_by_id(&roots, "no-such-session-id")
+        .unwrap()
+        .is_none());
 }

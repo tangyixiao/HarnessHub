@@ -767,7 +767,10 @@ mod tests {
         assert_eq!(json["sidechain"], true);
         assert_eq!(json["textParts"], serde_json::json!(["回答"]));
         assert_eq!(json["thinkingParts"], serde_json::json!(["思考"]));
-        assert_eq!(json["unsupportedContentKinds"], serde_json::json!({"tool_use": 2}));
+        assert_eq!(
+            json["unsupportedContentKinds"],
+            serde_json::json!({"tool_use": 2})
+        );
         for snake in ["text_parts", "thinking_parts", "unsupported_content_kinds"] {
             assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
         }

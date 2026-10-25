@@ -18,6 +18,7 @@ import {
   isTauriRuntime,
   listHarnesses,
   listProjects,
+  listReplaySessions,
   listSessions,
   listPlugins,
   normalizeActivityTimeline,
@@ -25,6 +26,8 @@ import {
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProjectRecord,
+  normalizeReplaySession,
+  normalizeReplaySessionSummary,
   normalizeSessionGitSnapshot,
   normalizeSessionGitSummary,
   normalizeSessionRecord,
@@ -34,6 +37,7 @@ import {
   normalizeUsageSource,
   normalizeUsageSummary,
   pluginRefresh,
+  readReplaySession,
   refreshHarnesses,
   refreshUsage,
   registerProject,
@@ -1417,6 +1421,230 @@ describe('getSessionGitSnapshots', () => {
 
   it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
     await expect(getSessionGitSnapshots('h1')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});
+
+/**
+ * IPC 契约 `replay_list_sessions` / `replay_read_session` 的返回项（serde camelCase），
+ * 形状手工复刻自 Rust 契约测试 `replay_dtos_serialize_with_camel_case_keys`
+ * （src-tauri/src/commands.rs）：role 枚举值 snake_case，计数是字符串→数字的对象。
+ */
+const REPLAY_SUMMARY_PAYLOAD = {
+  harnessId: 'claude',
+  sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+  projectDir: 'D--work-demo',
+  sizeBytes: 1024,
+  modifiedMs: 1_761_000_000_000,
+  firstUserPreview: '帮我看看这个报错',
+  startedAt: '2026-10-25T10:00:00.000Z',
+  lastAt: '2026-10-25T10:01:00.000Z',
+};
+
+const REPLAY_MESSAGE_PAYLOAD = {
+  seq: 3,
+  role: 'assistant',
+  sidechain: true,
+  timestamp: '2026-10-25T10:00:05.000Z',
+  textParts: ['回答'],
+  thinkingParts: ['思考'],
+  model: 'claude-sonnet-4-6',
+  unsupportedContentKinds: { tool_use: 2 },
+};
+
+const REPLAY_SESSION_PAYLOAD = {
+  harnessId: 'claude',
+  sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+  sourcePath: 'C:/Users/dev/.claude/projects/D--work-demo/b3a1.jsonl',
+  messages: [REPLAY_MESSAGE_PAYLOAD],
+  skippedKindCounts: { summary: 1 },
+  malformedLines: 1,
+};
+
+describe('normalizeReplaySession', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeReplaySession(REPLAY_SESSION_PAYLOAD)).toEqual(REPLAY_SESSION_PAYLOAD);
+  });
+
+  it('缺 sessionId 的条目返回 null，由调用方丢弃', () => {
+    expect(normalizeReplaySession({ sourcePath: 'D:/x.jsonl' })).toBeNull();
+    expect(normalizeReplaySession({ sessionId: '   ' })).toBeNull();
+    expect(normalizeReplaySession(null)).toBeNull();
+    expect(normalizeReplaySession('session')).toBeNull();
+  });
+
+  it('role 只认 user / assistant，其它角色的消息整条丢弃', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [
+        REPLAY_MESSAGE_PAYLOAD,
+        { ...REPLAY_MESSAGE_PAYLOAD, seq: 4, role: 'system' },
+        { ...REPLAY_MESSAGE_PAYLOAD, seq: 5, role: undefined },
+      ],
+    });
+
+    expect(session?.messages).toHaveLength(1);
+    expect(session?.messages[0]?.seq).toBe(3);
+  });
+
+  it('messages 非数组时收敛为空列表', () => {
+    const session = normalizeReplaySession({ ...REPLAY_SESSION_PAYLOAD, messages: 'oops' });
+
+    expect(session?.messages).toEqual([]);
+  });
+
+  it('计数对象非对象时收敛为空对象', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      skippedKindCounts: 'nonsense',
+    });
+    const message = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [{ ...REPLAY_MESSAGE_PAYLOAD, unsupportedContentKinds: 42 }],
+    });
+
+    expect(session?.skippedKindCounts).toEqual({});
+    expect(message?.messages[0]?.unsupportedContentKinds).toEqual({});
+  });
+
+  it('sidechain 只认 true，字符串与数字都不算子代理消息', () => {
+    const falsy = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [{ ...REPLAY_MESSAGE_PAYLOAD, sidechain: 'true' }],
+    });
+    const numeric = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [{ ...REPLAY_MESSAGE_PAYLOAD, sidechain: 1 }],
+    });
+
+    expect(falsy?.messages[0]?.sidechain).toBe(false);
+    expect(numeric?.messages[0]?.sidechain).toBe(false);
+  });
+
+  it('计数里的非数字值被丢弃，不渲染字符串计数', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      skippedKindCounts: { summary: '1', permission: 2 },
+    });
+
+    expect(session?.skippedKindCounts).toEqual({ permission: 2 });
+  });
+
+  it('字段缺失时补安全默认值，而不是产生 undefined', () => {
+    expect(normalizeReplaySession({ sessionId: 's1' })).toEqual({
+      harnessId: '',
+      sessionId: 's1',
+      sourcePath: '',
+      messages: [],
+      skippedKindCounts: {},
+      malformedLines: 0,
+    });
+  });
+});
+
+describe('normalizeReplaySessionSummary', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeReplaySessionSummary(REPLAY_SUMMARY_PAYLOAD)).toEqual(REPLAY_SUMMARY_PAYLOAD);
+  });
+
+  it('缺 sessionId 的条目返回 null，由调用方丢弃', () => {
+    expect(normalizeReplaySessionSummary({ projectDir: 'D--work-demo' })).toBeNull();
+    expect(normalizeReplaySessionSummary({ sessionId: '' })).toBeNull();
+    expect(normalizeReplaySessionSummary(null)).toBeNull();
+    expect(normalizeReplaySessionSummary(42)).toBeNull();
+  });
+
+  it('数值缺省 0，预览与时间缺省 null（不是编造的 0 元数据）', () => {
+    expect(normalizeReplaySessionSummary({ sessionId: 's1' })).toEqual({
+      harnessId: '',
+      sessionId: 's1',
+      projectDir: '',
+      sizeBytes: 0,
+      modifiedMs: 0,
+      firstUserPreview: null,
+      startedAt: null,
+      lastAt: null,
+    });
+  });
+
+  it('数值里的非数字收敛为 0，不把字符串渲染出来', () => {
+    const summary = normalizeReplaySessionSummary({
+      ...REPLAY_SUMMARY_PAYLOAD,
+      sizeBytes: '1024',
+      modifiedMs: null,
+    });
+
+    expect(summary?.sizeBytes).toBe(0);
+    expect(summary?.modifiedMs).toBe(0);
+  });
+});
+
+describe('replay IPC wrappers（ROADMAP B6）', () => {
+  it('listReplaySessions 使用 replay_list_sessions 命令名并传 harnessId', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [REPLAY_SUMMARY_PAYLOAD]);
+    stubTauri(invokeSpy);
+
+    const result = await listReplaySessions('claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_list_sessions');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: [REPLAY_SUMMARY_PAYLOAD] });
+  });
+
+  it('listReplaySessions 后端返回非数组时按空列表处理，并丢弃残缺条目', async () => {
+    stubTauri(async (cmd) => (cmd === 'replay_list_sessions' ? [{ nope: 1 }, null] : null));
+
+    // 非 claude 的 harness 按契约返回空数组；残缺条目（缺 sessionId）同样被过滤。
+    await expect(listReplaySessions('codex')).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('listReplaySessions 把后端错误原样传出', async () => {
+    stubTauri(async () => {
+      throw new Error('未注册的 Harness：codex');
+    });
+
+    await expect(listReplaySessions('codex')).resolves.toEqual({
+      ok: false,
+      error: '未注册的 Harness：codex',
+    });
+  });
+
+  it('readReplaySession 使用 replay_read_session 命令名并传 harnessId + sessionId', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => REPLAY_SESSION_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await readReplaySession('claude', REPLAY_SESSION_PAYLOAD.sessionId);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_read_session');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      harnessId: 'claude',
+      sessionId: REPLAY_SESSION_PAYLOAD.sessionId,
+    });
+    expect(result).toEqual({ ok: true, data: REPLAY_SESSION_PAYLOAD });
+  });
+
+  it('readReplaySession 保留三态：null（未命中白名单）不是错误也不是空会话', async () => {
+    stubTauri(async () => null);
+
+    await expect(readReplaySession('claude', 'gone')).resolves.toEqual({ ok: true, data: null });
+  });
+
+  it('readReplaySession 把后端错误原样传出（如转录超过大小上限）', async () => {
+    stubTauri(async () => {
+      throw new Error('转录超过 16 MiB 上限');
+    });
+
+    await expect(readReplaySession('claude', 'big')).resolves.toEqual({
+      ok: false,
+      error: '转录超过 16 MiB 上限',
+    });
+  });
+
+  it('不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(listReplaySessions('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(readReplaySession('claude', 's1')).resolves.toEqual({
       ok: false,
       error: NOT_IN_TAURI,
     });

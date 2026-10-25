@@ -1534,3 +1534,209 @@ export async function getSessionGitSummary(
 
   return { ok: true, data: normalizeSessionGitSummary(result.data) };
 }
+
+/* ------------------------------------------------------------------ *
+ * 会话回放（ROADMAP B6，只读）
+ * ------------------------------------------------------------------ */
+
+/** 回放消息的角色。与 Rust `ReplayRole`（serde snake_case）一致。 */
+export type ReplayRole = 'user' | 'assistant';
+
+/** 一条可回放的消息（与 Rust `ReplayMessage`，serde camelCase 同形）。 */
+export type ReplayMessage = {
+  seq: number;
+  role: ReplayRole;
+  /** sidechain（子代理链）里的消息；B8 会用它构建子代理树。 */
+  sidechain: boolean;
+  timestamp: string | null;
+  /** 正文 text 部分，按出现顺序。 */
+  textParts: string[];
+  /** thinking 部分（UI 渲染为「思考」标注区，不与正文混排）。 */
+  thinkingParts: string[];
+  model: string | null;
+  /** 认识但 B6 不展开的内容种类（如 tool_use）→ 出现次数。 */
+  unsupportedContentKinds: Record<string, number>;
+};
+
+/** 一次完整的只读回放（与 Rust `ReplaySession`，serde camelCase 同形）。 */
+export type ReplaySession = {
+  harnessId: string;
+  sessionId: string;
+  /** 转录文件的真实路径；只用于展示出处，UI 上不可点击、不可传回。 */
+  sourcePath: string;
+  messages: ReplayMessage[];
+  /** 被跳过的行类型（summary / file-history-snapshot / …）→ 次数。 */
+  skippedKindCounts: Record<string, number>;
+  /** 无法解析为 JSON 的行数。 */
+  malformedLines: number;
+};
+
+/** 列表项摘要（与 Rust `ReplaySessionSummary`，serde camelCase 同形）。 */
+export type ReplaySessionSummary = {
+  harnessId: string;
+  sessionId: string;
+  /** 转录所在的项目目录名（Claude 用编码后的路径名，如 `D--work-demo`）。 */
+  projectDir: string;
+  sizeBytes: number;
+  /** 修改时间（Unix 毫秒）。列表排序键：后端已按 mtime 倒序，前端不重排。 */
+  modifiedMs: number;
+  /** 首条 user 消息预览（≤ 120 字符）；无则 null。 */
+  firstUserPreview: string | null;
+  /** 预读窗口内的首/末时间戳；文件超过预读上限时 last 只是下界。 */
+  startedAt: string | null;
+  lastAt: string | null;
+};
+
+const REPLAY_ROLES: readonly ReplayRole[] = ['user', 'assistant'];
+
+/**
+ * 收敛「字符串 → 次数」的计数对象（skippedKindCounts / unsupportedContentKinds）。
+ *
+ * 完全不是对象 → `{}`；个别键的值不是有限数字 → 丢弃该键。
+ * 宁可少显示一个计数，也不把字符串 / undefined 当成 0 渲染出来。
+ */
+function asCountMap(raw: unknown): Record<string, number> {
+  if (typeof raw !== 'object' || raw === null) {
+    return {};
+  }
+
+  const counts: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      counts[key] = value;
+    }
+  }
+  return counts;
+}
+
+/**
+ * 收敛 IPC 边界上的一条回放消息。
+ *
+ * `role` 只认 user / assistant：解析层认识的行形状就这两种，其它（未来的
+ * system / tool 行）整条丢弃，绝不猜成 user 或 assistant 渲染出来。
+ * `sidechain` 只认 `true` —— 「不确定」绝不能渲染成「子代理」。
+ */
+function normalizeReplayMessage(raw: unknown): ReplayMessage | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const role = REPLAY_ROLES.find((candidate) => candidate === source.role);
+  if (role === undefined) {
+    return null;
+  }
+
+  return {
+    seq: asNumber(source.seq),
+    role,
+    sidechain: source.sidechain === true,
+    timestamp: asStringOrNull(source.timestamp),
+    textParts: asStringArray(source.textParts),
+    thinkingParts: asStringArray(source.thinkingParts),
+    model: asStringOrNull(source.model),
+    unsupportedContentKinds: asCountMap(source.unsupportedContentKinds),
+  };
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `ReplaySession`。
+ *
+ * 拿不到 `sessionId` 丢弃（没有 id 的回放在 UI 上无法定位）；`messages` 非数组
+ * 或条目残缺时逐条过滤；计数对象非对象 → `{}`。只读命令，payload 形状漂移
+ * 不该让整页白屏。
+ */
+export function normalizeReplaySession(raw: unknown): ReplaySession | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const sessionId = typeof source.sessionId === 'string' ? source.sessionId.trim() : '';
+  if (sessionId.length === 0) {
+    return null;
+  }
+
+  const messages = Array.isArray(source.messages)
+    ? source.messages
+        .map(normalizeReplayMessage)
+        .filter((message): message is ReplayMessage => message !== null)
+    : [];
+
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    sessionId,
+    sourcePath: typeof source.sourcePath === 'string' ? source.sourcePath : '',
+    messages,
+    skippedKindCounts: asCountMap(source.skippedKindCounts),
+    malformedLines: asNumber(source.malformedLines),
+  };
+}
+
+/**
+ * 收敛发现列表里的一条摘要。拿不到 `sessionId` 丢弃 —— 点击后要用它去
+ * `replay_read_session` 换正文，没有 id 的行既打不开也修不好。
+ */
+export function normalizeReplaySessionSummary(raw: unknown): ReplaySessionSummary | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const sessionId = typeof source.sessionId === 'string' ? source.sessionId.trim() : '';
+  if (sessionId.length === 0) {
+    return null;
+  }
+
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    sessionId,
+    projectDir: typeof source.projectDir === 'string' ? source.projectDir : '',
+    sizeBytes: asNumber(source.sizeBytes),
+    modifiedMs: asNumber(source.modifiedMs),
+    firstUserPreview: asStringOrNull(source.firstUserPreview),
+    startedAt: asStringOrNull(source.startedAt),
+    lastAt: asStringOrNull(source.lastAt),
+  };
+}
+
+/**
+ * 某个 Harness 的可回放会话列表（只读发现 + 有界预读，不落库）。
+ *
+ * 非 claude 的 harness 按契约返回空数组；列表保持后端顺序（mtime 倒序），
+ * 前端不重排。
+ */
+export async function listReplaySessions(
+  harnessId: string,
+): Promise<IpcResult<ReplaySessionSummary[]>> {
+  const result = await invokeCommand<unknown>('replay_list_sessions', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const sessions = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeReplaySessionSummary)
+        .filter((summary): summary is ReplaySessionSummary => summary !== null)
+    : [];
+
+  return { ok: true, data: sessions };
+}
+
+/**
+ * 读取一条回放正文（按 session_id；路径由后端白名单解析，前端传不了路径）。
+ *
+ * 三态：`data: null` = 未命中发现结果（转录可能已被移动 / 清理），不是错误；
+ * `ok: false` = 真失败（如转录超过大小上限）；其余为完整会话。
+ */
+export async function readReplaySession(
+  harnessId: string,
+  sessionId: string,
+): Promise<IpcResult<ReplaySession | null>> {
+  const result = await invokeCommand<unknown>('replay_read_session', { harnessId, sessionId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeReplaySession(result.data) };
+}
