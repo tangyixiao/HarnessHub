@@ -85,6 +85,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0010_git_snapshots.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 11,
+        name: "0011_replay_search",
+        sql: include_str!("migrations/0011_replay_search.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -244,6 +250,9 @@ mod tests {
         "permission_decisions",
         "plugins",
         "git_snapshots",
+        "replay_search_settings",
+        "replay_index_state",
+        "replay_messages",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -769,8 +778,14 @@ mod tests {
         .expect("会话");
 
         let applied = apply_pending(&mut conn).expect("升级到最新");
-        assert_eq!(applied, vec!["0010_git_snapshots".to_string()]);
-        assert_eq!(current_version(&conn).expect("版本"), 10);
+        assert_eq!(
+            applied,
+            vec![
+                "0010_git_snapshots".to_string(),
+                "0011_replay_search".to_string()
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 11);
 
         const INSERT_SNAPSHOT: &str = "INSERT INTO git_snapshots
             (hub_session_id, phase, captured_at, worktree_root, head,
@@ -816,6 +831,65 @@ mod tests {
             .query_row("SELECT count(*) FROM git_snapshots", [], |row| row.get(0))
             .expect("计数");
         assert_eq!(remaining, 0, "会话删除后快照必须级联删除");
+    }
+
+    /// 迁移 0011：v10 老库升级后回放搜索表可用；设置默认关闭（隐私纪律）。
+    #[test]
+    fn migration_0011_adds_replay_search_to_a_v10_database() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 10).expect("建到 v10");
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'
+                 AND name IN ('replay_search_settings', 'replay_index_state', 'replay_messages')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v10 表检查");
+        assert_eq!(missing, 0, "v10 不该有回放搜索表");
+
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(applied, vec!["0011_replay_search".to_string()]);
+        assert_eq!(current_version(&conn).expect("版本"), 11);
+
+        // 设置表恰好一行且默认关闭。
+        let (rows, enabled, excluded): (i64, i64, String) = conn
+            .query_row(
+                "SELECT count(*) OVER (), enabled, excluded_dirs FROM replay_search_settings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("读取设置");
+        assert_eq!(rows, 1);
+        assert_eq!(enabled, 0, "索引默认必须关闭");
+        assert_eq!(excluded, "[]");
+
+        // FTS5 trigram 真的能用（含中文子串）。
+        conn.execute(
+            "INSERT INTO replay_messages (harness_id, session_id, seq, role, text_content)
+             VALUES ('claude', 's1', 0, 'user', '帮我在这个仓库里找到所有 TODO')",
+            [],
+        )
+        .expect("写入 FTS5");
+        let hit: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM replay_messages WHERE replay_messages MATCH '仓库里找到'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("MATCH 查询");
+        assert_eq!(hit, 1, "trigram 中文子串必须命中");
+
+        // 第二行设置插不进去（单行约束）。
+        let second = conn.execute(
+            "INSERT INTO replay_search_settings (id, enabled, excluded_dirs, updated_at)
+             VALUES (2, 1, '[]', 't')",
+            [],
+        );
+        assert!(second.is_err(), "设置表必须保持单行");
     }
 
     /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
@@ -1087,9 +1161,10 @@ mod tests {
                 // 0010 起的后续迁移同样在这条 v7 升级路径上按序执行；
                 // 每新增一条迁移都要在这里追加（断言过期就说明这条测试没跟上）。
                 "0010_git_snapshots".to_string(),
+                "0011_replay_search".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 10);
+        assert_eq!(current_version(&conn).expect("版本"), 11);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(

@@ -30,6 +30,11 @@ pub enum Error {
     #[error("外部命令失败（退出码 {exit_code}）：{stderr}")]
     UsageCommandFailed { exit_code: i32, stderr: String },
 
+    /// 回放（ROADMAP B6/B7）：索引未启用、转录超限、搜索词过短等
+    /// **明确的用户可见状态**，不是崩溃。
+    #[error("会话回放错误：{0}")]
+    Replay(String),
+
     #[error("内部状态锁已中毒，需要重启应用")]
     StateLockPoisoned,
 

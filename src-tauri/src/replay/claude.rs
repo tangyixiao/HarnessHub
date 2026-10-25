@@ -10,14 +10,22 @@
 //! 边界：`read_session` 全文上限 16 MiB（超限报错不猜）；`list_sessions`
 //! 预读上限 256 KiB（只取预览与时间范围）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::{ReplayMessage, ReplayRole, ReplaySession, ReplaySessionSummary};
+use super::{
+    bounded_json, ReplayMessage, ReplayRole, ReplaySession, ReplaySessionSummary, ReplayToolCall,
+    SubagentThread,
+};
 use crate::error::{Error, Result};
 
 const HARNESS_ID: &str = crate::harness::adapters::claude_code::CLAUDE_ID;
+
+/// 当前 harness id（index 模块与 IPC 层复用）。
+pub fn harness_id() -> &'static str {
+    HARNESS_ID
+}
 
 /// 单个转录文件的全文上限：回放按需现读，超过即拒绝（明确错误，不截断猜）。
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
@@ -53,9 +61,19 @@ pub fn read_session(path: &Path) -> Result<ReplaySession> {
         session_id,
         source_path: path.to_string_lossy().into_owned(),
         messages: Vec::new(),
+        subagent_threads: Vec::new(),
         skipped_kind_counts: BTreeMap::new(),
         malformed_lines: 0,
     };
+
+    // 解析行：消息入列表，同时保留 uuid/parentUuid/工具结果供后处理。
+    struct RowMeta {
+        uuid: Option<String>,
+        parent: Option<String>,
+    }
+    let mut meta: Vec<RowMeta> = Vec::new();
+    // tool_result 按 tool_use_id 暂存（user 行），稍后回填到 assistant 的调用上。
+    let mut results_by_id: BTreeMap<String, (String, bool)> = BTreeMap::new();
 
     for line in text.lines() {
         if line.trim().is_empty() {
@@ -72,7 +90,17 @@ pub fn read_session(path: &Path) -> Result<ReplaySession> {
             .unwrap_or("<missing-type>");
         match kind {
             "user" | "assistant" => {
-                if let Some(message) = parse_message(kind, &value) {
+                if let Some(message) = parse_message(kind, &value, &mut results_by_id) {
+                    meta.push(RowMeta {
+                        uuid: value
+                            .get("uuid")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        parent: value
+                            .get("parentUuid")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                    });
                     session.messages.push(message);
                 } else {
                     *session
@@ -90,16 +118,88 @@ pub fn read_session(path: &Path) -> Result<ReplaySession> {
         }
     }
 
+    // 把 tool_result 按 tool_use_id 回填到 assistant 的调用上。
+    // （tool_use 与 result 可能相隔多行；同一 id 多个结果取最后一个。）
+    for message in &mut session.messages {
+        for call in &mut message.tool_calls {
+            if let Some((json, truncated)) = results_by_id.get(&call.id) {
+                call.result_json = Some(json.clone());
+                call.result_truncated = *truncated;
+            }
+        }
+    }
+
     // seq 统一按最终顺序编号（解析时不携带序号）。
     for (index, message) in session.messages.iter_mut().enumerate() {
         message.seq = index as u64;
     }
 
+    // 子代理线程：sidechain 行按 parentUuid 链分段（uuid → index 反查）。
+    let mut uuid_to_index: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, row) in meta.iter().enumerate() {
+        if let Some(uuid) = &row.uuid {
+            uuid_to_index.insert(uuid.clone(), index);
+        }
+    }
+    let sidechain_rows: Vec<usize> = (0..meta.len())
+        .filter(|index| session.messages[*index].sidechain)
+        .collect();
+    let sidechain_set: HashSet<usize> = sidechain_rows.iter().copied().collect();
+    let parent_index_of: BTreeMap<usize, usize> = sidechain_rows
+        .iter()
+        .filter_map(|index| {
+            meta[*index]
+                .parent
+                .as_deref()
+                .and_then(|parent| uuid_to_index.get(parent).map(|p| (*index, *p)))
+        })
+        .collect();
+
+    for &start in &sidechain_rows {
+        // 链头：父不存在或父不是 sidechain。
+        let is_head = match parent_index_of.get(&start) {
+            Some(parent) => !sidechain_set.contains(parent),
+            None => true,
+        };
+        if !is_head {
+            continue;
+        }
+        let mut message_seqs = vec![start as u64];
+        let started_at = session.messages[start].timestamp.clone();
+        let mut last_at = started_at.clone();
+        let mut cursor = start;
+        // 沿 parent 链向下走：child → parent(=cursor) 的反向匹配。
+        while let Some(&child) = parent_index_of
+            .iter()
+            .find(|(_, parent)| **parent == cursor)
+            .map(|(child, _)| child)
+        {
+            message_seqs.push(child as u64);
+            if let Some(timestamp) = &session.messages[child].timestamp {
+                last_at = Some(timestamp.clone());
+            }
+            cursor = child;
+        }
+        session.subagent_threads.push(SubagentThread {
+            message_seqs,
+            started_at,
+            last_at,
+        });
+    }
+
     Ok(session)
 }
 
-/// 解析一行 user / assistant 消息；结构不符合取证形状时返回 None（计入 skipped）。
-fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> {
+/// 解析一行 user / assistant 消息。
+///
+/// 返回 `None` = 结构不符合取证形状（整行 skipped）。
+/// 行内遇到的 tool_result 直接写入 `results_by_id`（tool_use_id → 摘要 JSON），
+/// 由 read_session 后处理回填到 assistant 的对应调用上。
+fn parse_message(
+    kind: &str,
+    line: &serde_json::Value,
+    results_by_id: &mut BTreeMap<String, (String, bool)>,
+) -> Option<ReplayMessage> {
     let message = line.get("message")?;
     let role = match kind {
         "user" => ReplayRole::User,
@@ -108,6 +208,7 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
 
     let mut text_parts = Vec::new();
     let mut thinking_parts = Vec::new();
+    let mut tool_calls: Vec<ReplayToolCall> = Vec::new();
     let mut unsupported: BTreeMap<String, u64> = BTreeMap::new();
 
     match message.get("content")? {
@@ -134,8 +235,44 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
                             .unwrap_or("")
                             .to_string(),
                     ),
+                    "tool_use" => {
+                        let (input_json, input_truncated) =
+                            bounded_json(part.get("input").unwrap_or(&serde_json::Value::Null));
+                        tool_calls.push(ReplayToolCall {
+                            id: part
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("<no-id>")
+                                .to_string(),
+                            name: part
+                                .get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("<unnamed>")
+                                .to_string(),
+                            input_json,
+                            // 结果在 read_session 后处理按 id 回填。
+                            result_json: None,
+                            result_truncated: false,
+                            input_truncated,
+                        });
+                    }
+                    "tool_result" => {
+                        // 取证（2026-10-25）：出现在 user 行 content[]，带 tool_use_id；
+                        // content 可能是字符串或数组，一律序列化为摘要。
+                        let Some(tool_use_id) =
+                            part.get("tool_use_id").and_then(serde_json::Value::as_str)
+                        else {
+                            *unsupported
+                                .entry("tool_result<no-id>".to_string())
+                                .or_default() += 1;
+                            continue;
+                        };
+                        let (result_json, truncated) =
+                            bounded_json(part.get("content").unwrap_or(&serde_json::Value::Null));
+                        results_by_id.insert(tool_use_id.to_string(), (result_json, truncated));
+                    }
                     other => {
-                        // tool_use 等认识但 B6 不展开。
+                        // 仍不展开的内容种类（B8 后的兜底）。
                         *unsupported.entry(other.to_string()).or_default() += 1;
                     }
                 }
@@ -162,6 +299,7 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
             .get("model")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        tool_calls,
         unsupported_content_kinds: unsupported,
     })
 }
@@ -171,7 +309,7 @@ fn parse_message(kind: &str, line: &serde_json::Value) -> Option<ReplayMessage> 
 /// 根形态：`<root>/projects/<project-dir>/<session-id>.jsonl`（取证见模块注释）。
 /// 预读窗口内找首条 user 消息做预览与首/末时间戳；找不到就如实 None。
 pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
-    discover(roots)
+    discover_with_paths(roots)
         .into_iter()
         .map(|(_, summary)| summary)
         .collect()
@@ -182,7 +320,7 @@ pub fn list_sessions(roots: &[PathBuf]) -> Vec<ReplaySessionSummary> {
 /// **路径白名单**：session_id 必须命中发现结果，路径由后端自己解析，
 /// IPC 层不接受文件系统路径（防任意文件读取）。找不到 → Ok(None)。
 pub fn read_session_by_id(roots: &[PathBuf], session_id: &str) -> Result<Option<ReplaySession>> {
-    let Some(path) = discover(roots)
+    let Some(path) = discover_with_paths(roots)
         .into_iter()
         .find(|(_, summary)| summary.session_id == session_id)
         .map(|(path, _)| path)
@@ -192,8 +330,9 @@ pub fn read_session_by_id(roots: &[PathBuf], session_id: &str) -> Result<Option<
     Ok(Some(read_session(&path)?))
 }
 
-/// 发现（路径, 摘要）对。路径只在后端内部流转，不进 DTO。
-fn discover(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
+/// 发现（路径, 摘要）对。路径只在后端内部流转，不进 DTO；
+/// `replay::index` 增量索引用它拿路径与指纹。
+pub fn discover_with_paths(roots: &[PathBuf]) -> Vec<(PathBuf, ReplaySessionSummary)> {
     let mut found = Vec::new();
 
     for root in roots {
@@ -264,7 +403,7 @@ fn summarize(path: &Path, project_dir: &std::ffi::OsStr) -> Option<ReplaySession
         if first_user_preview.is_none()
             && value.get("type").and_then(serde_json::Value::as_str) == Some("user")
         {
-            if let Some(message) = parse_message("user", &value) {
+            if let Some(message) = parse_message("user", &value, &mut BTreeMap::new()) {
                 let text = message.text_parts.join(" ");
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
@@ -293,6 +432,7 @@ fn summarize(path: &Path, project_dir: &std::ffi::OsStr) -> Option<ReplaySession
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// fixture 的仓库相对路径锚定（cargo test 的 CWD 是 src-tauri，不能直接相对路径）。
     fn fixture_path() -> PathBuf {
@@ -305,10 +445,10 @@ mod tests {
 
         assert_eq!(session.harness_id, "claude");
         assert_eq!(session.session_id, "basic");
-        assert_eq!(session.messages.len(), 7, "5 条主线 + 2 条 sidechain");
+        assert_eq!(session.messages.len(), 8, "6 条主线 + 2 条 sidechain");
 
         let seqs: Vec<u64> = session.messages.iter().map(|m| m.seq).collect();
-        assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6], "seq 必须从 0 连续编号");
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6, 7], "seq 必须从 0 连续编号");
 
         let first = &session.messages[0];
         assert_eq!(first.role, ReplayRole::User);
@@ -323,10 +463,25 @@ mod tests {
         assert_eq!(second.text_parts, vec!["我来搜索仓库里的 TODO。"]);
         assert_eq!(second.thinking_parts.len(), 1);
 
-        // tool_use 行：整行保留为 assistant 消息，内容种类计数。
+        // tool_use 行（B8）：展开为 toolCalls，名字与输入 JSON 原样保留。
         let third = &session.messages[2];
-        assert_eq!(third.unsupported_content_kinds.get("tool_use"), Some(&1));
         assert!(third.text_parts.is_empty());
+        assert_eq!(third.tool_calls.len(), 1);
+        let call = &third.tool_calls[0];
+        assert_eq!(call.name, "Grep");
+        assert_eq!(call.id, "88888888-8888-4888-8888-888888888888");
+        assert!(
+            call.input_json.contains("TODO"),
+            "实际：{}",
+            call.input_json
+        );
+        // tool_result 行（user content 数组里）按 id 回填到调用上。
+        assert!(call.result_json.is_some(), "tool_result 必须被回填");
+        assert!(call
+            .result_json
+            .as_deref()
+            .is_some_and(|r| r.contains("src/a.rs")));
+        assert!(!call.result_truncated);
 
         // sidechain 一对消息带标记。
         assert!(session.messages[3].sidechain);
@@ -342,17 +497,32 @@ mod tests {
             vec!["subagent: 检查 tests 目录"]
         );
 
-        // 第二轮问答（主线）。
+        // 第二轮问答（主线）：tool_result 行（seq 5）是一条 user 消息但无 text。
         assert_eq!(session.messages[5].role, ReplayRole::User);
-        assert_eq!(
-            session.messages[5].text_parts,
-            vec!["第二个问题：把结果整理成表格"]
+        assert!(
+            session.messages[5].text_parts.is_empty(),
+            "tool_result 行无正文"
         );
-        assert_eq!(session.messages[6].role, ReplayRole::Assistant);
+        assert_eq!(session.messages[6].role, ReplayRole::User);
         assert_eq!(
             session.messages[6].text_parts,
+            vec!["第二个问题：把结果整理成表格"]
+        );
+        assert_eq!(session.messages[7].role, ReplayRole::Assistant);
+        assert_eq!(
+            session.messages[7].text_parts,
             vec!["共找到 3 处 TODO，已整理。"]
         );
+
+        // 子代理线程（B8）：两条 sidechain 消息构成一条线程，seq 3 → 4。
+        assert_eq!(session.subagent_threads.len(), 1);
+        let thread = &session.subagent_threads[0];
+        assert_eq!(thread.message_seqs, vec![3, 4]);
+        assert_eq!(
+            thread.started_at.as_deref(),
+            Some("2026-10-25T10:00:08.000Z")
+        );
+        assert_eq!(thread.last_at.as_deref(), Some("2026-10-25T10:00:09.000Z"));
 
         // 已知非消息类型与未知类型、坏行都如实计数。
         let skipped: BTreeMap<String, u64> = session.skipped_kind_counts.clone();

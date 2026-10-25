@@ -12,6 +12,7 @@ import {
   getDbHealth,
   getProjectSessions,
   getSessionGitSnapshots,
+  getReplaySearchSettings,
   getUsageSources,
   getUsageSummary,
   invokeCommand,
@@ -26,6 +27,9 @@ import {
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProjectRecord,
+  normalizeReindexReport,
+  normalizeReplaySearchHit,
+  normalizeReplaySearchSettings,
   normalizeReplaySession,
   normalizeReplaySessionSummary,
   normalizeSessionGitSnapshot,
@@ -38,10 +42,13 @@ import {
   normalizeUsageSummary,
   pluginRefresh,
   readReplaySession,
+  reindexReplaySearch,
   refreshHarnesses,
   refreshUsage,
   registerProject,
   removeProject,
+  searchReplay,
+  setReplaySearchSettings,
 } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
@@ -1430,7 +1437,8 @@ describe('getSessionGitSnapshots', () => {
 /**
  * IPC 契约 `replay_list_sessions` / `replay_read_session` 的返回项（serde camelCase），
  * 形状手工复刻自 Rust 契约测试 `replay_dtos_serialize_with_camel_case_keys`
- * （src-tauri/src/commands.rs）：role 枚举值 snake_case，计数是字符串→数字的对象。
+ * （src-tauri/src/commands.rs）：role 枚举值 snake_case，计数是字符串→数字的对象；
+ * B8 起含 toolCalls / subagentThreads 嵌套形状。
  */
 const REPLAY_SUMMARY_PAYLOAD = {
   harnessId: 'claude',
@@ -1443,6 +1451,15 @@ const REPLAY_SUMMARY_PAYLOAD = {
   lastAt: '2026-10-25T10:01:00.000Z',
 };
 
+const REPLAY_TOOL_CALL_PAYLOAD = {
+  id: 'call_1',
+  name: 'Grep',
+  inputJson: '{"pattern":"TODO"}',
+  resultJson: 'src/a.rs',
+  resultTruncated: false,
+  inputTruncated: false,
+};
+
 const REPLAY_MESSAGE_PAYLOAD = {
   seq: 3,
   role: 'assistant',
@@ -1451,7 +1468,14 @@ const REPLAY_MESSAGE_PAYLOAD = {
   textParts: ['回答'],
   thinkingParts: ['思考'],
   model: 'claude-sonnet-4-6',
-  unsupportedContentKinds: { tool_use: 2 },
+  toolCalls: [REPLAY_TOOL_CALL_PAYLOAD],
+  unsupportedContentKinds: {},
+};
+
+const REPLAY_SUBAGENT_THREAD_PAYLOAD = {
+  messageSeqs: [3, 4],
+  startedAt: '2026-10-25T10:00:05.000Z',
+  lastAt: '2026-10-25T10:00:09.000Z',
 };
 
 const REPLAY_SESSION_PAYLOAD = {
@@ -1459,6 +1483,7 @@ const REPLAY_SESSION_PAYLOAD = {
   sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
   sourcePath: 'C:/Users/dev/.claude/projects/D--work-demo/b3a1.jsonl',
   messages: [REPLAY_MESSAGE_PAYLOAD],
+  subagentThreads: [REPLAY_SUBAGENT_THREAD_PAYLOAD],
   skippedKindCounts: { summary: 1 },
   malformedLines: 1,
 };
@@ -1532,12 +1557,148 @@ describe('normalizeReplaySession', () => {
     expect(session?.skippedKindCounts).toEqual({ permission: 2 });
   });
 
+  it('toolCalls 合法条目逐字段保留（resultJson null 与 truncated true 都如实传递）', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [
+        {
+          ...REPLAY_MESSAGE_PAYLOAD,
+          toolCalls: [
+            REPLAY_TOOL_CALL_PAYLOAD,
+            {
+              id: 'call_2',
+              name: 'Bash',
+              inputJson: '{"command":"ls"}',
+              resultJson: null,
+              resultTruncated: true,
+              inputTruncated: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(session?.messages[0]?.toolCalls).toEqual([
+      REPLAY_TOOL_CALL_PAYLOAD,
+      {
+        id: 'call_2',
+        name: 'Bash',
+        inputJson: '{"command":"ls"}',
+        resultJson: null,
+        resultTruncated: true,
+        inputTruncated: false,
+      },
+    ]);
+  });
+
+  it('toolCalls 缺 id 或 name 的条目丢弃；inputJson 非字符串收敛为 "{}"', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [
+        {
+          ...REPLAY_MESSAGE_PAYLOAD,
+          toolCalls: [
+            { ...REPLAY_TOOL_CALL_PAYLOAD, id: '   ' },
+            { ...REPLAY_TOOL_CALL_PAYLOAD, name: '' },
+            { name: '没有 id' },
+            { ...REPLAY_TOOL_CALL_PAYLOAD, inputJson: 42 },
+            'not-an-object',
+            null,
+          ],
+        },
+      ],
+    });
+
+    expect(session?.messages[0]?.toolCalls).toEqual([
+      { ...REPLAY_TOOL_CALL_PAYLOAD, inputJson: '{}' },
+    ]);
+  });
+
+  it('toolCalls 的 resultJson 只认字符串或 null，truncated 只认 boolean 缺省 false', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [
+        {
+          ...REPLAY_MESSAGE_PAYLOAD,
+          toolCalls: [
+            { id: 'call_1', name: 'Grep', resultJson: 42, resultTruncated: 'yes' },
+            { id: 'call_2', name: 'Bash', inputTruncated: 1 },
+          ],
+        },
+      ],
+    });
+
+    expect(session?.messages[0]?.toolCalls).toEqual([
+      {
+        id: 'call_1',
+        name: 'Grep',
+        inputJson: '{}',
+        resultJson: null,
+        resultTruncated: false,
+        inputTruncated: false,
+      },
+      {
+        id: 'call_2',
+        name: 'Bash',
+        inputJson: '{}',
+        resultJson: null,
+        resultTruncated: false,
+        inputTruncated: false,
+      },
+    ]);
+  });
+
+  it('toolCalls 非数组时收敛为空列表', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      messages: [{ ...REPLAY_MESSAGE_PAYLOAD, toolCalls: 'oops' }],
+    });
+
+    expect(session?.messages[0]?.toolCalls).toEqual([]);
+  });
+
+  it('subagentThreads 合法线程保留；缺 messageSeqs 或含非正整数的条目整条丢弃', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      subagentThreads: [
+        REPLAY_SUBAGENT_THREAD_PAYLOAD,
+        { startedAt: '2026-10-25T10:00:05.000Z', lastAt: null },
+        { messageSeqs: [], startedAt: null, lastAt: null },
+        { messageSeqs: [3, 0], startedAt: null, lastAt: null },
+        { messageSeqs: [3, -1], startedAt: null, lastAt: null },
+        { messageSeqs: [3, 4.5], startedAt: null, lastAt: null },
+        { messageSeqs: [3, '4'], startedAt: null, lastAt: null },
+        'not-an-object',
+        null,
+      ],
+    });
+
+    expect(session?.subagentThreads).toEqual([REPLAY_SUBAGENT_THREAD_PAYLOAD]);
+  });
+
+  it('subagentThreads 非数组时收敛为空列表；startedAt/lastAt 只认字符串或 null', () => {
+    const session = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      subagentThreads: 'oops',
+    });
+    const dirtyTimes = normalizeReplaySession({
+      ...REPLAY_SESSION_PAYLOAD,
+      subagentThreads: [{ messageSeqs: [3], startedAt: 42, lastAt: 0 }],
+    });
+
+    expect(session?.subagentThreads).toEqual([]);
+    expect(dirtyTimes?.subagentThreads).toEqual([
+      { messageSeqs: [3], startedAt: null, lastAt: null },
+    ]);
+  });
+
   it('字段缺失时补安全默认值，而不是产生 undefined', () => {
     expect(normalizeReplaySession({ sessionId: 's1' })).toEqual({
       harnessId: '',
       sessionId: 's1',
       sourcePath: '',
       messages: [],
+      subagentThreads: [],
       skippedKindCounts: {},
       malformedLines: 0,
     });
@@ -1648,5 +1809,188 @@ describe('replay IPC wrappers（ROADMAP B6）', () => {
       ok: false,
       error: NOT_IN_TAURI,
     });
+  });
+});
+
+/**
+ * IPC 契约 `replay_search_settings_get` / `replay_search_settings_set` /
+ * `replay_search_reindex` / `replay_search` 的形状（serde camelCase），
+ * 手工复刻自 Rust 契约测试 `replay_search_dtos_serialize_with_camel_case_keys`
+ * （src-tauri/src/commands.rs）。
+ */
+const SEARCH_SETTINGS_PAYLOAD = {
+  enabled: false,
+  excludedDirs: ['D--work-beta'],
+};
+
+const REINDEX_REPORT_PAYLOAD = {
+  scanned: 68,
+  indexed: 7,
+  unchanged: 60,
+  excluded: 1,
+  removed: 0,
+};
+
+const SEARCH_HIT_PAYLOAD = {
+  harnessId: 'claude',
+  sessionId: 'b3a1b3a1-0000-4000-8000-000000000003',
+  seq: 3,
+  role: 'user',
+  snippet: '…帮我«排查»报错…',
+  firstUserPreview: null,
+};
+
+describe('normalizeReplaySearchSettings', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeReplaySearchSettings(SEARCH_SETTINGS_PAYLOAD)).toEqual(SEARCH_SETTINGS_PAYLOAD);
+  });
+
+  it('enabled 只认 true：开关默认关闭是隐私契约，脏数据宁可显示「关」', () => {
+    expect(normalizeReplaySearchSettings({ enabled: true, excludedDirs: [] }).enabled).toBe(true);
+    expect(normalizeReplaySearchSettings({ enabled: 'yes', excludedDirs: [] }).enabled).toBe(false);
+    expect(normalizeReplaySearchSettings({ enabled: 1, excludedDirs: [] }).enabled).toBe(false);
+    expect(normalizeReplaySearchSettings({ excludedDirs: [] }).enabled).toBe(false);
+  });
+
+  it('excludedDirs 过滤非字符串条目；整体非对象时收敛为默认关闭', () => {
+    expect(
+      normalizeReplaySearchSettings({
+        enabled: true,
+        excludedDirs: ['D--work-beta', 42, null, {}],
+      }),
+    ).toEqual({ enabled: true, excludedDirs: ['D--work-beta'] });
+    expect(normalizeReplaySearchSettings({ enabled: true, excludedDirs: 'oops' })).toEqual({
+      enabled: true,
+      excludedDirs: [],
+    });
+    expect(normalizeReplaySearchSettings(null)).toEqual({ enabled: false, excludedDirs: [] });
+    expect(normalizeReplaySearchSettings('oops')).toEqual({ enabled: false, excludedDirs: [] });
+  });
+});
+
+describe('normalizeReindexReport', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeReindexReport(REINDEX_REPORT_PAYLOAD)).toEqual(REINDEX_REPORT_PAYLOAD);
+  });
+
+  it('计数缺省 0：报告是审计数字，形状漂移不能让 UI 显示 NaN / undefined', () => {
+    expect(normalizeReindexReport({})).toEqual({
+      scanned: 0,
+      indexed: 0,
+      unchanged: 0,
+      excluded: 0,
+      removed: 0,
+    });
+    expect(
+      normalizeReindexReport({ ...REINDEX_REPORT_PAYLOAD, indexed: '7', removed: null }),
+    ).toEqual({ ...REINDEX_REPORT_PAYLOAD, indexed: 0, removed: 0 });
+    expect(normalizeReindexReport(null)).toEqual({
+      scanned: 0,
+      indexed: 0,
+      unchanged: 0,
+      excluded: 0,
+      removed: 0,
+    });
+  });
+});
+
+describe('normalizeReplaySearchHit', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一保留', () => {
+    expect(normalizeReplaySearchHit(SEARCH_HIT_PAYLOAD)).toEqual(SEARCH_HIT_PAYLOAD);
+  });
+
+  it('缺 sessionId 丢弃；snippet 非字符串整条丢弃（片段是命中结果的存在理由）', () => {
+    expect(normalizeReplaySearchHit({ ...SEARCH_HIT_PAYLOAD, sessionId: '' })).toBeNull();
+    expect(normalizeReplaySearchHit({ ...SEARCH_HIT_PAYLOAD, snippet: 42 })).toBeNull();
+    expect(normalizeReplaySearchHit({ snippet: '命中' })).toBeNull();
+    expect(normalizeReplaySearchHit(null)).toBeNull();
+    expect(normalizeReplaySearchHit('hit')).toBeNull();
+  });
+
+  it('seq 缺省 0，role 收窄到 user / assistant，未知角色不猜成 assistant', () => {
+    expect(
+      normalizeReplaySearchHit({ ...SEARCH_HIT_PAYLOAD, seq: undefined, role: 'system' }),
+    ).toEqual({ ...SEARCH_HIT_PAYLOAD, seq: 0, role: 'user' });
+    expect(normalizeReplaySearchHit({ ...SEARCH_HIT_PAYLOAD, role: 'assistant' })?.role).toBe(
+      'assistant',
+    );
+    expect(normalizeReplaySearchHit({ ...SEARCH_HIT_PAYLOAD, role: 42 })?.role).toBe('user');
+  });
+});
+
+describe('replay search IPC wrappers（ROADMAP B7）', () => {
+  it('getReplaySearchSettings 使用 replay_search_settings_get 命令名并收敛返回', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => SEARCH_SETTINGS_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await getReplaySearchSettings();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_search_settings_get');
+    expect(result).toEqual({ ok: true, data: SEARCH_SETTINGS_PAYLOAD });
+  });
+
+  it('setReplaySearchSettings 使用 replay_search_settings_set 命令名并把 settings 原样传参', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => null);
+    stubTauri(invokeSpy);
+
+    const result = await setReplaySearchSettings({
+      enabled: true,
+      excludedDirs: ['D--work-beta'],
+    });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_search_settings_set');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      settings: { enabled: true, excludedDirs: ['D--work-beta'] },
+    });
+    expect(result).toEqual({ ok: true, data: null });
+  });
+
+  it('reindexReplaySearch 使用 replay_search_reindex 命令名并收敛报告', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => REINDEX_REPORT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await reindexReplaySearch();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_search_reindex');
+    expect(result).toEqual({ ok: true, data: REINDEX_REPORT_PAYLOAD });
+  });
+
+  it('searchReplay 使用 replay_search 命令名并传 query，丢弃残缺命中', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [SEARCH_HIT_PAYLOAD, { nope: 1 }, null]);
+    stubTauri(invokeSpy);
+
+    const result = await searchReplay('排查报错');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('replay_search');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ query: '排查报错' });
+    expect(result).toEqual({ ok: true, data: [SEARCH_HIT_PAYLOAD] });
+  });
+
+  it('searchReplay 把后端 reject（未启用 / <3 字符）原样传出，由 UI 分类为提示', async () => {
+    stubTauri(async () => {
+      throw new Error('回放索引未启用：先在设置里打开');
+    });
+    await expect(searchReplay('排查报错')).resolves.toEqual({
+      ok: false,
+      error: '回放索引未启用：先在设置里打开',
+    });
+
+    stubTauri(async () => {
+      throw new Error('搜索词至少需要 3 个字符（trigram 分词器的下限）');
+    });
+    await expect(searchReplay('ab')).resolves.toEqual({
+      ok: false,
+      error: '搜索词至少需要 3 个字符（trigram 分词器的下限）',
+    });
+  });
+
+  it('不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(getReplaySearchSettings()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(setReplaySearchSettings({ enabled: true, excludedDirs: [] })).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(reindexReplaySearch()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(searchReplay('排查报错')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });
