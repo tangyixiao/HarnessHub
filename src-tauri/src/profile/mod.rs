@@ -7,6 +7,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod projection;
 
 use std::collections::BTreeMap;
 
