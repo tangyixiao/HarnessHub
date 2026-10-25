@@ -35,6 +35,11 @@ pub enum Error {
     #[error("会话回放错误：{0}")]
     Replay(String),
 
+    /// Git 观察层（ROADMAP C10+）：porcelain 形状不认识、worktree 操作失败等
+    /// **明确的用户可见状态**。
+    #[error("Git 操作错误：{0}")]
+    Git(String),
+
     #[error("内部状态锁已中毒，需要重启应用")]
     StateLockPoisoned,
 
