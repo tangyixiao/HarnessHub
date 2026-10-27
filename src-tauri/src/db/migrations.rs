@@ -789,7 +789,8 @@ mod tests {
             applied,
             vec![
                 "0010_git_snapshots".to_string(),
-                "0011_replay_search".to_string()
+                "0011_replay_search".to_string(),
+                "0012_credential_refs".to_string()
             ]
         );
         assert_eq!(current_version(&conn).expect("版本"), 12);
@@ -859,8 +860,14 @@ mod tests {
         assert_eq!(missing, 0, "v10 不该有回放搜索表");
 
         let applied = apply_pending(&mut conn).expect("升级到最新");
-        assert_eq!(applied, vec!["0011_replay_search".to_string()]);
-        assert_eq!(current_version(&conn).expect("版本"), 11);
+        assert_eq!(
+            applied,
+            vec![
+                "0011_replay_search".to_string(),
+                "0012_credential_refs".to_string()
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 12);
 
         // 设置表恰好一行且默认关闭。
         let (rows, enabled, excluded): (i64, i64, String) = conn
@@ -1232,7 +1239,7 @@ mod tests {
                 "0012_credential_refs".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 11);
+        assert_eq!(current_version(&conn).expect("版本"), 12);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(
