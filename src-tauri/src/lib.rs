@@ -174,6 +174,7 @@ pub fn run() {
             commands::activity_timeline,
             commands::app_info,
             commands::db_health,
+            commands::config_doctor,
             commands::create_session,
             commands::finish_session,
             commands::get_project_sessions,

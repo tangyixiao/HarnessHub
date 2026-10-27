@@ -468,6 +468,21 @@ pub fn profile_discover(
     }
 }
 
+/// 配置体检（ROADMAP E17）。**纯读**：只诊断 + 建议，
+/// 不自动修复（修复走 E15 投影/恢复，显式动作）。
+#[tauri::command]
+pub fn config_doctor(
+    _state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::profile::doctor::CheckItem>> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    crate::profile::doctor::diagnose(&home, &harness_id)
+}
+
 /// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
 #[tauri::command]
 pub fn replay_search_reindex(

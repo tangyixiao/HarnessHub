@@ -6,6 +6,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod doctor;
 pub mod gemini;
 pub mod projection;
 
