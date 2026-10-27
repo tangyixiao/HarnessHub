@@ -91,6 +91,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0011_replay_search.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 12,
+        name: "0012_credential_refs",
+        sql: include_str!("migrations/0012_credential_refs.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -253,6 +259,7 @@ mod tests {
         "replay_search_settings",
         "replay_index_state",
         "replay_messages",
+        "credential_refs",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -782,10 +789,11 @@ mod tests {
             applied,
             vec![
                 "0010_git_snapshots".to_string(),
-                "0011_replay_search".to_string()
+                "0011_replay_search".to_string(),
+                "0012_credential_refs".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 11);
+        assert_eq!(current_version(&conn).expect("版本"), 12);
 
         const INSERT_SNAPSHOT: &str = "INSERT INTO git_snapshots
             (hub_session_id, phase, captured_at, worktree_root, head,
@@ -852,8 +860,14 @@ mod tests {
         assert_eq!(missing, 0, "v10 不该有回放搜索表");
 
         let applied = apply_pending(&mut conn).expect("升级到最新");
-        assert_eq!(applied, vec!["0011_replay_search".to_string()]);
-        assert_eq!(current_version(&conn).expect("版本"), 11);
+        assert_eq!(
+            applied,
+            vec![
+                "0011_replay_search".to_string(),
+                "0012_credential_refs".to_string()
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 12);
 
         // 设置表恰好一行且默认关闭。
         let (rows, enabled, excluded): (i64, i64, String) = conn
@@ -890,6 +904,66 @@ mod tests {
             [],
         );
         assert!(second.is_err(), "设置表必须保持单行");
+    }
+
+    /// 迁移 0012：v11 老库升级后 `credential_refs` 可用；唯一索引生效。
+    #[test]
+    fn migration_0012_adds_credential_refs_to_a_v11_database() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 11).expect("建到 v11");
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'credential_refs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v11 表检查");
+        assert_eq!(missing, 0);
+
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness");
+
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(applied, vec!["0012_credential_refs".to_string()]);
+        assert_eq!(current_version(&conn).expect("版本"), 12);
+
+        conn.execute(
+            "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
+             VALUES ('ref-1', 'key', 'codex', 'file', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("写入凭据句柄");
+
+        // 同 (label, harness) 唯一。
+        let duplicate = conn.execute(
+            "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
+             VALUES ('ref-2', 'key', 'codex', 'file', '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(duplicate.is_err(), "重复 (label, harness) 必须被拒绝");
+
+        // 非法 store_kind 被 CHECK 拒绝。
+        let bad_kind = conn.execute(
+            "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
+             VALUES ('ref-3', 'k2', 'codex', 'memory', '2026-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(bad_kind.is_err(), "非法 store_kind 必须被拒绝");
+
+        // harness 删除 → 句柄级联消失（值在 store 侧由应用层清理）。
+        conn.execute("DELETE FROM harnesses WHERE id = 'codex'", [])
+            .expect("删除 harness");
+        let remaining: i64 = conn
+            .query_row("SELECT count(*) FROM credential_refs", [], |row| row.get(0))
+            .expect("计数");
+        assert_eq!(remaining, 0, "级联删除");
     }
 
     /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
@@ -1162,9 +1236,10 @@ mod tests {
                 // 每新增一条迁移都要在这里追加（断言过期就说明这条测试没跟上）。
                 "0010_git_snapshots".to_string(),
                 "0011_replay_search".to_string(),
+                "0012_credential_refs".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 11);
+        assert_eq!(current_version(&conn).expect("版本"), 12);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(
