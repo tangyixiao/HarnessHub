@@ -1,7 +1,5 @@
 //! Credential Registry：值进 Secret Store，句柄进 SQLite（两步 + 失败清理）。
 
-use std::sync::Arc;
-
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +59,7 @@ pub fn register(
 
     let store = FileSecretStore;
     let ref_id = uuid::Uuid::new_v4().to_string();
-    store.set(&ref_id, value).map_err(Error::from)?;
+    store.set(&ref_id, value)?;
 
     let inserted = conn.execute(
         "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
@@ -124,28 +122,6 @@ pub fn remove(conn: &Connection, id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
-/// 序列化守卫：任何 CredentialRefRecord 都不得含值（结构上没有值字段，
-/// 测试锁定 JSON 不含 secret 形状）。
-pub fn assert_record_carries_no_secret(
-    record: &CredentialRefRecord,
-    store: &dyn SecretStore,
-) -> Result<()> {
-    // 值仍在 store 里（round-trip 完整性），但记录本身没有。
-    assert!(
-        store
-            .exists(&record.id)
-            .map_err(|error| Error::InvalidInput(error.to_string()))?,
-        "值应保留在 store"
-    );
-    let json = serde_json::to_string(record)
-        .map_err(|error| Error::InvalidInput(format!("序列化失败：{error}")))?;
-    assert!(!json.contains("secret"), "记录序列化不得含值：{json}");
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn _unused(_: Arc<()>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +159,13 @@ mod tests {
             "list 序列化不得含值：{json}"
         );
 
-        assert_record_carries_no_secret(&record, &store).unwrap();
+        // 值仍在 store（round-trip），记录序列化不含值。
+        assert!(store.exists(&record.id).unwrap());
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !json.contains("sk-secret-123"),
+            "记录序列化不得含值：{json}"
+        );
 
         // 清理（测试的 store 在真实 home 下，显式删）。
         remove(db.connection(), &record.id).unwrap();
@@ -195,8 +177,7 @@ mod tests {
     fn sqlite_failure_cleans_up_the_store_value() {
         let db = db();
         // 不插 harness 行 → FK 失败 → register 应清理 store。
-        let error = register(db.connection(), HARNESS_ID, "orphan", "sk-orphan").unwrap_err();
-        let _ = error;
+        register(db.connection(), HARNESS_ID, "orphan", "sk-orphan").unwrap_err();
         // store 目录不应有孤儿文件：直接扫描对比（orphan 的值无法反查 id，
         // 用文件数判断——本测试前 store 目录可能已有其它测试的文件，宽松处理：
         // 只断言 register 返回了错误即可；孤儿清理由 register 内部完成）。

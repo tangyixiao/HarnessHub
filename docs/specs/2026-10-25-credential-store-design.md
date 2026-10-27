@@ -25,13 +25,13 @@ Credential Manager / 跨平台抽象），SQLite 的 `credential_refs` 表只存
     CredWrite 属后续真机验收项）。
   - `registry.rs`：`register(label, harness_id, value) -> RefRecord`（值进
     store，ref 落 SQLite，两步非原子但失败可清理）、`list(harness_id) ->
-    Vec<RefRecord>`（无值）、`remove(id)`（先删 store 再删行）。
+Vec<RefRecord>`（无值）、`remove(id)`（先删 store 再删行）。
 - [ ] IPC：`credential_register` / `credential_list` / `credential_remove`。
-  值**只进不出**——没有任何接口能读回 secret 明文。
+      值**只进不出**——没有任何接口能读回 secret 明文。
 - [ ] 测试：两步失败清理（store 成功 SQLite 失败 → 删 store）、
-  remove 先 store 后行、list 无值、label 重复拒绝、迁移裸 Connection。
+      remove 先 store 后行、list 无值、label 重复拒绝、迁移裸 Connection。
 - [ ] 前端 Settings 页「凭据登记」区（flash 子 agent）：登记表单（label +
-  值 + harness 选择）、列表（只显示 label/harness/时间）、删除按钮。
+      值 + harness 选择）、列表（只显示 label/harness/时间）、删除按钮。
 - [ ] capability：不动。
 
 ## Non-goals

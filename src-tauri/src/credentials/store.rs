@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use crate::error::{Error, Result};
 
 /// Secret 存储抽象。值**只进不出**。
+#[allow(dead_code)]
 pub(crate) trait SecretStore {
+    /// 值是否存在（不含值）。
+    #[allow(dead_code)]
     fn set(&self, ref_id: &str, value: &str) -> Result<()>;
     fn delete(&self, ref_id: &str) -> Result<()>;
     fn exists(&self, ref_id: &str) -> Result<bool>;
@@ -28,6 +31,7 @@ fn secrets_dir() -> PathBuf {
 /// 文件兜底存储。ref_id 即文件名（UUID，无路径注入面）。
 pub(crate) struct FileSecretStore;
 
+#[allow(dead_code)]
 impl SecretStore for FileSecretStore {
     fn set(&self, ref_id: &str, value: &str) -> Result<()> {
         if ref_id.contains('/') || ref_id.contains('\\') || ref_id.contains("..") {
