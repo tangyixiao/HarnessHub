@@ -22,15 +22,11 @@ E14 让用户「看见」了配置；切换 Provider / 模型仍要手动编辑�
     `~/.harness-hub/backups/<harness>/<timestamp>.json`)→temp 文件写入→verify
     (重新 parse 比对)→`rename`（原子替换）。
   - `restore(backup) -> Result<()>`：同管线写回快照内容。
-- [ ] merge 语义：new_fields 的键**覆盖**同名键；不删除未知键；嵌套 `env` 块
-  深合并（一层）。
+- [ ] merge 语义：new_fields 的键**覆盖**同名键；不删除未知键；嵌套 `env` 块深合并（一层）。
 - [ ] 备份保留策略：最近 10 份；超出删除最旧。
-- [ ] IPC：`profile_project(harness_id, fields) -> ProjectionReport`（显式写，
-  前端 confirm 文案含「将修改 ~/.claude/settings.json」）；`profile_backups
-  (harness_id) -> Vec<BackupInfo>`；`profile_restore(backup_id)`。
+- [ ] IPC：`profile_project(harness_id, fields) -> ProjectionReport`（显式写，前端 confirm 文案含「将修改 ~/.claude/settings.json」）；`profile_backups(harness_id) -> Vec<BackupInfo>`；`profile_restore(backup_id)`。
 - [ ] 测试：merge 语义（覆盖/保留未知/嵌套合并）、原子性（temp+rename）、
-  verify 失败不落盘（注入坏 render）、备份轮换、恢复 round-trip、
-  冷启动真路径。真临时文件树（非真实 ~/.claude）。
+      verify 失败不落盘（注入坏 render）、备份轮换、恢复 round-trip、冷启动真路径。真临时文件树（非真实 ~/.claude）。
 - [ ] capability：claude `profiles` 翻 true（投影已实现 + 有测试回归）。
 
 ## Non-goals
