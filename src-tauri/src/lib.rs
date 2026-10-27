@@ -8,6 +8,7 @@
 pub mod activity;
 pub mod clock;
 pub mod commands;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod eval;
