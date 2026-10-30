@@ -14,8 +14,7 @@
 
 ## Acceptance Criteria
 
-- [ ] `src-tauri/src/profile/doctor.rs`：`CheckItem { check, status, message,
-    suggestion }`（camelCase；status ∈ {ok, warn, error}）。
+- [ ] `src-tauri/src/profile/doctor.rs`：`CheckItem { check, status, message, suggestion }`（camelCase；status ∈ {ok, warn, error}）。
 - [ ] 检查项（claude / codex / gemini 各自适配，复用 E14 解析器）：
   - `config_parseable`：E14 discover 成功 = ok；语法错误 = error；
     文件不存在 = warn（未初始化）。
