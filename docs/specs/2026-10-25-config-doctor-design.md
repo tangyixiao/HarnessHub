@@ -15,7 +15,7 @@
 ## Acceptance Criteria
 
 - [ ] `src-tauri/src/profile/doctor.rs`：`CheckItem { check, status, message,
-      suggestion }`（camelCase；status ∈ {ok, warn, error}）。
+    suggestion }`（camelCase；status ∈ {ok, warn, error}）。
 - [ ] 检查项（claude / codex / gemini 各自适配，复用 E14 解析器）：
   - `config_parseable`：E14 discover 成功 = ok；语法错误 = error；
     文件不存在 = warn（未初始化）。
@@ -25,7 +25,7 @@
     （codex）/ key set（gemini）= ok；否则 = warn（用默认 provider）。
 - [ ] IPC `config_doctor(harness_id) -> Vec<CheckItem>`；**纯读**（ADR-0012）。
 - [ ] 前端 Settings 页「配置体检」区：harness 按钮 → CheckItem 列表
-  （✓/⚠/✗ 图标 + message + suggestion）。无 Fix 按钮（本阶段）。
+      （✓/⚠/✗ 图标 + message + suggestion）。无 Fix 按钮（本阶段）。
 - [ ] 测试：doctor 逻辑（每种 status 至少一条触发路径）+ 契约 + 前端测试。
 
 ## Non-goals
