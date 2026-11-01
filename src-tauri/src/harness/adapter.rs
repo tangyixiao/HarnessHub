@@ -156,6 +156,7 @@ mod tests {
             launch: true,
             tool_calls: true,
             live_state: true,
+            profiles: true,
             ..HarnessCapabilities::default()
         };
 
