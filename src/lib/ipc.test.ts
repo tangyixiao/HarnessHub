@@ -19,7 +19,9 @@ import {
   getUsageSummary,
   invokeCommand,
   isTauriRuntime,
+  listCredentials,
   listHarnesses,
+  listProfileBackups,
   listProjects,
   listReplaySessions,
   listSessions,
@@ -28,11 +30,15 @@ import {
   getWorktreeStatus,
   mergeWorktree,
   normalizeActivityTimeline,
+  normalizeBackupInfo,
+  normalizeCheckItem,
+  normalizeCredentialRef,
   normalizeHarnessSummary,
   normalizeMergeOutcome,
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProfileSummary,
+  normalizeProjectionReport,
   normalizeProjectRecord,
   normalizeReindexReport,
   normalizeReplaySearchHit,
@@ -50,14 +56,19 @@ import {
   normalizeWorktreeEntry,
   normalizeWorktreeStatusCounts,
   pluginRefresh,
+  projectProfile,
   readReplaySession,
   reindexReplaySearch,
   refreshHarnesses,
   refreshUsage,
+  registerCredential,
   registerProject,
+  removeCredential,
   removeProject,
   removeWorktree,
+  restoreProfileBackup,
   resumeTerminal,
+  runConfigDoctor,
   searchReplay,
   setReplaySearchSettings,
 } from '@/lib/ipc';
@@ -2509,5 +2520,200 @@ describe('discoverProfile', () => {
 
   it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
     await expect(discoverProfile('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Profile Plane 接线（E15 投影 / E16 凭据 / E17 体检）
+ * ------------------------------------------------------------------ */
+
+const PROJECTION_REPORT_PAYLOAD = {
+  targetPath: 'C:/Users/t/.claude/settings.json',
+  backupId: '00000000000000000000-000001',
+  changedKeys: 2,
+};
+
+const BACKUP_INFO_PAYLOAD = {
+  id: '00000000000000000000-000001',
+  harnessId: 'claude',
+  createdAt: '2026-10-30T00:00:00Z',
+  path: 'C:/Users/t/.harness-hub/backups/claude/00000000000000000000-000001.json',
+  targetPath: 'C:/Users/t/.claude/settings.json',
+};
+
+const CREDENTIAL_REF_PAYLOAD = {
+  id: 'ref-1',
+  label: 'deepseek-key',
+  harnessId: 'codex',
+  storeKind: 'file',
+  createdAt: '2026-10-30T00:00:00Z',
+};
+
+describe('normalizeProjectionReport（E15）', () => {
+  it('payload 与 Rust 契约同形：字段逐一保留', () => {
+    expect(normalizeProjectionReport(PROJECTION_REPORT_PAYLOAD)).toEqual(PROJECTION_REPORT_PAYLOAD);
+  });
+
+  it('缺 targetPath 或 backupId 丢弃 —— 没有它们无法交代改了哪个文件', () => {
+    expect(normalizeProjectionReport({ backupId: 'x', changedKeys: 1 })).toBeNull();
+    expect(normalizeProjectionReport({ targetPath: 'C:/x', changedKeys: 1 })).toBeNull();
+    expect(normalizeProjectionReport(null)).toBeNull();
+  });
+
+  it('changedKeys 非数字安全归零', () => {
+    const result = normalizeProjectionReport({
+      targetPath: 'C:/x',
+      backupId: 'b',
+      changedKeys: 'many',
+    });
+    expect(result?.changedKeys).toBe(0);
+  });
+});
+
+describe('projectProfile（E15 显式写）', () => {
+  it('使用 profile_project 命令名，fields 原样透传', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROJECTION_REPORT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const fields = { 'env.ANTHROPIC_BASE_URL': 'https://api.deepseek.com/anthropic' };
+    const result = await projectProfile('claude', fields);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('profile_project');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude', fields });
+    expect(result).toEqual({ ok: true, data: PROJECTION_REPORT_PAYLOAD });
+  });
+
+  it('报告形状残缺时报 invalid-projection-report 而不是假装成功', async () => {
+    stubTauri(async () => ({ targetPath: 'C:/x' }));
+
+    await expect(projectProfile('claude', {})).resolves.toEqual({
+      ok: false,
+      error: 'invalid-projection-report',
+    });
+  });
+
+  it('不在 Tauri 运行时返回 not-running-in-tauri', async () => {
+    await expect(projectProfile('claude', {})).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});
+
+describe('normalizeBackupInfo + profile_backups（E15）', () => {
+  it('payload 与 Rust 契约同形：字段逐一保留', () => {
+    expect(normalizeBackupInfo(BACKUP_INFO_PAYLOAD)).toEqual(BACKUP_INFO_PAYLOAD);
+  });
+
+  it('缺 id 或 harnessId 丢弃（无法定位的备份不渲染）', () => {
+    expect(normalizeBackupInfo({ harnessId: 'claude', createdAt: 't' })).toBeNull();
+    expect(normalizeBackupInfo({ id: 'b', createdAt: 't' })).toBeNull();
+  });
+
+  it('listProfileBackups 过滤坏条目而不是让整个列表失败', async () => {
+    stubTauri(async () => [BACKUP_INFO_PAYLOAD, { id: 'broken' }, null]);
+
+    await expect(listProfileBackups('claude')).resolves.toEqual({
+      ok: true,
+      data: [BACKUP_INFO_PAYLOAD],
+    });
+  });
+
+  it('restoreProfileBackup 使用 profile_restore 命令名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => null);
+    stubTauri(invokeSpy);
+
+    await restoreProfileBackup('claude', '00000000000000000000-000001');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('profile_restore');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      harnessId: 'claude',
+      backupId: '00000000000000000000-000001',
+    });
+  });
+});
+
+describe('normalizeCredentialRef + credential commands（E16）', () => {
+  it('payload 与 Rust 契约同形：句柄无任何值字段', () => {
+    expect(normalizeCredentialRef(CREDENTIAL_REF_PAYLOAD)).toEqual(CREDENTIAL_REF_PAYLOAD);
+    expect(Object.keys(CREDENTIAL_REF_PAYLOAD)).not.toContain('value');
+  });
+
+  it('缺 id 或 label 丢弃（没有标签的句柄无法操作）', () => {
+    expect(normalizeCredentialRef({ label: 'k' })).toBeNull();
+    expect(normalizeCredentialRef({ id: 'r' })).toBeNull();
+  });
+
+  it('registerCredential 的 value 只出现在请求方向', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => CREDENTIAL_REF_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await registerCredential('codex', 'deepseek-key', 'sk-secret-123');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('credential_register');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      harnessId: 'codex',
+      label: 'deepseek-key',
+      value: 'sk-secret-123',
+    });
+    // 响应方向不得回显值：normalize 之后的对象与 payload 同形（无 value 字段）。
+    expect(result).toEqual({ ok: true, data: CREDENTIAL_REF_PAYLOAD });
+  });
+
+  it('listCredentials 过滤坏条目', async () => {
+    stubTauri(async () => [CREDENTIAL_REF_PAYLOAD, { id: 'x' }]);
+
+    await expect(listCredentials('codex')).resolves.toEqual({
+      ok: true,
+      data: [CREDENTIAL_REF_PAYLOAD],
+    });
+  });
+
+  it('removeCredential 使用 credential_remove 命令名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
+    stubTauri(invokeSpy);
+
+    await removeCredential('ref-1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('credential_remove');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ id: 'ref-1' });
+  });
+});
+
+describe('normalizeCheckItem + runConfigDoctor（E17）', () => {
+  const CHECK_ITEM_PAYLOAD = {
+    check: 'config_parseable',
+    status: 'warn',
+    message: '未找到 ~/.claude/settings.json（未初始化）',
+    suggestion: '运行一次 claude 完成初始化后再体检',
+  };
+
+  it('payload 与 Rust 契约同形：status 保持三态', () => {
+    expect(normalizeCheckItem(CHECK_ITEM_PAYLOAD)).toEqual(CHECK_ITEM_PAYLOAD);
+  });
+
+  it('缺 check 或 message 丢弃（图标 key 与正文都缺的行没有意义）', () => {
+    expect(normalizeCheckItem({ status: 'ok' })).toBeNull();
+    expect(normalizeCheckItem({ check: 'config_parseable' })).toBeNull();
+  });
+
+  it('status 不是三态之一时按 error 处理（不可信输入宁严重勿漏）', () => {
+    const result = normalizeCheckItem({
+      check: 'config_parseable',
+      status: 'green',
+      message: 'm',
+    });
+    expect(result?.status).toBe('error');
+  });
+
+  it('runConfigDoctor 使用 config_doctor 命令名并过滤坏条目', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [CHECK_ITEM_PAYLOAD, { check: 'x' }]);
+    stubTauri(invokeSpy);
+
+    const result = await runConfigDoctor('claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('config_doctor');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: [CHECK_ITEM_PAYLOAD] });
   });
 });

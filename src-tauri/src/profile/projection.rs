@@ -250,6 +250,35 @@ fn rotate_backups(dir: &Path, keep: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// 跨 IPC 契约测试（AGENTS.md）：前端 `normalizeProjectionReport` /
+    /// `normalizeBackupInfo` 依赖这些键。
+    #[test]
+    fn projection_dtos_serialize_with_camel_case_keys() {
+        let report = ProjectionReport {
+            target_path: "C:/Users/t/.claude/settings.json".to_string(),
+            backup_id: "0001".to_string(),
+            changed_keys: 2,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["targetPath"], "C:/Users/t/.claude/settings.json");
+        assert_eq!(json["backupId"], "0001");
+        assert_eq!(json["changedKeys"], 2);
+        assert!(json.get("target_path").is_none(), "不得两套契约并存");
+
+        let backup = BackupInfo {
+            id: "0001".to_string(),
+            harness_id: "claude".to_string(),
+            created_at: "2026-10-30T00:00:00Z".to_string(),
+            path: "C:/Users/t/.harness-hub/backups/claude/0001.json".to_string(),
+            target_path: "C:/Users/t/.claude/settings.json".to_string(),
+        };
+        let json = serde_json::to_value(&backup).unwrap();
+        assert_eq!(json["harnessId"], "claude");
+        assert_eq!(json["createdAt"], "2026-10-30T00:00:00Z");
+        assert_eq!(json["targetPath"], "C:/Users/t/.claude/settings.json");
+        assert!(json.get("harness_id").is_none());
+    }
+
     fn temp_tree() -> PathBuf {
         let root = std::env::temp_dir().join(format!("hh-proj-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
