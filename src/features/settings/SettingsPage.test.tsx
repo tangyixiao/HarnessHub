@@ -380,3 +380,262 @@ describe('SettingsPage — 配置体检（E17，只读 + 建议）', () => {
     expect(screen.queryByTestId('doctor-items')).not.toBeInTheDocument();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * MCP Binding Registry（E18）fixtures —— 与 Rust 契约（serde camelCase）
+ * 同形，复刻自 src/lib/ipc.test.ts 的 MCP_SERVER_PAYLOAD 系列。
+ * ------------------------------------------------------------------ */
+
+/** `mcp_server_list` 的返回项之一：stdio 传输。 */
+const MCP_SERVER_STDIO_PAYLOAD = {
+  id: 'srv-1',
+  name: 'filesystem',
+  transport: 'stdio',
+  command: 'npx',
+  args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:/project'],
+  url: null,
+  envKeys: ['FILESYSTEM_ROOT'],
+  enabled: true,
+  source: 'hub',
+  createdAt: '2026-10-25T10:00:00Z',
+  updatedAt: '2026-11-01T09:30:00Z',
+};
+
+/** `mcp_server_list` 的返回项之一：http 传输、已停用。 */
+const MCP_SERVER_HTTP_PAYLOAD = {
+  id: 'srv-2',
+  name: 'fetch',
+  transport: 'http',
+  command: null,
+  args: [],
+  url: 'https://mcp.example.com/sse',
+  envKeys: [],
+  enabled: false,
+  source: 'imported:claude',
+  createdAt: '2026-10-25T10:00:00Z',
+  updatedAt: '2026-11-01T09:30:00Z',
+};
+
+/** `mcp_binding_list` 的返回项之一：global 作用域绑定（harnessId 为 null）。 */
+const MCP_BINDING_GLOBAL_PAYLOAD = {
+  id: 'bind-1',
+  serverId: 'srv-1',
+  serverName: 'filesystem',
+  scope: 'global',
+  harnessId: null,
+  createdAt: '2026-11-01T09:30:00Z',
+};
+
+/** `mcp_sync_preview` 的返回项（updates / removals 是带 summary 的 diff 条目）。 */
+const MCP_SYNC_PREVIEW_PAYLOAD = {
+  harnessId: 'claude',
+  targetPath: 'C:/Users/dev/.claude.json',
+  additions: ['fetch'],
+  updates: [{ name: 'filesystem', summary: '命令从 npx 改为 bunx' }],
+  removals: [{ name: 'legacy', summary: 'Hub 侧已删除该 server' }],
+};
+
+/** `mcp_sync_apply` 的返回项（写前备份的 id 用于回溯）。 */
+const MCP_SYNC_REPORT_PAYLOAD = {
+  targetPath: 'C:/Users/dev/.claude.json',
+  backupId: 'bkp-20261101',
+  added: 1,
+  updated: 1,
+  removed: 1,
+};
+
+/** `mcp_import` 的返回项（imported / skipped 都是 harness 配置里的键名）。 */
+const MCP_IMPORT_REPORT_PAYLOAD = {
+  harnessId: 'claude',
+  imported: ['legacy'],
+  skipped: ['bad key!'],
+};
+
+describe('SettingsPage — MCP Servers（E18）', () => {
+  it('点「加载列表」调 mcp_server_list + mcp_binding_list，并渲染 stdio / http 服务器行与绑定勾选', async () => {
+    const invoke = stubCommands({
+      mcp_server_list: [MCP_SERVER_STDIO_PAYLOAD, MCP_SERVER_HTTP_PAYLOAD],
+      mcp_binding_list: [MCP_BINDING_GLOBAL_PAYLOAD],
+    });
+
+    render(<SettingsPage />);
+    // 渲染路径零 IPC：列表加载是显式动作。
+    expect(invoke.mock.calls.every((call) => !call[0].startsWith('mcp_'))).toBe(true);
+    await userEvent.click(screen.getByTestId('mcp-load'));
+
+    const list = await screen.findByTestId('mcp-server-list');
+    expect(invoke.mock.calls.map((call) => call[0])).toEqual([
+      'mcp_server_list',
+      'mcp_binding_list',
+    ]);
+
+    const stdioRow = within(list).getByTestId('mcp-server-row-filesystem');
+    expect(within(stdioRow).getByText('filesystem')).toBeInTheDocument();
+    expect(within(stdioRow).getByText('stdio')).toBeInTheDocument();
+    expect(within(stdioRow).getByText('npx')).toBeInTheDocument();
+    expect(within(stdioRow).getByText('已启用')).toBeInTheDocument();
+    // global 绑定已勾选；harness 绑定未勾选（勾选态完全由 binding 列表推导）。
+    expect(within(stdioRow).getByRole('checkbox', { name: 'Global' })).toBeChecked();
+    expect(within(stdioRow).getByRole('checkbox', { name: 'Claude Code' })).not.toBeChecked();
+
+    const httpRow = within(list).getByTestId('mcp-server-row-fetch');
+    expect(within(httpRow).getByText('http')).toBeInTheDocument();
+    expect(within(httpRow).getByText('https://mcp.example.com/sse')).toBeInTheDocument();
+    expect(within(httpRow).getByText('已停用')).toBeInTheDocument();
+  });
+
+  it('预览差异：展示 targetPath 与 additions / updates / removals 分组（removals 逐条）', async () => {
+    const invoke = stubCommands({
+      mcp_server_list: [],
+      mcp_binding_list: [],
+      mcp_sync_preview: MCP_SYNC_PREVIEW_PAYLOAD,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(await screen.findByTestId('mcp-preview-claude'));
+
+    const result = await screen.findByTestId('mcp-preview-result');
+    expect(within(result).getByText('C:/Users/dev/.claude.json')).toBeInTheDocument();
+    expect(within(result).getByText('fetch')).toBeInTheDocument();
+    expect(within(result).getByText('filesystem')).toBeInTheDocument();
+    expect(within(result).getByText('命令从 npx 改为 bunx')).toBeInTheDocument();
+    expect(within(result).getByText('legacy')).toBeInTheDocument();
+    expect(within(result).getByText('Hub 侧已删除该 server')).toBeInTheDocument();
+
+    const previewCall = invoke.mock.calls.find((call) => call[0] === 'mcp_sync_preview');
+    expect(previewCall?.[1]).toEqual({ harnessId: 'claude' });
+  });
+
+  it('预览差异：removals 为空时显示「无移除」', async () => {
+    stubCommands({
+      mcp_server_list: [],
+      mcp_binding_list: [],
+      mcp_sync_preview: { ...MCP_SYNC_PREVIEW_PAYLOAD, harnessId: 'codex', removals: [] },
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(await screen.findByTestId('mcp-preview-codex'));
+
+    expect(await screen.findByText('无移除')).toBeInTheDocument();
+  });
+
+  it('确认同步：confirm 文案含 targetPath，mcp_sync_apply 带 harnessId，报告含 backupId', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const invoke = stubCommands({
+      mcp_server_list: [],
+      mcp_binding_list: [],
+      mcp_sync_preview: MCP_SYNC_PREVIEW_PAYLOAD,
+      mcp_sync_apply: MCP_SYNC_REPORT_PAYLOAD,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(await screen.findByTestId('mcp-preview-claude'));
+    await screen.findByTestId('mcp-preview-result');
+    await userEvent.click(screen.getByTestId('mcp-apply-claude'));
+
+    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain('C:/Users/dev/.claude.json');
+
+    const applyCall = invoke.mock.calls.find((call) => call[0] === 'mcp_sync_apply');
+    expect(applyCall?.[0]).toBe('mcp_sync_apply');
+    expect(applyCall?.[1]).toEqual({ harnessId: 'claude' });
+
+    const report = await screen.findByTestId('mcp-sync-report');
+    expect(within(report).getByText('bkp-20261101')).toBeInTheDocument();
+    expect(within(report).getByText('C:/Users/dev/.claude.json')).toBeInTheDocument();
+  });
+
+  it('导入现有：confirm（含 source-of-truth 说明）后调 mcp_import 并渲染 imported / skipped', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const invoke = stubCommands({
+      mcp_server_list: [],
+      mcp_binding_list: [],
+      mcp_import: MCP_IMPORT_REPORT_PAYLOAD,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(await screen.findByTestId('mcp-import-claude'));
+
+    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain('source-of-truth');
+
+    const importCall = invoke.mock.calls.find((call) => call[0] === 'mcp_import');
+    expect(importCall?.[1]).toEqual({ harnessId: 'claude' });
+
+    const result = await screen.findByTestId('mcp-import-result');
+    expect(within(result).getByText('legacy')).toBeInTheDocument();
+    expect(within(result).getByText('bad key!')).toBeInTheDocument();
+  });
+
+  it('新增表单：transport 切换 command / url，stdio 提交时 args / envKeys 按逗号解析', async () => {
+    const invoke = stubCommands({
+      mcp_server_list: [],
+      mcp_binding_list: [],
+      mcp_server_upsert: MCP_SERVER_STDIO_PAYLOAD,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(screen.getByTestId('mcp-load'));
+    await screen.findByText(
+      '还没有登记任何 MCP Server；用下面的表单新增，或用「导入现有」从 harness 配置导入。',
+    );
+
+    // 默认 stdio：command 输入可见、url 输入不可见。
+    expect(screen.getByTestId('mcp-command-input')).toBeInTheDocument();
+    expect(screen.queryByTestId('mcp-url-input')).not.toBeInTheDocument();
+    await userEvent.type(screen.getByTestId('mcp-name-input'), 'filesystem');
+
+    // 切到 http：url 输入出现、command 消失。
+    await userEvent.selectOptions(screen.getByTestId('mcp-transport-select'), 'http');
+    expect(screen.getByTestId('mcp-url-input')).toBeInTheDocument();
+    expect(screen.queryByTestId('mcp-command-input')).not.toBeInTheDocument();
+
+    // 切回 stdio 后提交，验证输入形状（逗号分隔解析、http 字段为 null）。
+    await userEvent.selectOptions(screen.getByTestId('mcp-transport-select'), 'stdio');
+    await userEvent.type(screen.getByTestId('mcp-command-input'), 'npx');
+    await userEvent.type(
+      screen.getByTestId('mcp-args-input'),
+      '-y, @modelcontextprotocol/server-filesystem',
+    );
+    await userEvent.type(screen.getByTestId('mcp-envkeys-input'), 'FILESYSTEM_ROOT, API_KEY');
+    await userEvent.click(screen.getByTestId('mcp-submit'));
+
+    const upsertCall = invoke.mock.calls.find((call) => call[0] === 'mcp_server_upsert');
+    expect(upsertCall?.[1]).toEqual({
+      input: {
+        id: null,
+        name: 'filesystem',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-filesystem'],
+        url: null,
+        envKeys: ['FILESYSTEM_ROOT', 'API_KEY'],
+        enabled: true,
+      },
+    });
+  });
+
+  it('删除服务器：confirm 后调 mcp_server_remove', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const invoke = stubCommands({
+      mcp_server_list: [MCP_SERVER_STDIO_PAYLOAD],
+      mcp_binding_list: [],
+      mcp_server_remove: true,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(screen.getByTestId('mcp-load'));
+    await userEvent.click(await screen.findByTestId('mcp-server-remove-filesystem'));
+
+    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain('filesystem');
+    const removeCall = invoke.mock.calls.find((call) => call[0] === 'mcp_server_remove');
+    expect(removeCall?.[1]).toEqual({ id: 'srv-1' });
+  });
+
+  it('浏览器模式：MCP 区块按钮禁用、不发调用', async () => {
+    render(<SettingsPage />);
+    await screen.findByTestId('mcp-card');
+
+    expect(screen.getByTestId('mcp-preview-claude')).toBeDisabled();
+    expect(screen.getByTestId('mcp-import-codex')).toBeDisabled();
+    expect(screen.getByTestId('mcp-submit')).toBeDisabled();
+  });
+});

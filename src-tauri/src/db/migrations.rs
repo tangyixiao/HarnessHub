@@ -97,6 +97,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0012_credential_refs.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 13,
+        name: "0013_mcp_registry",
+        sql: include_str!("migrations/0013_mcp_registry.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -260,6 +266,8 @@ mod tests {
         "replay_index_state",
         "replay_messages",
         "credential_refs",
+        "mcp_servers",
+        "mcp_bindings",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -790,10 +798,11 @@ mod tests {
             vec![
                 "0010_git_snapshots".to_string(),
                 "0011_replay_search".to_string(),
-                "0012_credential_refs".to_string()
+                "0012_credential_refs".to_string(),
+                "0013_mcp_registry".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 12);
+        assert_eq!(current_version(&conn).expect("版本"), 13);
 
         const INSERT_SNAPSHOT: &str = "INSERT INTO git_snapshots
             (hub_session_id, phase, captured_at, worktree_root, head,
@@ -864,10 +873,11 @@ mod tests {
             applied,
             vec![
                 "0011_replay_search".to_string(),
-                "0012_credential_refs".to_string()
+                "0012_credential_refs".to_string(),
+                "0013_mcp_registry".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 12);
+        assert_eq!(current_version(&conn).expect("版本"), 13);
 
         // 设置表恰好一行且默认关闭。
         let (rows, enabled, excluded): (i64, i64, String) = conn
@@ -931,8 +941,14 @@ mod tests {
         .expect("harness");
 
         let applied = apply_pending(&mut conn).expect("升级到最新");
-        assert_eq!(applied, vec!["0012_credential_refs".to_string()]);
-        assert_eq!(current_version(&conn).expect("版本"), 12);
+        assert_eq!(
+            applied,
+            vec![
+                "0012_credential_refs".to_string(),
+                "0013_mcp_registry".to_string()
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 13);
 
         conn.execute(
             "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
@@ -964,6 +980,115 @@ mod tests {
             .query_row("SELECT count(*) FROM credential_refs", [], |row| row.get(0))
             .expect("计数");
         assert_eq!(remaining, 0, "级联删除");
+    }
+
+    /// 迁移 0013：v12 老库升级后 MCP Registry 两张表可用；scope_key 唯一与
+    /// CHECK 约束真实生效；server 删除级联绑定。
+    #[test]
+    fn migration_0013_adds_mcp_registry_to_a_v12_database() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 12).expect("建到 v12");
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'
+                 AND name IN ('mcp_servers', 'mcp_bindings')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v12 表检查");
+        assert_eq!(missing, 0, "v12 不该有 MCP Registry 表");
+
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('claude', 'Claude Code', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("harness");
+
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(applied, vec!["0013_mcp_registry".to_string()]);
+        assert_eq!(current_version(&conn).expect("版本"), 13);
+
+        conn.execute(
+            "INSERT INTO mcp_servers (id, name, transport, command, args_json, url, env_keys,
+             enabled, source, created_at, updated_at)
+             VALUES ('srv-1', 'fetch', 'stdio', 'npx', '[\"-y\"]', NULL, '[\"KEY\"]',
+                     1, 'hub', 't', 't')",
+            [],
+        )
+        .expect("写入 server");
+
+        // 重复 name 被 UNIQUE 拒绝。
+        let duplicate = conn.execute(
+            "INSERT INTO mcp_servers (id, name, transport, command, args_json, url, env_keys,
+             enabled, source, created_at, updated_at)
+             VALUES ('srv-2', 'fetch', 'stdio', 'npx', '[]', NULL, '[]', 1, 'hub', 't', 't')",
+            [],
+        );
+        assert!(duplicate.is_err(), "重复 name 必须被拒绝");
+
+        // 非法 transport 被 CHECK 拒绝。
+        let bad_transport = conn.execute(
+            "INSERT INTO mcp_servers (id, name, transport, command, args_json, url, env_keys,
+             enabled, source, created_at, updated_at)
+             VALUES ('srv-3', 'bad', 'websocket', NULL, '[]', NULL, '[]', 1, 'hub', 't', 't')",
+            [],
+        );
+        assert!(bad_transport.is_err(), "非法 transport 必须被拒绝");
+
+        // global 绑定（scope_key = 'global'）。
+        conn.execute(
+            "INSERT INTO mcp_bindings (id, server_id, scope, harness_id, scope_key, created_at)
+             VALUES ('b-1', 'srv-1', 'global', NULL, 'global', 't')",
+            [],
+        )
+        .expect("global 绑定必须可写");
+
+        // 同 (server, scope_key) 重复被 UNIQUE 拒绝——SQLite 的 UNIQUE 对 NULL
+        // 互异，这正是引入 scope_key 派生列的原因。
+        let duplicate_global = conn.execute(
+            "INSERT INTO mcp_bindings (id, server_id, scope, harness_id, scope_key, created_at)
+             VALUES ('b-2', 'srv-1', 'global', NULL, 'global', 't')",
+            [],
+        );
+        assert!(duplicate_global.is_err(), "重复 global 绑定必须被拒绝");
+
+        // harness 绑定要求 scope_key 与 harness_id 一致（CHECK）。
+        let mismatched = conn.execute(
+            "INSERT INTO mcp_bindings (id, server_id, scope, harness_id, scope_key, created_at)
+             VALUES ('b-3', 'srv-1', 'harness', 'claude', 'harness:codex', 't')",
+            [],
+        );
+        assert!(
+            mismatched.is_err(),
+            "scope_key 与 harness_id 不一致必须被拒绝"
+        );
+
+        conn.execute(
+            "INSERT INTO mcp_bindings (id, server_id, scope, harness_id, scope_key, created_at)
+             VALUES ('b-4', 'srv-1', 'harness', 'claude', 'harness:claude', 't')",
+            [],
+        )
+        .expect("harness 绑定必须可写");
+
+        // 未知 harness 被 FK 拒绝。
+        let orphan = conn.execute(
+            "INSERT INTO mcp_bindings (id, server_id, scope, harness_id, scope_key, created_at)
+             VALUES ('b-5', 'srv-1', 'harness', 'nope', 'harness:nope', 't')",
+            [],
+        );
+        assert!(orphan.is_err(), "未知 harness 必须被外键拒绝");
+
+        // server 删除 → 绑定级联。
+        conn.execute("DELETE FROM mcp_servers WHERE id = 'srv-1'", [])
+            .expect("删除 server");
+        let remaining: i64 = conn
+            .query_row("SELECT count(*) FROM mcp_bindings", [], |row| row.get(0))
+            .expect("计数");
+        assert_eq!(remaining, 0, "server 删除必须级联清掉绑定");
     }
 
     /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
@@ -1237,9 +1362,10 @@ mod tests {
                 "0010_git_snapshots".to_string(),
                 "0011_replay_search".to_string(),
                 "0012_credential_refs".to_string(),
+                "0013_mcp_registry".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 12);
+        assert_eq!(current_version(&conn).expect("版本"), 13);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(
