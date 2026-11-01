@@ -166,6 +166,41 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
     前端 Projects 卡片 Worktrees 区（创建 confirm 含磁盘警示、合并/删除 confirm
     含风险提示）。harness capability `worktree` 保持 false（Hub 自身能力 ≠
     harness 可在 worktree 中跑，后者需真机 E2E）。
-    尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
-    capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）。
+    配置平面（ROADMAP E 轨道，v0.4.0）已完成：
+    - **只读发现（E14）**：`src-tauri/src/profile/{claude,codex,gemini}.rs` 解析三个
+      harness 的原生配置为 `ProfileSummary`；secret 值 Rust 层 redact
+      （`<redacted>` / set-unset），IPC 契约测试锁定。
+    - **安全投影（E15）**：`profile/projection.rs` —— read → parse → merge →
+      backup（`~/.harness-hub/backups/<harness>/`，最近 10 份轮换）→ temp →
+      verify → 原子 rename；merge 语义 = 同名覆盖 + 未知键保留 + `env` 深合并一层；
+      文本通用变体 `apply_text`（verify 逐字节比对；**允许新建**，`backupId` 空串）。
+      IPC `profile_project/backups/restore`——恢复目标只来自后端备份记录。
+      capability `profiles`：claude = true。
+    - **凭据（E16）**：`src-tauri/src/credentials/` —— 值进 Secret Store 抽象
+      （`FileSecretStore` 兜底，0600），SQLite 只存句柄（migration 0012
+      `credential_refs`）；值只在登记这一次跨 IPC。IPC `credential_register/list/remove`。
+    - **体检（E17）**：`profile/doctor.rs` `CheckItem`（config 可解析 / 凭据可达含
+      孤儿检测 / Provider 指向）；`diagnose` 无 DB 纯函数 + 命令层合并凭据检查；
+      只给建议不自动修复。IPC `config_doctor`。
+    - **MCP Binding Registry（E18）**：`src-tauri/src/mcp/` —— registry（server CRUD +
+      global/harness 绑定，migration 0013，`scope_key` 派生列 + `env_keys` 只存变量名）
+      - sync（desired → diff → preview → 原子同步；**条目级删除 + 管理键级更新**：
+        条目内用户手写 `env`/`headers` 逐字节保留，绝不写 `<redacted>`）。
+        形态取证：claude `~/.claude.json` `{type:"http",url}`；codex `config.toml`
+        `[mcp_servers.<name>] url`（**toml_edit 保格式**）；gemini `settings.json`
+        `{httpUrl}`。IPC `mcp_server_list/upsert/remove`、`mcp_binding_list/add/remove`、
+        `mcp_sync_preview`（纯读）/`mcp_sync_apply`（显式）/`mcp_import`。
+    - **Prompts + Skills + Tray（E19）**：`src-tauri/src/prompts/`（migration 0014
+      `prompt_artifacts`；标记块渲染器 `render.rs` 纯函数核心——`harness-hub:begin/end`
+      块外用户内容逐字节保留、幂等 round-trip、begin 未闭合拒绝落盘；多条按 name 升序）
+      投影 `<repo>/CLAUDE.md`/`AGENTS.md`/`GEMINI.md`，capability `prompts`：
+      claude/codex/gemini = true；`skills.rs` 只读发现 `~/.claude/skills`（坏文件计
+      skipped）；`tray_menu.rs` 菜单模型纯模块 + lib.rs 接线（Open Dashboard /
+      活动会话只读计数 / Quit；初始化失败不阻断主功能；**不做 Profile 切换**——
+      `ProfileAdapter.activate` 未实现）。IPC `prompt_list/upsert/remove/
+render_preview/render_apply`、`skills_list`。
+      尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
+      capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）；
+      配置投影的 codex/gemini 目标；MCP project scope 绑定与 Runtime 连接（F22）；
+      ProfileAdapter.activate（切换与托盘 Profile 切换的前置）。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。

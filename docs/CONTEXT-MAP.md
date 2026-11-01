@@ -89,6 +89,18 @@ sidechain 链分段）、FTS5 trigram 索引（migration 0011，指纹增量、�
   `docs/specs/2026-10-25-*.md`。仅 claude 开放（capability 门控）。
   Harness 身份色：`src/lib/harness-colors.ts`（同一 id 在 Dashboard / Sessions /
   Harnesses 三处永远同色，未知 id 中性灰）。
+  配置平面（E14-E19）：`src-tauri/src/profile/`（E14 三解析器 + E15 `projection.rs`
+  原子管线 + `apply_text` 文本泛化 + E17 `doctor.rs` 体检）、`src-tauri/src/credentials/`
+  （E16 句柄注册表 + FileSecretStore）、`src-tauri/src/mcp/`（E18 registry + sync：
+  调和粒度 = 条目级删除 + 管理键级更新，codex 走 toml_edit 保格式）、
+  `src-tauri/src/prompts/`（E19 registry + 标记块渲染器，幂等 round-trip）、
+  `src-tauri/src/skills.rs`（只读发现）、`src-tauri/src/tray_menu.rs`（菜单模型纯模块）。
+  spec：`docs/specs/2026-10-25-{profile-registry,safe-projection,credential-store,
+config-doctor}-design.md`、`docs/specs/2026-10-31-{mcp-binding-registry,
+skills-prompts-tray}-design.md`；前端 Settings 页（Provider 现状 / 安全投影 /
+  凭据 / 体检 / MCP Servers / Skills 只读）与 Projects 页 Prompts 展开区。
+  Projects 页 Prompts 区：`src/features/projects/ProjectsPage.tsx` `ProjectPrompts`
+  （折叠零 IPC；预览 → confirm（含 targetPath）→ applyPromptRender）。
   插件宿主：`src-tauri/src/plugins/{manifest,rpc,adapters,host_api,registry,discovery,service,supervisor}.rs`
   —— manifest 解析校验与 capability 授权（唯一的「这方法能不能调」来源）、行分隔
   JSON-RPC codec、六类 Adapter trait（v0.1 只打通 usage 与 skill，其余 `Unsupported`
