@@ -103,6 +103,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("migrations/0013_mcp_registry.sql"),
         foreign_keys_off: false,
     },
+    Migration {
+        version: 14,
+        name: "0014_prompt_artifacts",
+        sql: include_str!("migrations/0014_prompt_artifacts.sql"),
+        foreign_keys_off: false,
+    },
 ];
 
 const CREATE_TRACKING_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -268,6 +274,7 @@ mod tests {
         "credential_refs",
         "mcp_servers",
         "mcp_bindings",
+        "prompt_artifacts",
     ];
 
     fn table_names(db: &Database) -> Vec<String> {
@@ -799,10 +806,11 @@ mod tests {
                 "0010_git_snapshots".to_string(),
                 "0011_replay_search".to_string(),
                 "0012_credential_refs".to_string(),
-                "0013_mcp_registry".to_string()
+                "0013_mcp_registry".to_string(),
+                "0014_prompt_artifacts".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 13);
+        assert_eq!(current_version(&conn).expect("版本"), 14);
 
         const INSERT_SNAPSHOT: &str = "INSERT INTO git_snapshots
             (hub_session_id, phase, captured_at, worktree_root, head,
@@ -874,10 +882,11 @@ mod tests {
             vec![
                 "0011_replay_search".to_string(),
                 "0012_credential_refs".to_string(),
-                "0013_mcp_registry".to_string()
+                "0013_mcp_registry".to_string(),
+                "0014_prompt_artifacts".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 13);
+        assert_eq!(current_version(&conn).expect("版本"), 14);
 
         // 设置表恰好一行且默认关闭。
         let (rows, enabled, excluded): (i64, i64, String) = conn
@@ -945,10 +954,11 @@ mod tests {
             applied,
             vec![
                 "0012_credential_refs".to_string(),
-                "0013_mcp_registry".to_string()
+                "0013_mcp_registry".to_string(),
+                "0014_prompt_artifacts".to_string()
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 13);
+        assert_eq!(current_version(&conn).expect("版本"), 14);
 
         conn.execute(
             "INSERT INTO credential_refs (id, label, harness_id, store_kind, created_at)
@@ -1009,8 +1019,14 @@ mod tests {
         .expect("harness");
 
         let applied = apply_pending(&mut conn).expect("升级到最新");
-        assert_eq!(applied, vec!["0013_mcp_registry".to_string()]);
-        assert_eq!(current_version(&conn).expect("版本"), 13);
+        assert_eq!(
+            applied,
+            vec![
+                "0013_mcp_registry".to_string(),
+                "0014_prompt_artifacts".to_string()
+            ]
+        );
+        assert_eq!(current_version(&conn).expect("版本"), 14);
 
         conn.execute(
             "INSERT INTO mcp_servers (id, name, transport, command, args_json, url, env_keys,
@@ -1089,6 +1105,81 @@ mod tests {
             .query_row("SELECT count(*) FROM mcp_bindings", [], |row| row.get(0))
             .expect("计数");
         assert_eq!(remaining, 0, "server 删除必须级联清掉绑定");
+    }
+
+    /// 迁移 0014：v13 老库升级后 `prompt_artifacts` 可用；UNIQUE / CHECK / 级联生效。
+    #[test]
+    fn migration_0014_adds_prompt_artifacts_to_a_v13_database() {
+        let mut conn = Connection::open_in_memory().expect("打开内存库");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("外键");
+
+        apply_until(&mut conn, 13).expect("建到 v13");
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'
+                 AND name = 'prompt_artifacts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v13 表检查");
+        assert_eq!(missing, 0, "v13 不该有 prompt_artifacts 表");
+
+        conn.execute(
+            "INSERT INTO projects (id, name, repo_root, created_at, updated_at)
+             VALUES ('proj-1', 'Demo', 'D:/work/demo', 't', 't')",
+            [],
+        )
+        .expect("项目");
+
+        let applied = apply_pending(&mut conn).expect("升级到最新");
+        assert_eq!(applied, vec!["0014_prompt_artifacts".to_string()]);
+        assert_eq!(current_version(&conn).expect("版本"), 14);
+
+        conn.execute(
+            "INSERT INTO prompt_artifacts (id, name, content, project_id, enabled,
+             created_at, updated_at)
+             VALUES ('p-1', 'style', '# 规范', 'proj-1', 1, 't', 't')",
+            [],
+        )
+        .expect("写入 prompt");
+
+        // 重复 name 被 UNIQUE 拒绝。
+        let duplicate = conn.execute(
+            "INSERT INTO prompt_artifacts (id, name, content, project_id, enabled,
+             created_at, updated_at)
+             VALUES ('p-2', 'style', 'x', NULL, 1, 't', 't')",
+            [],
+        );
+        assert!(duplicate.is_err(), "重复 name 必须被拒绝");
+
+        // 非法 enabled 被 CHECK 拒绝。
+        let bad_enabled = conn.execute(
+            "INSERT INTO prompt_artifacts (id, name, content, project_id, enabled,
+             created_at, updated_at)
+             VALUES ('p-3', 'bad', 'x', NULL, 2, 't', 't')",
+            [],
+        );
+        assert!(bad_enabled.is_err(), "非法 enabled 必须被拒绝");
+
+        // 未知项目被 FK 拒绝。
+        let orphan = conn.execute(
+            "INSERT INTO prompt_artifacts (id, name, content, project_id, enabled,
+             created_at, updated_at)
+             VALUES ('p-4', 'orphan', 'x', 'nope', 1, 't', 't')",
+            [],
+        );
+        assert!(orphan.is_err(), "未知项目必须被外键拒绝");
+
+        // 项目删除 → prompt 级联消失。
+        conn.execute("DELETE FROM projects WHERE id = 'proj-1'", [])
+            .expect("删除项目");
+        let remaining: i64 = conn
+            .query_row("SELECT count(*) FROM prompt_artifacts", [], |row| {
+                row.get(0)
+            })
+            .expect("计数");
+        assert_eq!(remaining, 0, "项目删除必须级联清掉 prompt");
     }
 
     /// 故意失败的迁移：先建一张表、插一行，再访问不存在的表。
@@ -1363,9 +1454,10 @@ mod tests {
                 "0011_replay_search".to_string(),
                 "0012_credential_refs".to_string(),
                 "0013_mcp_registry".to_string(),
+                "0014_prompt_artifacts".to_string(),
             ]
         );
-        assert_eq!(current_version(&conn).expect("版本"), 13);
+        assert_eq!(current_version(&conn).expect("版本"), 14);
 
         // 升级之后的库必须真的可用，而不只是「表存在」。
         conn.execute(

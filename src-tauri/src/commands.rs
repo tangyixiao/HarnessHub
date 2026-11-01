@@ -681,6 +681,96 @@ pub fn mcp_import(
     crate::mcp::sync::import(database.connection(), &harness_id)
 }
 
+/* ------------------------------------------------------------------ *
+ * Prompts Registry + Skills 只读发现（ROADMAP E19；spec 2026-10-31-skills-prompts-tray-design.md）
+ * ------------------------------------------------------------------ */
+
+/// prompt 列表。`project_id` 过滤：Some = 该项目绑定 + 全局；None = 全部。**纯读**。
+#[tauri::command]
+pub fn prompt_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<crate::prompts::PromptArtifact>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::list_prompts(database.connection(), project_id.as_deref())
+}
+
+/// 新增 / 更新 prompt（显式动作）。
+#[tauri::command]
+pub fn prompt_upsert(
+    state: State<'_, AppState>,
+    input: crate::prompts::registry::PromptInput,
+) -> Result<crate::prompts::PromptArtifact> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::upsert_prompt(database.connection(), &input)
+}
+
+/// 删除 prompt。显式动作，前端 confirm。
+#[tauri::command]
+pub fn prompt_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::remove_prompt(database.connection(), &id)
+}
+
+/// 记忆文件投影预览（**纯读**）：目标路径 + 将写全文 + 是否新建。
+///
+/// `project_id` 为 None 时只渲染全局 prompt（目标仍是某个项目根目录——
+/// 全局 prompt 进每个项目；apply 必须指定具体项目）。
+#[tauri::command]
+pub fn prompt_render_preview(
+    state: State<'_, AppState>,
+    project_id: String,
+    harness_id: String,
+) -> Result<crate::prompts::render::PromptRenderPreview> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let repo_root = project_repo_root(database.connection(), &project_id)?;
+    crate::prompts::render::render_preview(
+        database.connection(),
+        std::path::Path::new(&repo_root),
+        &harness_id,
+        Some(&project_id),
+    )
+}
+
+/// 执行记忆文件投影（**显式写动作**）：E15 文本管线落盘；前端 confirm
+/// 文案必须列出将修改的文件路径（preview 的 targetPath）。
+#[tauri::command]
+pub fn prompt_render_apply(
+    state: State<'_, AppState>,
+    project_id: String,
+    harness_id: String,
+) -> Result<crate::profile::projection::ProjectionReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let repo_root = project_repo_root(database.connection(), &project_id)?;
+    crate::prompts::render::render_apply(
+        database.connection(),
+        std::path::Path::new(&repo_root),
+        &harness_id,
+        Some(&project_id),
+    )
+}
+
+/// 已登记项目的 repo_root（不存在 = 明确错误）。
+fn project_repo_root(conn: &rusqlite::Connection, project_id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT repo_root FROM projects WHERE id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| Error::InvalidInput(format!("未登记的项目：{project_id}（{error}）")))
+}
+
+/// 只读发现 `~/.claude/skills/`（E19 缩范围：Hub 只发现展示，不复制投影）。**纯读**。
+#[tauri::command]
+pub fn skills_list(_state: State<'_, AppState>) -> Result<crate::skills::SkillsReport> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    crate::skills::discover(&home)
+}
+
 /// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
 #[tauri::command]
 pub fn replay_search_reindex(

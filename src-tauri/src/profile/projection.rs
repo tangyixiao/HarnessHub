@@ -230,6 +230,10 @@ pub fn apply_text(
 }
 
 /// [`apply_text`] 的可注入变体：备份目录由调用方给定（测试用临时 home）。
+///
+/// **目标文件允许不存在**（E19 记忆文件投影是「创建或更新」）：此时没有
+/// 可备份的旧内容，不写备份文件，`backup_id` 返回空串；temp → verify →
+/// rename 仍完整执行。
 pub(crate) fn apply_text_in(
     target_path: &Path,
     rendered: &str,
@@ -245,12 +249,15 @@ pub(crate) fn apply_text_in(
 
     let dir = backup_root.to_path_buf();
     std::fs::create_dir_all(&dir)?;
-    let current = std::fs::read_to_string(target_path)?;
-    let backup_path = dir.join(format!("{backup_id}.json"));
-    let backup_content = format!("// target: {}\n{}", target_path.to_string_lossy(), current);
-    std::fs::write(&backup_path, backup_content)?;
+    if target_path.is_file() {
+        let current = std::fs::read_to_string(target_path)?;
+        let backup_path = dir.join(format!("{backup_id}.json"));
+        let backup_content = format!("// target: {}\n{}", target_path.to_string_lossy(), current);
+        std::fs::write(&backup_path, backup_content)?;
 
-    rotate_backups(&dir, 10)?;
+        rotate_backups(&dir, 10)?;
+    }
+    let created = !target_path.is_file();
 
     let temp_path = target_path.with_extension("hh-tmp");
     std::fs::write(&temp_path, rendered)?;
@@ -271,7 +278,8 @@ pub(crate) fn apply_text_in(
 
     Ok(ProjectionReport {
         target_path: target_path.to_string_lossy().into_owned(),
-        backup_id,
+        // 新建场景没有旧内容可备份：backup_id 留空（UI 显示「新建」）。
+        backup_id: if created { String::new() } else { backup_id },
         changed_keys: 1,
     })
 }

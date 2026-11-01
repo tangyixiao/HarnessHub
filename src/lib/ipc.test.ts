@@ -7,6 +7,7 @@ import {
   NOT_IN_TAURI,
   addMcpBinding,
   applyMcpSync,
+  applyPromptRender,
   addWorktree,
   createSession,
   discoverProfile,
@@ -28,8 +29,10 @@ import {
   listMcpServers,
   listProfileBackups,
   listProjects,
+  listPrompts,
   listReplaySessions,
   listSessions,
+  listSkills,
   listPlugins,
   listWorktrees,
   getWorktreeStatus,
@@ -48,6 +51,9 @@ import {
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProfileSummary,
+  normalizePromptArtifact,
+  normalizePromptRenderPreview,
+  normalizeSkillsReport,
   normalizeProjectionReport,
   normalizeProjectRecord,
   normalizeReindexReport,
@@ -67,6 +73,7 @@ import {
   normalizeWorktreeStatusCounts,
   pluginRefresh,
   previewMcpSync,
+  previewPromptRender,
   projectProfile,
   readReplaySession,
   reindexReplaySearch,
@@ -78,6 +85,7 @@ import {
   removeMcpBinding,
   removeMcpServer,
   removeProject,
+  removePrompt,
   removeWorktree,
   restoreProfileBackup,
   resumeTerminal,
@@ -85,8 +93,9 @@ import {
   searchReplay,
   setReplaySearchSettings,
   upsertMcpServer,
+  upsertPrompt,
 } from '@/lib/ipc';
-import type { McpServerInput } from '@/lib/ipc';
+import type { McpServerInput, PromptInput } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
 
@@ -210,6 +219,8 @@ const CODEX_PAYLOAD = {
     liveState: false,
     worktree: false,
     profiles: false,
+
+    prompts: false,
   },
   dataPaths: ['C:/Users/dev/.codex'],
 };
@@ -237,6 +248,8 @@ describe('normalizeHarnessSummary', () => {
       liveState: false,
       worktree: false,
       profiles: false,
+
+      prompts: false,
     });
     expect(incomplete?.installationId).toBeNull();
   });
@@ -271,6 +284,8 @@ describe('normalizeHarnessSummary', () => {
       liveState: false,
       worktree: false,
       profiles: false,
+
+      prompts: false,
     });
   });
 
@@ -3058,5 +3073,267 @@ describe('MCP Binding Registry IPC（ROADMAP E18）', () => {
     });
     await expect(applyMcpSync('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
     await expect(importMcpConfig('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+/**
+ * IPC 契约 `prompt_list` / `prompt_upsert` 的返回项，形状手工复刻自 Rust 契约
+ * 测试 `prompt_dtos_serialize_with_camel_case_keys`（src-tauri/src/prompts/registry.rs）：
+ * projectId 为 null 表示全局（进每个项目的渲染）。
+ */
+const PROMPT_ARTIFACT_PAYLOAD = {
+  id: 'p-1',
+  name: 'style',
+  content: '# style\n- 用中文回复',
+  projectId: 'proj-1',
+  enabled: true,
+  createdAt: '2026-10-31T10:00:00Z',
+  updatedAt: '2026-11-01T09:30:00Z',
+};
+
+/** 同上，全局 prompt 的形状（projectId 为 null）。 */
+const PROMPT_GLOBAL_PAYLOAD = {
+  ...PROMPT_ARTIFACT_PAYLOAD,
+  id: 'p-2',
+  projectId: null,
+};
+
+/** `prompt_upsert` 的入参形状（新建：id 为 null）。 */
+const PROMPT_UPSERT_INPUT: PromptInput = {
+  id: null,
+  name: 'style',
+  content: '# style\n- 用中文回复',
+  projectId: null,
+  enabled: true,
+};
+
+/** IPC 契约 `prompt_render_preview` 的返回项（复刻自 Rust `PromptRenderPreview`）。 */
+const PROMPT_PREVIEW_PAYLOAD = {
+  harnessId: 'claude',
+  targetPath: 'D:/work/demo/CLAUDE.md',
+  content: '<!-- harness-hub:begin -->\n# style\n- 用中文回复\n<!-- harness-hub:end -->\n',
+  createsFile: false,
+};
+
+/** IPC 契约 `prompt_render_apply` 的返回项（复用 E15 ProjectionReport 形状）。 */
+const PROMPT_APPLY_PAYLOAD = {
+  targetPath: 'D:/work/demo/CLAUDE.md',
+  backupId: '00000000000000000000-000002',
+  changedKeys: 1,
+};
+
+/**
+ * IPC 契约 `skills_list` 的返回项，形状手工复刻自 Rust 契约测试
+ * `skill_dtos_serialize_with_camel_case_keys`（src-tauri/src/skills.rs）。
+ */
+const SKILLS_REPORT_PAYLOAD = {
+  skills: [
+    {
+      name: 'pdf-tools',
+      description: '处理 PDF 的工具',
+      path: 'C:/Users/dev/.claude/skills/pdf-tools/SKILL.md',
+    },
+  ],
+  skipped: ['empty-dir'],
+};
+
+describe('Prompts Registry IPC（ROADMAP E19）', () => {
+  it('normalizePromptArtifact 保留 Rust 契约的每个 camelCase 字段（项目绑定与全局两种形状）', () => {
+    expect(normalizePromptArtifact(PROMPT_ARTIFACT_PAYLOAD)).toEqual(PROMPT_ARTIFACT_PAYLOAD);
+    expect(normalizePromptArtifact(PROMPT_GLOBAL_PAYLOAD)).toEqual(PROMPT_GLOBAL_PAYLOAD);
+  });
+
+  it('normalizePromptArtifact 丢掉缺 id 的条目，enabled 缺省 false，其余字段缺省空值', () => {
+    expect(normalizePromptArtifact({ ...PROMPT_ARTIFACT_PAYLOAD, id: '' })).toBeNull();
+    expect(normalizePromptArtifact({ ...PROMPT_ARTIFACT_PAYLOAD, id: '   ' })).toBeNull();
+    expect(normalizePromptArtifact(null)).toBeNull();
+    expect(normalizePromptArtifact('style')).toBeNull();
+    expect(normalizePromptArtifact({ id: 'p-3', name: 'x', content: 'y', enabled: 'yes' })).toEqual(
+      {
+        id: 'p-3',
+        name: 'x',
+        content: 'y',
+        projectId: null,
+        enabled: false,
+        createdAt: '',
+        updatedAt: '',
+      },
+    );
+  });
+
+  it('normalizePromptRenderPreview 保留字段，createsFile 只认 true，形状漂移收敛为空预览（纯读不误报）', () => {
+    expect(normalizePromptRenderPreview(PROMPT_PREVIEW_PAYLOAD)).toEqual(PROMPT_PREVIEW_PAYLOAD);
+    expect(normalizePromptRenderPreview({ ...PROMPT_PREVIEW_PAYLOAD, createsFile: true })).toEqual({
+      ...PROMPT_PREVIEW_PAYLOAD,
+      createsFile: true,
+    });
+    expect(normalizePromptRenderPreview({ createsFile: 'yes', content: 42 })).toEqual({
+      harnessId: '',
+      targetPath: '',
+      content: '',
+      createsFile: false,
+    });
+    expect(normalizePromptRenderPreview(null)).toEqual({
+      harnessId: '',
+      targetPath: '',
+      content: '',
+      createsFile: false,
+    });
+  });
+
+  it('listPrompts 使用 prompt_list 命令名：projectId 为 null（全部）与字符串（项目 + 全局）都保留键名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [PROMPT_ARTIFACT_PAYLOAD, null]);
+    stubTauri(invokeSpy);
+
+    await expect(listPrompts(null)).resolves.toEqual({ ok: true, data: [PROMPT_ARTIFACT_PAYLOAD] });
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('prompt_list');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ projectId: null });
+
+    await expect(listPrompts('proj-1')).resolves.toEqual({
+      ok: true,
+      data: [PROMPT_ARTIFACT_PAYLOAD],
+    });
+    expect(invokeSpy.mock.calls[1]?.[0]).toBe('prompt_list');
+    expect(invokeSpy.mock.calls[1]?.[1]).toEqual({ projectId: 'proj-1' });
+  });
+
+  it('upsertPrompt 使用 prompt_upsert 命令名并以 { input } 包参，归一化返回', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROMPT_ARTIFACT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await upsertPrompt(PROMPT_UPSERT_INPUT);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('prompt_upsert');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ input: PROMPT_UPSERT_INPUT });
+    expect(result).toEqual({ ok: true, data: PROMPT_ARTIFACT_PAYLOAD });
+  });
+
+  it('upsertPrompt 收到无法解析的返回时报 invalid-prompt-payload', async () => {
+    stubTauri(async () => ({ id: '' }));
+
+    await expect(upsertPrompt(PROMPT_UPSERT_INPUT)).resolves.toEqual({
+      ok: false,
+      error: 'invalid-prompt-payload',
+    });
+  });
+
+  it('removePrompt 使用 prompt_remove 命令名并传 { id }', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
+    stubTauri(invokeSpy);
+
+    await expect(removePrompt('p-1')).resolves.toEqual({ ok: true, data: true });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('prompt_remove');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ id: 'p-1' });
+  });
+
+  it('previewPromptRender 使用 prompt_render_preview 命令名并传 { projectId, harnessId }（纯读）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => PROMPT_PREVIEW_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await previewPromptRender('proj-1', 'claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('prompt_render_preview');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ projectId: 'proj-1', harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: PROMPT_PREVIEW_PAYLOAD });
+  });
+
+  it('applyPromptRender 使用 prompt_render_apply 命令名；backupId 为空串（新建文件，无备份）也保留报告', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({
+      ...PROMPT_APPLY_PAYLOAD,
+      backupId: '',
+    }));
+    stubTauri(invokeSpy);
+
+    const result = await applyPromptRender('proj-1', 'claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('prompt_render_apply');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ projectId: 'proj-1', harnessId: 'claude' });
+    // 与 normalizeProjectionReport 的差异：记忆文件投影允许新建文件，此时
+    // Rust 报告的 backupId 就是空串，绝不能当成报告残缺丢掉（否则成功的新
+    // 建会被误报成失败，诱导用户重试造成二次写入）。
+    expect(result).toEqual({
+      ok: true,
+      data: { ...PROMPT_APPLY_PAYLOAD, backupId: '' },
+    });
+  });
+
+  it('applyPromptRender 报告 backupId 非空（已有备份）原样保留', async () => {
+    stubTauri(async () => PROMPT_APPLY_PAYLOAD);
+
+    await expect(applyPromptRender('proj-1', 'codex')).resolves.toEqual({
+      ok: true,
+      data: PROMPT_APPLY_PAYLOAD,
+    });
+  });
+
+  it('applyPromptRender 报告形状漂移时收敛为空报告，不误报失败（写已发生）', async () => {
+    stubTauri(async () => null);
+
+    await expect(applyPromptRender('proj-1', 'gemini')).resolves.toEqual({
+      ok: true,
+      data: { targetPath: '', backupId: '', changedKeys: 0 },
+    });
+  });
+
+  it('不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(listPrompts(null)).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(upsertPrompt(PROMPT_UPSERT_INPUT)).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(applyPromptRender('proj-1', 'claude')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(listSkills()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
+
+describe('Skills 只读发现 IPC（ROADMAP E19 缩范围）', () => {
+  it('normalizeSkillsReport 保留 Rust 契约的每个字段（skills 与 skipped）', () => {
+    expect(normalizeSkillsReport(SKILLS_REPORT_PAYLOAD)).toEqual(SKILLS_REPORT_PAYLOAD);
+  });
+
+  it('normalizeSkillsReport 过滤坏条目（null / 缺 name），skipped 照单保留', () => {
+    const report = normalizeSkillsReport({
+      skills: [
+        SKILLS_REPORT_PAYLOAD.skills[0],
+        null,
+        'oops',
+        { description: '没有名字', path: 'p' },
+        { name: 'commit-helper', description: '写提交信息' },
+      ],
+      skipped: ['empty-dir', 42, null],
+    });
+
+    expect(report.skills).toEqual([
+      SKILLS_REPORT_PAYLOAD.skills[0],
+      { name: 'commit-helper', description: '写提交信息', path: '' },
+    ]);
+    expect(report.skipped).toEqual(['empty-dir']);
+  });
+
+  it('normalizeSkillsReport 缺 skills 键收敛为 []，整体形状漂移收敛为空报告', () => {
+    expect(normalizeSkillsReport({ skipped: ['x'] })).toEqual({ skills: [], skipped: ['x'] });
+    expect(normalizeSkillsReport(null)).toEqual({ skills: [], skipped: [] });
+    expect(normalizeSkillsReport('nope')).toEqual({ skills: [], skipped: [] });
+  });
+
+  it('listSkills 使用 skills_list 命令名（无参），列表过滤坏条目、skipped 保留', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({
+      skills: [SKILLS_REPORT_PAYLOAD.skills[0], null, { description: '没有名字', path: 'p' }],
+      skipped: ['empty-dir'],
+    }));
+    stubTauri(invokeSpy);
+
+    const result = await listSkills();
+
+    // skills_list 无参；tauri api 会给省略的 args 填默认 {}，所以只断言命令名。
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('skills_list');
+    expect(result).toEqual({
+      ok: true,
+      data: { skills: [SKILLS_REPORT_PAYLOAD.skills[0]], skipped: ['empty-dir'] },
+    });
   });
 });

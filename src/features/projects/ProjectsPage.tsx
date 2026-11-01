@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -5,14 +6,22 @@ import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/ui/page-header';
 import {
   addWorktree,
+  applyPromptRender,
   getProjectSessions,
   getWorktreeStatus,
   listProjects,
+  listPrompts,
   listWorktrees,
   mergeWorktree,
+  previewPromptRender,
   registerProject,
   removeProject,
+  removePrompt,
   removeWorktree,
+  upsertPrompt,
+  type ProjectionReport,
+  type PromptArtifact,
+  type PromptRenderPreview,
   type ProjectRecord,
   type WorktreeEntry,
   type WorktreeStatusCounts,
@@ -249,6 +258,7 @@ function ProjectCardBody({
         </div>
       </dl>
       <ProjectWorktrees repoRoot={project.repoRoot} />
+      <ProjectPrompts projectId={project.id} />
     </Card>
   );
 }
@@ -671,5 +681,430 @@ function WorktreeRow({
         </p>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * v0.4 支持记忆文件投影的 harness（与 spec 的能力位一致：三文件名映射已实现）。
+ * 其他 harness（opencode 等）不渲染入口，避免给出不可用的按钮。
+ */
+const PROMPT_HARNESSES = [
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'gemini', label: 'Gemini CLI' },
+] as const;
+
+type PromptListState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'ready'; prompts: PromptArtifact[] }
+  | { kind: 'failed'; message: string };
+
+type PromptPreviewState =
+  | { kind: 'idle' }
+  | { kind: 'loading'; harnessId: string }
+  | { kind: 'ready'; preview: PromptRenderPreview }
+  | { kind: 'failed'; message: string };
+
+/**
+ * 卡片内的 Prompts 区（spec：docs/specs/2026-10-31-skills-prompts-tray-design.md
+ * 的 Decision —— Prompts 主入口放 Projects 页项目卡内展开区，Worktrees 区先例；
+ * prompt 的作用域主轴是项目，投影目标 = 仓库根下的记忆文件）。
+ *
+ * - 与 Worktrees 区同款「默认折叠」：展开时才发 `prompt_list`（纯读），折叠时
+ *   零 IPC；折叠不重置，避免反复展开来回打请求。
+ * - **v0.4 新建的 prompt 一律绑定当前项目**（projectId = 项目 id）；「全局」
+ *   prompt（projectId = null）只展示与删除，不做全局新建入口 —— 全局语义 =
+ *   进所有项目的渲染，风险大，留给后续迭代。
+ * - `prompt_upsert` 是**显式动作**：由表单提交本身触发，只写 Hub Registry
+ *   （SQLite），不碰任何 harness 记忆文件；`prompt_remove` 是**显式动作 +
+ *   confirm**（文案写明只删 Registry 登记）；`prompt_render_apply` 是**显式
+ *   写动作 + confirm**（文案必须含 preview 返回的 targetPath）。
+ * - `prompt_render_preview` 是**纯读**，可以反复调用；写入前必须先展示全文，
+ *   绝不在渲染路径自动触发落盘。
+ */
+function ProjectPrompts({ projectId }: { projectId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [listState, setListState] = useState<PromptListState>({ kind: 'idle' });
+  const [formOpen, setFormOpen] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [contentInput, setContentInput] = useState('');
+  const [enabledInput, setEnabledInput] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<{ id: string; message: string } | null>(null);
+  const [previewState, setPreviewState] = useState<PromptPreviewState>({ kind: 'idle' });
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applyReport, setApplyReport] = useState<ProjectionReport | null>(null);
+
+  const loadPrompts = useCallback(async () => {
+    setListState({ kind: 'loading' });
+    const result = await listPrompts(projectId);
+    if (result.ok) {
+      setListState({ kind: 'ready', prompts: result.data });
+    } else {
+      setListState({ kind: 'failed', message: result.error });
+    }
+  }, [projectId]);
+
+  const handleToggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    // 只有第一次展开才拉列表；折叠不重置，避免反复展开来回打请求。
+    if (next && listState.kind === 'idle') {
+      void loadPrompts();
+    }
+  };
+
+  const handleSubmit = async () => {
+    const name = nameInput.trim();
+    if (!name || contentInput.trim() === '' || submitting) {
+      return;
+    }
+
+    // 显式动作：只写 Hub Registry（SQLite）。v0.4 新建一律绑定当前项目
+    // （不做全局新建入口，见组件注释）；content 保留原文（markdown 不做 trim）。
+    setSubmitting(true);
+    setSubmitError(null);
+    const result = await upsertPrompt({
+      id: null,
+      name,
+      content: contentInput,
+      projectId,
+      enabled: enabledInput,
+    });
+    if (!result.ok) {
+      setSubmitting(false);
+      setSubmitError(result.error);
+      return;
+    }
+
+    setSubmitting(false);
+    setFormOpen(false);
+    setNameInput('');
+    setContentInput('');
+    setEnabledInput(true);
+    await loadPrompts();
+  };
+
+  const handleRemove = async (prompt: PromptArtifact) => {
+    if (removingId !== null) {
+      return;
+    }
+
+    // 破坏性动作：确认文案写明只删 Hub 的 Registry 登记，不动记忆文件。
+    const confirmed = window.confirm(
+      `删除 prompt「${prompt.name}」？\n` +
+        `（只删 Hub 的 Registry 登记，不改动 harness 记忆文件）`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setRemovingId(prompt.id);
+    setRemoveError(null);
+    const result = await removePrompt(prompt.id);
+    if (!result.ok) {
+      setRemovingId(null);
+      setRemoveError({ id: prompt.id, message: result.error });
+      return;
+    }
+
+    setRemovingId(null);
+    await loadPrompts();
+  };
+
+  const handlePreview = async (harnessId: string) => {
+    if (previewState.kind === 'loading' && previewState.harnessId === harnessId) {
+      return;
+    }
+
+    // 纯读预览：可反复调用；换 harness 时旧预览整体替换，避免跨 harness 串台。
+    setPreviewState({ kind: 'loading', harnessId });
+    setApplyError(null);
+    setApplyReport(null);
+    const result = await previewPromptRender(projectId, harnessId);
+    if (result.ok) {
+      setPreviewState({ kind: 'ready', preview: result.data });
+    } else {
+      setPreviewState({ kind: 'failed', message: result.error });
+    }
+  };
+
+  const handleApply = async () => {
+    if (previewState.kind !== 'ready' || applying) {
+      return;
+    }
+    const { preview } = previewState;
+    // 空预览（形状漂移收敛的产物）没有 targetPath，不允许走到 confirm。
+    if (preview.targetPath === '') {
+      return;
+    }
+
+    // 显式写动作：确认文案必须含 preview 返回的 targetPath，让用户明确知道
+    // 哪个文件要被改写（写前自动备份；目标文件不存在时会新建）。
+    const confirmed = window.confirm(
+      `把该 scope 的 enabled prompts 写入记忆文件？\n` +
+        `目标文件：\n${preview.targetPath}\n` +
+        `（写前自动备份；文件不存在时会新建）`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setApplying(true);
+    setApplyError(null);
+    const result = await applyPromptRender(projectId, preview.harnessId);
+    if (!result.ok) {
+      setApplying(false);
+      setApplyError(result.error);
+      return;
+    }
+
+    setApplying(false);
+    setApplyReport(result.data);
+  };
+
+  return (
+    <div className="mt-4 border-t border-white/[0.06] pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={handleToggle}
+          className="rounded-sm text-xs text-content-muted outline-none hover:text-content-primary focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Prompts
+        </button>
+        {expanded ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setFormOpen((open) => !open);
+              setSubmitError(null);
+            }}
+          >
+            新建 Prompt
+          </Button>
+        ) : null}
+      </div>
+
+      {expanded ? (
+        <div className="mt-2">
+          {listState.kind === 'loading' ? (
+            <p className="flex items-center gap-1.5 text-xs text-content-muted">
+              <Loader2 aria-hidden className="size-3.5 animate-spin text-accent" />
+              加载中…
+            </p>
+          ) : null}
+
+          {listState.kind === 'failed' ? (
+            <p role="alert" className="text-xs text-signal-error">
+              Prompt 列表加载失败：{listState.message}
+            </p>
+          ) : null}
+
+          {listState.kind === 'ready' && listState.prompts.length === 0 ? (
+            <p className="text-xs text-content-muted">还没有登记任何 prompt。</p>
+          ) : null}
+
+          {listState.kind === 'ready' && listState.prompts.length > 0 ? (
+            <ul className="space-y-1">
+              {listState.prompts.map((prompt) => (
+                <li
+                  key={prompt.id}
+                  data-testid={`prompt-row-${prompt.name}`}
+                  className="rounded-md px-2 py-1 text-xs ring-1 ring-transparent"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-[11px]"
+                      title={prompt.name}
+                    >
+                      {prompt.name}
+                    </span>
+                    {prompt.projectId === null ? (
+                      <span className="shrink-0 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-content-secondary">
+                        全局
+                      </span>
+                    ) : null}
+                    <span className="shrink-0 font-mono text-[11px] text-content-muted">
+                      {prompt.enabled ? '已启用' : '已停用'}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      data-testid={`prompt-remove-${prompt.name}`}
+                      disabled={removingId !== null}
+                      onClick={() => void handleRemove(prompt)}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                  {removeError?.id === prompt.id ? (
+                    <p role="alert" className="mt-1 text-[11px] text-signal-error">
+                      删除失败：{removeError.message}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {formOpen ? (
+            <form
+              className="mt-3 space-y-2 rounded-md border border-white/[0.06] bg-white/[0.02] p-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleSubmit();
+              }}
+            >
+              <p className="text-[11px] text-content-muted">
+                v0.4 新建的 prompt 一律绑定当前项目；「全局」prompt 不在此新建（进所有项目，风险
+                大，留给后续迭代）。
+              </p>
+              <input
+                type="text"
+                value={nameInput}
+                onChange={(event) => setNameInput(event.target.value)}
+                placeholder="prompt 名称，例如 repo-conventions"
+                aria-label="Prompt 名称"
+                data-testid="prompt-name-input"
+                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-content-primary outline-none placeholder:text-content-muted focus:border-accent/60"
+              />
+              <textarea
+                value={contentInput}
+                onChange={(event) => setContentInput(event.target.value)}
+                placeholder="canonical markdown 原文"
+                aria-label="Prompt 内容"
+                data-testid="prompt-content-input"
+                rows={4}
+                className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-content-primary outline-none placeholder:text-content-muted focus:border-accent/60"
+              />
+              <label className="flex w-fit items-center gap-2 text-xs text-content-secondary">
+                <input
+                  type="checkbox"
+                  checked={enabledInput}
+                  onChange={(event) => setEnabledInput(event.target.checked)}
+                />
+                启用（进记忆文件渲染）
+              </label>
+              <div className="flex items-center gap-2">
+                <Button type="submit" size="sm" disabled={submitting} data-testid="prompt-submit">
+                  {submitting ? (
+                    <>
+                      <Loader2 aria-hidden className="size-3.5 animate-spin" />
+                      保存中…
+                    </>
+                  ) : (
+                    '保存'
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setFormOpen(false);
+                    setSubmitError(null);
+                  }}
+                >
+                  取消
+                </Button>
+              </div>
+              {submitError !== null ? (
+                <p role="alert" className="text-xs text-signal-error">
+                  保存失败：{submitError}
+                </p>
+              ) : null}
+            </form>
+          ) : null}
+
+          <div className="mt-3 rounded-md border border-white/[0.06] bg-white/[0.02] p-3">
+            <p className="text-xs font-medium text-content-secondary">记忆文件投影</p>
+            <p className="mt-0.5 text-[11px] text-content-muted">
+              把该 scope（本项目 + 全局）的 enabled prompts 投影进 harness 记忆文件；预览是纯读。
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {PROMPT_HARNESSES.map((harness) => (
+                <Button
+                  key={harness.id}
+                  variant="ghost"
+                  size="sm"
+                  data-testid={`prompt-preview-${harness.id}`}
+                  onClick={() => void handlePreview(harness.id)}
+                >
+                  {harness.label}
+                </Button>
+              ))}
+            </div>
+
+            {previewState.kind === 'loading' ? (
+              <p className="mt-2 flex items-center gap-1.5 text-xs text-content-muted">
+                <Loader2 aria-hidden className="size-3.5 animate-spin text-accent" />
+                生成预览中…
+              </p>
+            ) : null}
+
+            {previewState.kind === 'failed' ? (
+              <p role="alert" className="mt-2 text-xs text-signal-error">
+                预览失败：{previewState.message}
+              </p>
+            ) : null}
+
+            {previewState.kind === 'ready' ? (
+              <div data-testid="prompt-preview-result" className="mt-2 space-y-1.5">
+                <p className="text-[11px] text-content-muted">
+                  目标文件：<span className="font-mono">{previewState.preview.targetPath}</span>
+                  {previewState.preview.createsFile ? (
+                    <span className="ml-2 rounded-sm bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-accent">
+                      将新建文件
+                    </span>
+                  ) : null}
+                </p>
+                <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-black/40 p-2 font-mono text-[11px] text-content-secondary">
+                  {previewState.preview.content}
+                </pre>
+                <Button
+                  size="sm"
+                  data-testid={`prompt-apply-${previewState.preview.harnessId}`}
+                  disabled={applying}
+                  onClick={() => void handleApply()}
+                >
+                  {applying ? (
+                    <>
+                      <Loader2 aria-hidden className="size-3.5 animate-spin" />
+                      写入中…
+                    </>
+                  ) : (
+                    '写入记忆文件'
+                  )}
+                </Button>
+              </div>
+            ) : null}
+
+            {applyReport !== null ? (
+              <p
+                data-testid="prompt-apply-report"
+                className="mt-2 text-[11px] text-content-secondary"
+              >
+                已写入 <span className="font-mono">{applyReport.targetPath}</span>
+                {applyReport.backupId === ''
+                  ? '（新建，无备份）'
+                  : `（备份 id：${applyReport.backupId}）`}
+              </p>
+            ) : null}
+
+            {applyError !== null ? (
+              <p role="alert" className="mt-2 text-xs text-signal-error">
+                写入失败：{applyError}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }

@@ -15,7 +15,8 @@
     "subagents": false,
     "liveState": false,
     "worktree": false,
-    "profiles": false
+    "profiles": false,
+    "prompts": false
   },
   "dataPaths": []
 }

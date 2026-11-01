@@ -209,6 +209,8 @@ export type HarnessCapabilities = {
   worktree: boolean;
   /** 配置投影（E15）；当前只有 claude 为 true。 */
   profiles: boolean;
+  /** 记忆文件投影（E19）；claude/codex/gemini 为 true。 */
+  prompts: boolean;
 };
 
 /** 与 Rust `HarnessRegistry::summaries()` 的序列化结果同形。 */
@@ -235,6 +237,7 @@ const CAPABILITY_KEYS = [
   'liveState',
   'worktree',
   'profiles',
+  'prompts',
 ] as const satisfies ReadonlyArray<keyof HarnessCapabilities>;
 
 function unsupportedCapabilities(): HarnessCapabilities {
@@ -249,6 +252,7 @@ function unsupportedCapabilities(): HarnessCapabilities {
     liveState: false,
     worktree: false,
     profiles: false,
+    prompts: false,
   };
 }
 
@@ -2899,4 +2903,263 @@ export async function importMcpConfig(harnessId: string): Promise<IpcResult<McpI
   }
 
   return { ok: true, data: normalizeMcpImportReport(result.data) };
+}
+
+/* ------------------------------------------------------------------ *
+ * Prompts Registry + Skills 只读发现（ROADMAP E19）
+ *
+ * 与 Rust DTO 一一对应（serde camelCase，契约测试已锁定键名）：
+ * - prompt 是 canonical markdown 的统一登记（Hub SQLite 为 source-of-truth），
+ *   投影进 harness 记忆文件（CLAUDE.md / AGENTS.md / GEMINI.md）走 E15 文本管线；
+ * - prompt_list / prompt_render_preview / skills_list 是**纯读**，可反复调用；
+ * - prompt_upsert / prompt_remove / prompt_render_apply 是**显式动作**，
+ *   调用方必须 confirm 后才调用（apply 的 confirm 文案必须含 preview 的 targetPath）。
+ * ------------------------------------------------------------------ */
+
+/** 一条登记的 prompt（与 Rust `PromptArtifact`，serde camelCase 同形）。 */
+export type PromptArtifact = {
+  id: string;
+  name: string;
+  /** canonical markdown 原文。 */
+  content: string;
+  /** 绑定项目；null = 全局（进每个项目的渲染）。 */
+  projectId: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 新建 / 更新 prompt 的入参（与 Rust `PromptInput`，serde camelCase 同形）。 */
+export type PromptInput = {
+  /** null = 新建；否则按 id 覆盖。 */
+  id: string | null;
+  name: string;
+  content: string;
+  /** null = 全局。 */
+  projectId: string | null;
+  enabled: boolean;
+};
+
+/** 记忆文件投影预览（与 Rust `PromptRenderPreview`，serde camelCase 同形）。 */
+export type PromptRenderPreview = {
+  harnessId: string;
+  /** 投影目标绝对路径（`<repo>/<CLAUDE.md|AGENTS.md|GEMINI.md>`），confirm 文案要展示。 */
+  targetPath: string;
+  /** 将写盘的全文（含标记块与块外用户内容）。 */
+  content: string;
+  /** true = 目标文件尚不存在，apply 会新建（此时报告的 backupId 是合法的空串）。 */
+  createsFile: boolean;
+};
+
+/** 一个发现的 skill（只读快照；与 Rust `SkillSummary`，serde camelCase 同形）。 */
+export type SkillSummary = {
+  /** 目录名（skills 目录下的 `<name>/`，也是 claude 的加载 id）。 */
+  name: string;
+  /** frontmatter 的 description（缺失为空串）。 */
+  description: string;
+  /** SKILL.md 绝对路径。 */
+  path: string;
+};
+
+/** 一次 skills 扫描的报告（与 Rust `SkillsReport`，serde camelCase 同形）。 */
+export type SkillsReport = {
+  skills: SkillSummary[];
+  /** 无法解析的条目（目录名；不崩纪律的观察面）。 */
+  skipped: string[];
+};
+
+/**
+ * 收敛 IPC 边界上的未知 JSON 成安全的 `PromptArtifact`。
+ *
+ * 拿不到 `id` 丢弃 —— prompt 的更新 / 删除 / 渲染都靠 id 定位；`enabled`
+ * 只认 `true`，缺省 false（「不确定」绝不能渲染成已启用）；`projectId` 的
+ * null 是全局语义，不能折算成 ''。
+ */
+export function normalizePromptArtifact(raw: unknown): PromptArtifact | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    name: typeof source.name === 'string' ? source.name : '',
+    content: typeof source.content === 'string' ? source.content : '',
+    projectId: asStringOrNull(source.projectId),
+    enabled: source.enabled === true,
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+  };
+}
+
+/**
+ * 收敛渲染预览。preview 是**纯读**，形状漂移时收敛为空预览而不是报错：
+ * 让 UI 因为解析失败弹「预览加载失败」没有意义，空预览没有 targetPath /
+ * content，调用方自然不会走到下一步的 confirm。
+ */
+export function normalizePromptRenderPreview(raw: unknown): PromptRenderPreview {
+  if (typeof raw !== 'object' || raw === null) {
+    return { harnessId: '', targetPath: '', content: '', createsFile: false };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    targetPath: typeof source.targetPath === 'string' ? source.targetPath : '',
+    content: typeof source.content === 'string' ? source.content : '',
+    createsFile: source.createsFile === true,
+  };
+}
+
+/**
+ * 收敛 `prompt_render_apply` 的报告（复用 E15 `ProjectionReport` 形状）。
+ *
+ * **与 `normalizeProjectionReport` 的差异**：那条把 `backupId` 空串当成
+ * 「报告残缺」丢弃，因为 JSON 投影（settings.json）总是先有文件后有备份；
+ * 而记忆文件投影是「创建或更新」——目标文件不存在时 apply 会新建文件，
+ * Rust 侧报告的 `backupId` 就是**合法的空串**（没有备份可记，见
+ * src-tauri/src/prompts/render.rs 的 render_apply）。沿用旧的「空串丢弃」
+ * 会把一次成功的新建误报成失败，诱导用户重试造成二次写入，所以这里空串
+ * 照单全收；apply 是写路径，响应形状漂移同样收敛为空报告而不误报失败。
+ */
+function normalizePromptProjectionReport(raw: unknown): ProjectionReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { targetPath: '', backupId: '', changedKeys: 0 };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    targetPath: typeof source.targetPath === 'string' ? source.targetPath : '',
+    backupId: typeof source.backupId === 'string' ? source.backupId : '',
+    changedKeys: asNumber(source.changedKeys),
+  };
+}
+
+/**
+ * 收敛 skills 扫描报告。
+ *
+ * `skills` 缺失 / 非数组收敛为 []（skills 目录不存在是正常状态，不是错误）；
+ * 拿不到 `name` 的条目丢弃 —— 目录名就是 claude 的加载 id，没有它条目无法
+ * 展示或定位；`skipped` 照单保留（哪些目录坏了必须如实告诉用户）。
+ */
+export function normalizeSkillsReport(raw: unknown): SkillsReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { skills: [], skipped: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const skills: SkillSummary[] = [];
+  if (Array.isArray(source.skills)) {
+    for (const item of source.skills) {
+      if (typeof item !== 'object' || item === null) {
+        continue;
+      }
+      const entry = item as Record<string, unknown>;
+      const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+      if (name.length === 0) {
+        continue;
+      }
+      skills.push({
+        name,
+        description: typeof entry.description === 'string' ? entry.description : '',
+        path: typeof entry.path === 'string' ? entry.path : '',
+      });
+    }
+  }
+
+  return { skills, skipped: asStringArray(source.skipped) };
+}
+
+/**
+ * prompt 列表。**纯读**：不改库、不碰文件。
+ *
+ * `projectId` 传 null = 全部；传项目 id = 该项目绑定 + 全局。键名 `projectId`
+ * 恒在（null 也传，对应 Rust `Option<String>` 的 None），不要省略键。
+ */
+export async function listPrompts(projectId: string | null): Promise<IpcResult<PromptArtifact[]>> {
+  const result = await invokeCommand<unknown>('prompt_list', { projectId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const prompts = Array.isArray(result.data)
+    ? result.data
+        .map(normalizePromptArtifact)
+        .filter((prompt): prompt is PromptArtifact => prompt !== null)
+    : [];
+  return { ok: true, data: prompts };
+}
+
+/**
+ * 新建（input.id 为 null）或更新一条 prompt。**显式动作**：写 Hub 的 SQLite
+ * （只写 Registry，不碰任何 harness 记忆文件），调用方 confirm 后才调用。
+ */
+export async function upsertPrompt(input: PromptInput): Promise<IpcResult<PromptArtifact>> {
+  const result = await invokeCommand<unknown>('prompt_upsert', { input });
+  if (!result.ok) {
+    return result;
+  }
+
+  const prompt = normalizePromptArtifact(result.data);
+  return prompt ? { ok: true, data: prompt } : { ok: false, error: 'invalid-prompt-payload' };
+}
+
+/** 删除一条 prompt（只删 Registry 行，不动 harness 记忆文件）。**显式动作，前端 confirm**。 */
+export async function removePrompt(id: string): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('prompt_remove', { id });
+}
+
+/**
+ * 记忆文件投影预览。**纯读**：不写库、不写文件，UI 可以反复调用；
+ * 确认要执行时再走 `applyPromptRender`。
+ */
+export async function previewPromptRender(
+  projectId: string,
+  harnessId: string,
+): Promise<IpcResult<PromptRenderPreview>> {
+  const result = await invokeCommand<unknown>('prompt_render_preview', { projectId, harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizePromptRenderPreview(result.data) };
+}
+
+/**
+ * 真正执行记忆文件投影：把该 scope（projectId + 全局）的 enabled prompts 写进
+ * harness 记忆文件（E15 文本管线，写前自动备份；目标文件不存在时新建，
+ * 此时报告的 backupId 为空串）。
+ *
+ * **显式动作，调用方必须 confirm**：UI 必须先展示 `previewPromptRender` 的
+ * 预览（confirm 文案必须含 targetPath 与将写入的全文）并让用户确认后才可
+ * 调用；绝不在渲染路径自动触发。
+ */
+export async function applyPromptRender(
+  projectId: string,
+  harnessId: string,
+): Promise<IpcResult<ProjectionReport>> {
+  const result = await invokeCommand<unknown>('prompt_render_apply', { projectId, harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizePromptProjectionReport(result.data) };
+}
+
+/**
+ * 只读发现 `~/.claude/skills/<name>/SKILL.md`。**纯读**：claude 自己是 skills
+ * 的加载方，Hub 只发现展示，不复制投影、不改任何 skill 文件。
+ */
+export async function listSkills(): Promise<IpcResult<SkillsReport>> {
+  const result = await invokeCommand<unknown>('skills_list');
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeSkillsReport(result.data) };
 }

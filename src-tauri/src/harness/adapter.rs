@@ -54,6 +54,9 @@ pub struct HarnessCapabilities {
     /// 配置投影（read→parse→validate→backup→atomic write→verify 管线，E15）。
     /// 只有走完这条管线并有测试回归的 harness 才能为 true。
     pub profiles: bool,
+    /// 记忆文件投影（CLAUDE.md / AGENTS.md / GEMINI.md 标记块渲染，E19）。
+    /// 文件名映射 + 渲染器实现且有测试回归才为 true。
+    pub prompts: bool,
 }
 
 /// 检测结果：是否安装、binary 在哪、版本、以及可供只读访问的数据路径。
@@ -157,6 +160,7 @@ mod tests {
             tool_calls: true,
             live_state: true,
             profiles: true,
+            prompts: true,
             ..HarnessCapabilities::default()
         };
 
@@ -167,6 +171,7 @@ mod tests {
         assert_eq!(json["toolCalls"], true, "IPC 契约是 camelCase");
         assert_eq!(json["liveState"], true);
         assert_eq!(json["profiles"], true, "E15 投影能力位同样是 camelCase");
+        assert_eq!(json["prompts"], true, "E19 记忆文件投影能力位");
         assert!(
             json.get("tool_calls").is_none(),
             "不得输出 snake_case 键：前端读的是 toolCalls"
@@ -190,6 +195,7 @@ mod tests {
                 live_state: false,
                 worktree: false,
                 profiles: false,
+                prompts: false,
             },
             "默认必须是「全不支持」，避免未实现就宣称能力"
         );

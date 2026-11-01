@@ -125,6 +125,8 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             // E15：`~/.claude/settings.json` 的安全投影管线已实现并有回归
             // （profile::projection：merge 语义 / 原子写 / verify / 备份轮换 / 恢复 round-trip）。
             profiles: true,
+            // E19：CLAUDE.md 标记块渲染已实现并有回归（prompts::render）。
+            prompts: true,
             ..HarnessCapabilities::default()
         }
     }

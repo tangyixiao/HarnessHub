@@ -15,6 +15,7 @@ import {
   listMcpBindings,
   listMcpServers,
   listProfileBackups,
+  listSkills,
   projectProfile,
   registerCredential,
   removeCredential,
@@ -36,6 +37,7 @@ import {
   type McpTransport,
   type ProfileSummary,
   type ProjectionReport,
+  type SkillsReport,
 } from '@/lib/ipc';
 
 /**
@@ -71,6 +73,7 @@ export function SettingsPage() {
       <CredentialsCard />
       <ConfigDoctorCard />
       <McpCard />
+      <SkillsCard />
       <PlaceholderCard
         title="尚未接入"
         icon={Settings}
@@ -1269,6 +1272,117 @@ function McpCard() {
             </div>
           ) : null}
         </div>
+      </div>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Skills 只读发现（ROADMAP E19 缩范围）
+ * ------------------------------------------------------------------ */
+
+/**
+ * Skills 只读发现（ROADMAP E19 缩范围）：Hub 只扫描并展示
+ * `~/.claude/skills/<name>/SKILL.md` 的 name / description。
+ *
+ * 纪律（spec 2026-10-31-skills-prompts-tray-design.md Non-goals）：
+ * - claude 自己是 skills 的加载方（这是它的原生目录），Hub **不复制投影**、
+ *   不修改任何 skill 文件，本区没有任何写操作按钮；
+ * - 扫描是**纯读**，不需要 confirm；但渲染路径零 IPC —— 扫描也是显式动作，
+ *   与本页其它区块同一纪律。
+ */
+function SkillsCard() {
+  const connected = isTauriRuntime();
+  const [report, setReport] = useState<SkillsReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const scan = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await listSkills();
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setReport(result.data);
+  };
+
+  return (
+    <Card className="mb-6" data-testid="skills-card">
+      <CardTitle>Skills（只读）</CardTitle>
+      <CardDescription>
+        {
+          'Hub 只发现展示 ~/.claude/skills/<name>/SKILL.md：claude 自己是加载方，Hub 不复制投影、也不修改任何 skill 文件。'
+        }
+      </CardDescription>
+
+      <div className="mt-3">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => void scan()}
+          disabled={!connected || busy}
+          data-testid="skills-scan"
+        >
+          扫描 Skills
+        </Button>
+      </div>
+
+      <div className="mt-3" aria-live="polite">
+        {busy ? (
+          <p className="flex items-center gap-2 text-xs text-content-muted">
+            <Loader2 aria-hidden className="size-3.5 animate-spin text-accent" />
+            正在扫描…
+          </p>
+        ) : null}
+
+        {error !== null ? (
+          <p className="text-xs text-signal-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
+        {report !== null && !busy ? (
+          <>
+            {report.skills.length === 0 ? (
+              <p className="text-xs text-content-muted">
+                没有发现任何 skill（~/.claude/skills 不存在或为空）
+              </p>
+            ) : (
+              <ul
+                className="overflow-hidden rounded-md border border-border-subtle bg-white/[0.03]"
+                data-testid="skills-list"
+              >
+                {report.skills.map((skill) => (
+                  <li
+                    key={skill.name}
+                    data-testid={`skills-row-${skill.name}`}
+                    className="border-b border-border-subtle/60 px-3 py-1.5 text-[11px] last:border-b-0"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-content-primary">{skill.name}</span>
+                      <span className="min-w-0 truncate font-mono text-content-muted">
+                        {skill.path}
+                      </span>
+                    </div>
+                    {skill.description.length > 0 ? (
+                      <p className="mt-0.5 text-content-secondary">{skill.description}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {report.skipped.length > 0 ? (
+              <p className="mt-2 text-xs text-content-muted" data-testid="skills-skipped">
+                无法解析的条目（{report.skipped.length}）：
+                <span className="font-mono">{report.skipped.join('、')}</span>
+              </p>
+            ) : null}
+          </>
+        ) : null}
       </div>
     </Card>
   );
