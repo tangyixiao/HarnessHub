@@ -131,6 +131,29 @@ mod tests {
         empty_db()
     }
 
+    /// 跨 IPC 契约测试（AGENTS.md）：前端 `normalizeCredentialRef` 依赖这些键。
+    #[test]
+    fn credential_ref_serializes_with_camel_case_keys() {
+        let record = CredentialRefRecord {
+            id: "ref-1".to_string(),
+            label: "deepseek-key".to_string(),
+            harness_id: "codex".to_string(),
+            store_kind: "file".to_string(),
+            created_at: "2026-10-30T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["id"], "ref-1");
+        assert_eq!(json["label"], "deepseek-key");
+        assert_eq!(json["harnessId"], "codex");
+        assert_eq!(json["storeKind"], "file");
+        assert_eq!(json["createdAt"], "2026-10-30T00:00:00Z");
+        assert!(json.get("harness_id").is_none(), "不得两套契约并存");
+        assert!(
+            !json.to_string().contains("value"),
+            "句柄记录不得有任何值字段"
+        );
+    }
+
     /// 登记全程：值进 store、句柄进表、list 无值。
     #[test]
     fn register_puts_value_in_store_and_handle_in_db() {

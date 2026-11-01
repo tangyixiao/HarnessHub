@@ -470,9 +470,11 @@ pub fn profile_discover(
 
 /// 配置体检（ROADMAP E17）。**纯读**：只诊断 + 建议，
 /// 不自动修复（修复走 E15 投影/恢复，显式动作）。
+///
+/// `credentials_reachable` 在命令层合并（需要 DB 连接；`diagnose` 保持纯函数）。
 #[tauri::command]
 pub fn config_doctor(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     harness_id: String,
 ) -> Result<Vec<crate::profile::doctor::CheckItem>> {
     use crate::harness::probe::HostProbe;
@@ -480,7 +482,109 @@ pub fn config_doctor(
     let home = probe
         .home_dir()
         .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
-    crate::profile::doctor::diagnose(&home, &harness_id)
+    let mut items = crate::profile::doctor::diagnose(&home, &harness_id)?;
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    items.push(crate::profile::doctor::credentials_check(
+        database.connection(),
+        &harness_id,
+    ));
+    Ok(items)
+}
+
+/* ------------------------------------------------------------------ *
+ * Profile Plane 接线收尾（E15 投影 / E16 凭据；spec 2026-10-30）
+ * ------------------------------------------------------------------ */
+
+/// 投影目标白名单：E15 的投影只对 claude 开放（`~/.claude/settings.json`）。
+///
+/// 返回目标文件路径；其余 harness 明确报错而不是猜测目标。
+fn projection_target(harness_id: &str) -> Result<std::path::PathBuf> {
+    use crate::harness::probe::HostProbe;
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        return Err(Error::InvalidInput(format!(
+            "{harness_id} 的配置投影尚未实现（当前仅 claude；各自格式差异大，逐个加）"
+        )));
+    }
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    Ok(home.join(".claude").join("settings.json"))
+}
+
+/// 把 `fields` 安全投影进 claude 的 `~/.claude/settings.json`（ROADMAP E15）。
+///
+/// **显式写动作**：走 read→parse→merge→backup→temp→verify→rename 完整管线；
+/// 坏结果绝不落盘，投影前自动备份。`fields` 的键允许 `env.X` 嵌套形式。
+#[tauri::command]
+pub fn profile_project(
+    _state: State<'_, AppState>,
+    harness_id: String,
+    fields: std::collections::BTreeMap<String, String>,
+) -> Result<crate::profile::projection::ProjectionReport> {
+    let target = projection_target(&harness_id)?;
+    let (rendered, _) = crate::profile::projection::plan(&target, &fields)?;
+    crate::profile::projection::apply(&target, &rendered, &harness_id)
+}
+
+/// 某个 harness 的投影备份列表（Hub 自己的备份目录，按时间倒序）。**纯读**。
+#[tauri::command]
+pub fn profile_backups(
+    _state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::profile::projection::BackupInfo>> {
+    projection_target(&harness_id)?; // 白名单校验（备份目录名不收外部任意串）。
+    crate::profile::projection::list_backups(&harness_id)
+}
+
+/// 恢复到某个备份（E15 恢复入口，显式动作）。
+///
+/// 恢复目标**永远来自后端自己的备份记录**：命令按 id 在备份目录里查找，
+/// 不接受前端传路径——防止伪造 `target_path` 任意覆盖文件。
+#[tauri::command]
+pub fn profile_restore(
+    _state: State<'_, AppState>,
+    harness_id: String,
+    backup_id: String,
+) -> Result<()> {
+    projection_target(&harness_id)?;
+    let backups = crate::profile::projection::list_backups(&harness_id)?;
+    let backup = backups
+        .iter()
+        .find(|item| item.id == backup_id)
+        .ok_or_else(|| Error::InvalidInput(format!("备份不存在：{backup_id}")))?;
+    crate::profile::projection::restore(backup)
+}
+
+/// 登记凭据：值进 Secret Store，句柄进 SQLite（E16）。
+///
+/// **值只进不出**：只在登记这一次跨 IPC，之后任何列表/查询都不再返回值。
+#[tauri::command]
+pub fn credential_register(
+    state: State<'_, AppState>,
+    harness_id: String,
+    label: String,
+    value: String,
+) -> Result<crate::credentials::CredentialRefRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::register(database.connection(), &harness_id, &label, &value)
+}
+
+/// 凭据句柄列表（**无值**；值在 store，句柄只是引用）。**纯读**。
+#[tauri::command]
+pub fn credential_list(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::credentials::CredentialRefRecord>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::list(database.connection(), &harness_id)
+}
+
+/// 删除凭据：先删 store 值（幂等），再删句柄行。显式动作，前端 confirm。
+#[tauri::command]
+pub fn credential_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::remove(database.connection(), &id)
 }
 
 /// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。

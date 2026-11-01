@@ -122,6 +122,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             // B9：`--resume <source_session_id>` 拼接有 fixture 锁定；
             // 真机完整续聊验收随用户交互场景补充（readiness 维度）。
             resume: true,
+            // E15：`~/.claude/settings.json` 的安全投影管线已实现并有回归
+            // （profile::projection：merge 语义 / 原子写 / verify / 备份轮换 / 恢复 round-trip）。
+            profiles: true,
             ..HarnessCapabilities::default()
         }
     }

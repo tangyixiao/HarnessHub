@@ -14,7 +14,8 @@
     "toolCalls": false,
     "subagents": false,
     "liveState": false,
-    "worktree": false
+    "worktree": false,
+    "profiles": false
   },
   "dataPaths": []
 }

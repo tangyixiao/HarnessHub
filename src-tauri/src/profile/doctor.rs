@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{claude, codex, gemini};
+use crate::credentials::store::{FileSecretStore, SecretStore};
 use crate::error::Result;
 
 /// 体检结论的一项。
@@ -44,6 +45,48 @@ pub fn diagnose(home: &std::path::Path, harness_id: &str) -> Result<Vec<CheckIte
         other => Err(crate::error::Error::InvalidInput(format!(
             "{other} 的配置体检尚未实现（当前支持 claude/codex/gemini）"
         ))),
+    }
+}
+
+/// `credentials_reachable`（E17 spec 检查项 2）：凭据句柄与 store 侧值的完整性。
+///
+/// 需要 DB 连接，因此独立于 [`diagnose`]（后者保持无 DB 纯函数），
+/// 由 `config_doctor` 命令层合并进 CheckItem 列表。
+pub fn credentials_check(conn: &rusqlite::Connection, harness_id: &str) -> CheckItem {
+    let refs = crate::credentials::registry::list(conn, harness_id).unwrap_or_default();
+    if refs.is_empty() {
+        return CheckItem {
+            check: "credentials_reachable".into(),
+            status: CheckStatus::Warn,
+            message: "未登记凭据句柄（使用官方登录则无需登记）".into(),
+            suggestion: Some("如需 API Key Provider，在凭据区登记后重新体检".into()),
+        };
+    }
+
+    let store = FileSecretStore;
+    let orphans: Vec<String> = refs
+        .iter()
+        .filter(|item| !store.exists(&item.id).unwrap_or(false))
+        .map(|item| item.label.clone())
+        .collect();
+    if orphans.is_empty() {
+        CheckItem {
+            check: "credentials_reachable".into(),
+            status: CheckStatus::Ok,
+            message: format!("{} 个凭据句柄完整（值在 store）", refs.len()),
+            suggestion: None,
+        }
+    } else {
+        CheckItem {
+            check: "credentials_reachable".into(),
+            status: CheckStatus::Error,
+            message: format!(
+                "{} 个凭据句柄的值在 store 缺失（孤儿句柄）：{}",
+                orphans.len(),
+                orphans.join("、")
+            ),
+            suggestion: Some("在凭据区删除这些句柄后重新登记".into()),
+        }
     }
 }
 
@@ -206,6 +249,32 @@ fn diagnose_gemini(home: &std::path::Path) -> Result<Vec<CheckItem>> {
 mod tests {
     use super::*;
 
+    /// 跨 IPC 契约测试（AGENTS.md）：前端 `normalizeCheckItem` 依赖这些键
+    /// 与 status 的 snake_case 序列化。
+    #[test]
+    fn check_item_serializes_with_camel_case_keys() {
+        let item = CheckItem {
+            check: "config_parseable".to_string(),
+            status: CheckStatus::Warn,
+            message: "未找到配置文件".to_string(),
+            suggestion: Some("运行一次 claude".to_string()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["check"], "config_parseable");
+        assert_eq!(json["status"], "warn");
+        assert_eq!(json["message"], "未找到配置文件");
+        assert_eq!(json["suggestion"], "运行一次 claude");
+        assert!(json.get("suggestion_text").is_none(), "不得两套契约并存");
+
+        for (status, expected) in [
+            (CheckStatus::Ok, "ok"),
+            (CheckStatus::Warn, "warn"),
+            (CheckStatus::Error, "error"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
+    }
+
     fn temp_home_with(rel: &str, contents: &str) -> std::path::PathBuf {
         let home = std::env::temp_dir().join(format!("hh-doctor-{}", uuid::Uuid::new_v4()));
         let path = home.join(rel);
@@ -272,5 +341,37 @@ mod tests {
         let home = std::env::temp_dir().join(format!("hh-doctor-none-{}", uuid::Uuid::new_v4()));
         let items = diagnose(&home, "gemini").unwrap();
         assert_eq!(items[0].status, CheckStatus::Warn);
+    }
+
+    /// `credentials_reachable` 三态：无句柄 warn / 完整 ok / 孤儿 error。
+    #[test]
+    fn credentials_check_covers_all_three_statuses() {
+        let db = crate::test_support::empty_db();
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO harnesses (id, display_name, created_at, updated_at)
+             VALUES ('codex', 'Codex', 't', 't')",
+            [],
+        )
+        .unwrap();
+
+        // 无句柄 → warn。
+        let item = credentials_check(conn, "codex");
+        assert_eq!(item.status, CheckStatus::Warn);
+
+        // 有句柄且值在 store → ok（结束时 remove 清理 store + 行）。
+        let record = crate::credentials::registry::register(conn, "codex", "k1", "v1").unwrap();
+        let item = credentials_check(conn, "codex");
+        assert_eq!(item.status, CheckStatus::Ok, "{}", item.message);
+
+        // 手工删掉 store 值 → 孤儿句柄 → error（消息里带 label）。
+        crate::credentials::store::FileSecretStore
+            .delete(&record.id)
+            .unwrap();
+        let item = credentials_check(conn, "codex");
+        assert_eq!(item.status, CheckStatus::Error);
+        assert!(item.message.contains("k1"), "{}", item.message);
+
+        crate::credentials::registry::remove(conn, &record.id).unwrap();
     }
 }

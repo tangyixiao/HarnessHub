@@ -207,6 +207,8 @@ export type HarnessCapabilities = {
   subagents: boolean;
   liveState: boolean;
   worktree: boolean;
+  /** 配置投影（E15）；当前只有 claude 为 true。 */
+  profiles: boolean;
 };
 
 /** 与 Rust `HarnessRegistry::summaries()` 的序列化结果同形。 */
@@ -232,6 +234,7 @@ const CAPABILITY_KEYS = [
   'subagents',
   'liveState',
   'worktree',
+  'profiles',
 ] as const satisfies ReadonlyArray<keyof HarnessCapabilities>;
 
 function unsupportedCapabilities(): HarnessCapabilities {
@@ -245,6 +248,7 @@ function unsupportedCapabilities(): HarnessCapabilities {
     subagents: false,
     liveState: false,
     worktree: false,
+    profiles: false,
   };
 }
 
@@ -2313,4 +2317,217 @@ export async function discoverProfile(
   }
 
   return { ok: true, data: normalizeProfileSummary(result.data) };
+}
+
+/* ------------------------------------------------------------------ *
+ * Profile Plane 接线（E15 投影 / E16 凭据 / E17 体检）
+ *
+ * 与 Rust DTO 一一对应（契约测试锁定键名）；secret 值只在
+ * credential_register / profile_project 的**请求方向**出现，
+ * 任何响应方向都不携带 secret。
+ * ------------------------------------------------------------------ */
+
+/** 与 Rust `profile::projection::ProjectionReport` 同形。 */
+export type ProjectionReport = {
+  targetPath: string;
+  backupId: string;
+  changedKeys: number;
+};
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `ProjectionReport`。
+ *
+ * 拿不到 `targetPath` 或 `backupId` 丢弃 —— 投影报告没有这两个字段就无法
+ * 向用户交代「改了哪个文件、备份在哪」；`changedKeys` 负数按 0 处理。
+ */
+export function normalizeProjectionReport(raw: unknown): ProjectionReport | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const targetPath = typeof source.targetPath === 'string' ? source.targetPath : '';
+  const backupId = typeof source.backupId === 'string' ? source.backupId : '';
+  if (targetPath.length === 0 || backupId.length === 0) {
+    return null;
+  }
+
+  return {
+    targetPath,
+    backupId,
+    changedKeys: asNumber(source.changedKeys),
+  };
+}
+
+/** 与 Rust `profile::projection::BackupInfo` 同形。 */
+export type BackupInfo = {
+  id: string;
+  harnessId: string;
+  createdAt: string;
+  path: string;
+  targetPath: string;
+};
+
+/** 收敛未知 JSON 为 `BackupInfo`；缺 `id` 或 `harnessId` 丢弃（无法定位的备份不渲染）。 */
+export function normalizeBackupInfo(raw: unknown): BackupInfo | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id : '';
+  const harnessId = typeof source.harnessId === 'string' ? source.harnessId : '';
+  if (id.length === 0 || harnessId.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    harnessId,
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    path: typeof source.path === 'string' ? source.path : '',
+    targetPath: typeof source.targetPath === 'string' ? source.targetPath : '',
+  };
+}
+
+/** 与 Rust `credentials::CredentialRefRecord` 同形 —— **永不含值**。 */
+export type CredentialRef = {
+  id: string;
+  label: string;
+  harnessId: string;
+  storeKind: string;
+  createdAt: string;
+};
+
+/** 收敛未知 JSON 为 `CredentialRef`；缺 `id` 或 `label` 丢弃（没有标签的句柄无法操作）。 */
+export function normalizeCredentialRef(raw: unknown): CredentialRef | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id : '';
+  const label = typeof source.label === 'string' ? source.label : '';
+  if (id.length === 0 || label.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    label,
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    storeKind: typeof source.storeKind === 'string' ? source.storeKind : '',
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+  };
+}
+
+/** 与 Rust `profile::doctor::CheckItem` 同形。 */
+export type DoctorCheckItem = {
+  check: string;
+  status: 'ok' | 'warn' | 'error';
+  message: string;
+  suggestion: string | null;
+};
+
+/** 收敛未知 JSON 为 `DoctorCheckItem`；`status` 不是三态之一按 `error` 处理（不可信输入宁严重勿漏）。 */
+export function normalizeCheckItem(raw: unknown): DoctorCheckItem | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const check = typeof source.check === 'string' ? source.check : '';
+  const message = typeof source.message === 'string' ? source.message : '';
+  if (check.length === 0 || message.length === 0) {
+    return null;
+  }
+
+  const status = source.status;
+  return {
+    check,
+    status: status === 'ok' || status === 'warn' || status === 'error' ? status : 'error',
+    message,
+    suggestion: typeof source.suggestion === 'string' ? source.suggestion : null,
+  };
+}
+
+/**
+ * 把字段投影进 harness 原生配置（E15，仅 claude）。**显式写动作**——
+ * 调用方必须先向用户 confirm（含目标文件路径），绝不在渲染路径调用。
+ */
+export async function projectProfile(
+  harnessId: string,
+  fields: Record<string, string>,
+): Promise<IpcResult<ProjectionReport>> {
+  const result = await invokeCommand<unknown>('profile_project', { harnessId, fields });
+  if (!result.ok) {
+    return result;
+  }
+
+  const report = normalizeProjectionReport(result.data);
+  return report ? { ok: true, data: report } : { ok: false, error: 'invalid-projection-report' };
+}
+
+/** 某个 harness 的投影备份列表（纯读，时间倒序）。 */
+export async function listProfileBackups(harnessId: string): Promise<IpcResult<BackupInfo[]>> {
+  const result = await invokeCommand<unknown[]>('profile_backups', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const items = (Array.isArray(result.data) ? result.data : [])
+    .map(normalizeBackupInfo)
+    .filter((item): item is BackupInfo => item !== null);
+  return { ok: true, data: items };
+}
+
+/** 恢复到某个备份。显式写动作；目标路径由后端自己的备份记录决定。 */
+export function restoreProfileBackup(
+  harnessId: string,
+  backupId: string,
+): Promise<IpcResult<null>> {
+  return invokeCommand<null>('profile_restore', { harnessId, backupId });
+}
+
+/**
+ * 登记凭据（E16）：值进 OS Secret Store（FileSecretStore 兜底），SQLite 只存句柄。
+ * **值只在这一次请求里跨 IPC**；调用方必须用密码型输入框，不做任何回显。
+ */
+export function registerCredential(
+  harnessId: string,
+  label: string,
+  value: string,
+): Promise<IpcResult<CredentialRef>> {
+  return invokeCommand<CredentialRef>('credential_register', { harnessId, label, value });
+}
+
+/** 凭据句柄列表（纯读，无值）。 */
+export async function listCredentials(harnessId: string): Promise<IpcResult<CredentialRef[]>> {
+  const result = await invokeCommand<unknown[]>('credential_list', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const items = (Array.isArray(result.data) ? result.data : [])
+    .map(normalizeCredentialRef)
+    .filter((item): item is CredentialRef => item !== null);
+  return { ok: true, data: items };
+}
+
+/** 删除凭据：先删 store 值再删句柄行。显式动作，前端 confirm。 */
+export function removeCredential(id: string): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('credential_remove', { id });
+}
+
+/** 只读配置体检（E17）。 */
+export async function runConfigDoctor(harnessId: string): Promise<IpcResult<DoctorCheckItem[]>> {
+  const result = await invokeCommand<unknown[]>('config_doctor', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const items = (Array.isArray(result.data) ? result.data : [])
+    .map(normalizeCheckItem)
+    .filter((item): item is DoctorCheckItem => item !== null);
+  return { ok: true, data: items };
 }
