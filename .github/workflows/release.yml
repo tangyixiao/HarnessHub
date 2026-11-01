@@ -133,9 +133,9 @@ jobs:
           sessions = conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
           plugins = conn.execute("SELECT count(*) FROM plugins").fetchone()[0]
           violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-          # >= 10：新增迁移后这里要同步抬高（当前最新 0010_git_snapshots）。
-          assert version >= 10, f"schema 版本异常：{version}"
-          assert harnesses == 5, f"harness 定义行异常：{harnesses}（应为 5 个内置定义）"
+          # >= 14：新增迁移后这里要同步抬高（当前最新 0014_prompt_artifacts）。
+          assert version >= 14, f"schema 版本异常：{version}"
+          assert harnesses == 6, f"harness 定义行异常：{harnesses}（应为 6 个内置定义）"
           assert sessions == 0, sessions
           assert plugins == 0, plugins
           assert violations == [], violations

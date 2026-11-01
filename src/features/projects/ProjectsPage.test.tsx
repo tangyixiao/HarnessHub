@@ -57,6 +57,43 @@ const WORKTREE_LIST = [
   },
 ];
 
+/** 与 Rust `PromptArtifact`（serde camelCase）同形：项目绑定一条 + 全局一条（projectId 为 null）。 */
+const PROMPT_LIST = [
+  {
+    id: 'prompt-proj',
+    name: 'repo-conventions',
+    content: '本项目约定：先写测试再写实现。',
+    projectId: 'proj-1',
+    enabled: true,
+    createdAt: '2026-10-31T00:00:00Z',
+    updatedAt: '2026-10-31T00:00:00Z',
+  },
+  {
+    id: 'prompt-global',
+    name: 'global-style',
+    content: '全局风格约定。',
+    projectId: null,
+    enabled: true,
+    createdAt: '2026-10-30T00:00:00Z',
+    updatedAt: '2026-10-30T00:00:00Z',
+  },
+];
+
+/** 与 Rust `PromptRenderPreview`（serde camelCase）同形；createsFile=true 用于锁定「将新建文件」分支。 */
+const PROMPT_PREVIEW = {
+  harnessId: 'claude',
+  targetPath: 'D:/work/demo/CLAUDE.md',
+  content: '<!-- harnesshub:begin -->\n先写测试再写实现。\n<!-- harnesshub:end -->',
+  createsFile: true,
+};
+
+/** 与 Rust `ProjectionReport`（serde camelCase）同形；backupId 空串 = 新建、无备份。 */
+const PROMPT_APPLY_REPORT = {
+  targetPath: 'D:/work/demo/CLAUDE.md',
+  backupId: '',
+  changedKeys: 3,
+};
+
 describe('ProjectsPage', () => {
   it('已登记的项目按最近打开倒序显示 repo root 与时间', async () => {
     stubInvoke((command) => {
@@ -593,6 +630,245 @@ describe('ProjectsPage', () => {
       );
       // 失败后行仍在。
       expect(screen.getByText('D:/wt/feature')).toBeInTheDocument();
+    });
+  });
+
+  /** 展开项目卡的 Prompts 区并等到列表行出现（行内查询要用 testid / within 缩小范围）。 */
+  async function expandPrompts(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await screen.findByRole('region', { name: 'demo' });
+    await user.click(screen.getByRole('button', { name: 'Prompts' }));
+    await screen.findByTestId('prompt-row-repo-conventions');
+  }
+
+  describe('Prompts 区（ROADMAP E19）', () => {
+    it('默认折叠不发请求；展开后调 prompt_list（projectId 恒在）并渲染列表行与「全局」徽标', async () => {
+      const user = userEvent.setup();
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') {
+          // 契约：projectId 键恒在（null 也传），传项目 id = 项目绑定 + 全局。
+          expect(args).toEqual({ projectId: 'proj-1' });
+          return PROMPT_LIST;
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await screen.findByRole('region', { name: 'demo' });
+
+      const toggle = screen.getByRole('button', { name: 'Prompts' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      // 折叠时绝不发 prompt_list（与 Worktrees 区同款纪律：渲染路径零 IPC）。
+      expect(invokeSpy).not.toHaveBeenCalledWith('prompt_list', expect.anything());
+
+      await user.click(toggle);
+
+      expect(await screen.findByTestId('prompt-row-repo-conventions')).toBeInTheDocument();
+      expect(invokeSpy).toHaveBeenCalledWith('prompt_list', { projectId: 'proj-1' });
+
+      // projectId 为 null 的行带「全局」徽标；enabled 状态照实显示。
+      const globalRow = screen.getByTestId('prompt-row-global-style');
+      expect(within(globalRow).getByText('全局')).toBeInTheDocument();
+      expect(within(globalRow).getByText('已启用')).toBeInTheDocument();
+      expect(
+        within(screen.getByTestId('prompt-row-repo-conventions')).getByText('已启用'),
+      ).toBeInTheDocument();
+    });
+
+    it('新增表单：提交调用 prompt_upsert（id: null、绑定当前项目、enabled 默认 true）并刷新列表', async () => {
+      const user = userEvent.setup();
+      let prompts: unknown[] = PROMPT_LIST;
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return prompts;
+        if (command === 'prompt_upsert') {
+          expect(args).toEqual({
+            input: {
+              id: null,
+              name: 'test-discipline',
+              content: '提交前先跑测试。',
+              projectId: 'proj-1',
+              enabled: true,
+            },
+          });
+          const created = {
+            id: 'prompt-new',
+            name: 'test-discipline',
+            content: '提交前先跑测试。',
+            projectId: 'proj-1',
+            enabled: true,
+            createdAt: '2026-11-01T00:00:00Z',
+            updatedAt: '2026-11-01T00:00:00Z',
+          };
+          prompts = [...prompts, created];
+          return created;
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+
+      await user.click(screen.getByRole('button', { name: '新建 Prompt' }));
+      await user.type(screen.getByTestId('prompt-name-input'), 'test-discipline');
+      await user.type(screen.getByTestId('prompt-content-input'), '提交前先跑测试。');
+      // enabled 复选框默认勾选。
+      expect(screen.getByRole('checkbox', { name: '启用（进记忆文件渲染）' })).toBeChecked();
+      await user.click(screen.getByTestId('prompt-submit'));
+
+      // 提交成功后刷新列表，新行出现。
+      expect(await screen.findByTestId('prompt-row-test-discipline')).toBeInTheDocument();
+      expect(invokeSpy).toHaveBeenCalledWith('prompt_upsert', {
+        input: {
+          id: null,
+          name: 'test-discipline',
+          content: '提交前先跑测试。',
+          projectId: 'proj-1',
+          enabled: true,
+        },
+      });
+    });
+
+    it('删除：confirm 文案含 prompt 名；确认后调用 prompt_remove 并刷新列表移除该行', async () => {
+      const user = userEvent.setup();
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      let prompts: unknown[] = PROMPT_LIST;
+      stubInvoke((command, args) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return prompts;
+        if (command === 'prompt_remove') {
+          expect(args).toEqual({ id: 'prompt-global' });
+          prompts = prompts.filter((item) => (item as { id: string }).id !== 'prompt-global');
+          return true;
+        }
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+
+      // 删的是「全局」行：v0.4 全局 prompt 只展示与删除，删除入口照常可用。
+      await user.click(screen.getByTestId('prompt-remove-global-style'));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('global-style');
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('prompt-row-global-style')).not.toBeInTheDocument();
+      });
+    });
+
+    it('confirm 取消删除不调用 prompt_remove', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const invokeSpy = vi.fn(async (command: string) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return PROMPT_LIST;
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+      await user.click(screen.getByTestId('prompt-remove-global-style'));
+
+      expect(invokeSpy).not.toHaveBeenCalledWith('prompt_remove', expect.anything());
+    });
+
+    it('预览：点 harness 按钮调 prompt_render_preview，面板显示 targetPath 与全文；createsFile 显示「将新建文件」', async () => {
+      const user = userEvent.setup();
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return PROMPT_LIST;
+        if (command === 'prompt_render_preview') {
+          expect(args).toEqual({ projectId: 'proj-1', harnessId: 'claude' });
+          return PROMPT_PREVIEW;
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+
+      await user.click(screen.getByTestId('prompt-preview-claude'));
+
+      const panel = await screen.findByTestId('prompt-preview-result');
+      expect(within(panel).getByText(/D:\/work\/demo\/CLAUDE\.md/)).toBeInTheDocument();
+      // 全文照实展示（写入前用户必须看到将落盘的内容）。
+      expect(panel.textContent).toContain(PROMPT_PREVIEW.content);
+      expect(within(panel).getByText('将新建文件')).toBeInTheDocument();
+      // 写入入口只在预览就绪后出现，且属于当前 harness。
+      expect(screen.getByTestId('prompt-apply-claude')).toBeInTheDocument();
+    });
+
+    it('写入：confirm 文案含 targetPath；确认后调用 prompt_render_apply，报告显示「新建，无备份」', async () => {
+      const user = userEvent.setup();
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const invokeSpy = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return PROMPT_LIST;
+        if (command === 'prompt_render_preview') return PROMPT_PREVIEW;
+        if (command === 'prompt_render_apply') {
+          expect(args).toEqual({ projectId: 'proj-1', harnessId: 'claude' });
+          return PROMPT_APPLY_REPORT;
+        }
+        return null;
+      });
+      stubInvoke(invokeSpy);
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+      await user.click(screen.getByTestId('prompt-preview-claude'));
+      await screen.findByTestId('prompt-preview-result');
+
+      await user.click(screen.getByTestId('prompt-apply-claude'));
+
+      // 显式写动作：confirm 文案必须含 preview 返回的 targetPath。
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain('D:/work/demo/CLAUDE.md');
+
+      const report = await screen.findByTestId('prompt-apply-report');
+      expect(report.textContent).toContain('D:/work/demo/CLAUDE.md');
+      // backupId 空串 = 目标文件是新建的，报告如实显示「新建，无备份」。
+      expect(report.textContent).toContain('新建，无备份');
+      expect(invokeSpy).toHaveBeenCalledWith('prompt_render_apply', {
+        projectId: 'proj-1',
+        harnessId: 'claude',
+      });
+    });
+
+    it('harness 未实现入口不存在：预览按钮只有 claude / codex / gemini 三个', async () => {
+      const user = userEvent.setup();
+      stubInvoke((command) => {
+        if (command === 'list_projects') return [PROJECT];
+        if (command === 'get_project_sessions') return [];
+        if (command === 'prompt_list') return PROMPT_LIST;
+        return null;
+      });
+
+      render(<ProjectsPage />);
+      await expandPrompts(user);
+
+      const previewTestids = screen
+        .getAllByRole('button')
+        .map((el) => el.getAttribute('data-testid'))
+        .filter((id): id is string => id !== null && id.startsWith('prompt-preview-'));
+      expect(previewTestids).toEqual([
+        'prompt-preview-claude',
+        'prompt-preview-codex',
+        'prompt-preview-gemini',
+      ]);
+      // opencode 等未实现记忆文件投影的 harness 不渲染入口。
+      expect(screen.queryByTestId('prompt-preview-opencode')).not.toBeInTheDocument();
     });
   });
 });

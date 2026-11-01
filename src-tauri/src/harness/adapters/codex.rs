@@ -102,6 +102,8 @@ impl HarnessAdapter for CodexAdapter {
             launch: true,
             terminal: true,
             usage: true,
+            // E19：AGENTS.md 标记块渲染已实现并有回归（prompts::render）。
+            prompts: true,
             ..HarnessCapabilities::default()
         }
     }

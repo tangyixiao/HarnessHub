@@ -639,3 +639,102 @@ describe('SettingsPage — MCP Servers（E18）', () => {
     expect(screen.getByTestId('mcp-submit')).toBeDisabled();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Skills 只读发现（E19 缩范围）fixture —— 与 Rust `SkillsReport`
+ * （serde camelCase）同形，复刻自 src/lib/ipc.test.ts 的 SKILLS_REPORT_PAYLOAD。
+ * ------------------------------------------------------------------ */
+
+/** `skills_list` 的返回项：一个正常 skill + 一个无法解析的目录。 */
+const SKILLS_REPORT_PAYLOAD = {
+  skills: [
+    {
+      name: 'pdf-tools',
+      description: '处理 PDF 的工具',
+      path: 'C:/Users/dev/.claude/skills/pdf-tools/SKILL.md',
+    },
+    {
+      name: 'commit-helper',
+      description: '',
+      path: 'C:/Users/dev/.claude/skills/commit-helper/SKILL.md',
+    },
+  ],
+  skipped: ['broken-dir'],
+};
+
+describe('SettingsPage — Skills 只读发现（E19 缩范围）', () => {
+  function skillsCard(): HTMLElement {
+    return screen.getByTestId('skills-card');
+  }
+
+  it('扫描 → skills_list 命令名（无参），列表渲染 name / description 与 skipped 计数行', async () => {
+    const invoke = stubCommands({ skills_list: SKILLS_REPORT_PAYLOAD });
+
+    render(<SettingsPage />);
+    // 渲染路径零 IPC：扫描是显式动作。
+    expect(invoke.mock.calls).toHaveLength(0);
+    await userEvent.click(within(skillsCard()).getByTestId('skills-scan'));
+
+    expect(invoke.mock.calls[0]?.[0]).toBe('skills_list');
+
+    const list = await within(skillsCard()).findByTestId('skills-list');
+    const pdfRow = within(list).getByTestId('skills-row-pdf-tools');
+    expect(within(pdfRow).getByText('pdf-tools')).toBeInTheDocument();
+    expect(within(pdfRow).getByText('处理 PDF 的工具')).toBeInTheDocument();
+    const commitRow = within(list).getByTestId('skills-row-commit-helper');
+    expect(within(commitRow).getByText('commit-helper')).toBeInTheDocument();
+
+    const skippedLine = within(skillsCard()).getByTestId('skills-skipped');
+    expect(skippedLine).toHaveTextContent('无法解析的条目（1）');
+    expect(skippedLine).toHaveTextContent('broken-dir');
+  });
+
+  it('空目录：显示空态文案，不渲染列表', async () => {
+    stubCommands({ skills_list: { skills: [], skipped: [] } });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(skillsCard()).getByTestId('skills-scan'));
+
+    expect(
+      await within(skillsCard()).findByText('没有发现任何 skill（~/.claude/skills 不存在或为空）'),
+    ).toBeInTheDocument();
+    expect(within(skillsCard()).queryByTestId('skills-list')).not.toBeInTheDocument();
+  });
+
+  it('扫描失败时行内展示错误原因，而不是白屏', async () => {
+    stubCommands({
+      skills_list: () => {
+        throw new Error('无法确定 home 目录');
+      },
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(skillsCard()).getByTestId('skills-scan'));
+
+    expect(await within(skillsCard()).findByText(/无法确定 home 目录/)).toBeInTheDocument();
+    expect(within(skillsCard()).queryByTestId('skills-list')).not.toBeInTheDocument();
+  });
+
+  it('本区纯读：只有「扫描 Skills」一个按钮，没有任何写操作按钮与输入控件', async () => {
+    stubCommands({ skills_list: SKILLS_REPORT_PAYLOAD });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(skillsCard()).getByTestId('skills-scan'));
+    await within(skillsCard()).findByTestId('skills-list');
+
+    const card = skillsCard();
+    expect(within(card).getAllByRole('button')).toHaveLength(1);
+    expect(within(card).getByRole('button', { name: '扫描 Skills' })).toBeInTheDocument();
+    for (const forbidden of ['写入', '保存', '应用', '删除', '投影']) {
+      expect(within(card).queryByRole('button', { name: forbidden })).not.toBeInTheDocument();
+    }
+    expect(within(card).queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('浏览器模式：扫描按钮禁用', async () => {
+    render(<SettingsPage />);
+    await screen.findByTestId('skills-card');
+
+    expect(screen.getByTestId('skills-scan')).toBeDisabled();
+  });
+});

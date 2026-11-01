@@ -96,6 +96,8 @@ impl HarnessAdapter for GeminiCliAdapter {
         HarnessCapabilities {
             launch: true,
             terminal: true,
+            // E19：GEMINI.md 标记块渲染已实现并有回归（prompts::render）。
+            prompts: true,
             ..HarnessCapabilities::default()
         }
     }

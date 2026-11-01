@@ -12,10 +12,11 @@ fn the_real_machine_detects_gemini_with_terminal_lifecycle_capabilities() {
         .expect("Gemini 已注册");
     assert_eq!(summary.installation_id.as_deref(), Some("gemini@local"));
     // launch / terminal 由 headless 真机 lifecycle 证据支撑（ADR-0005 的静态事实，
-    // 与本机是否装了 Gemini 无关）；usage 与其余能力仍未验收。
+    // 与本机是否装了 Gemini 无关）；E19 的 GEMINI.md 标记块渲染已实现（prompts）。
     let expected = HarnessCapabilities {
         launch: true,
         terminal: true,
+        prompts: true,
         ..HarnessCapabilities::default()
     };
     assert_eq!(summary.capabilities, expected);
