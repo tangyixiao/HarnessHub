@@ -360,8 +360,7 @@ mod tests {
         assert_eq!(item.status, CheckStatus::Warn);
 
         // 有句柄且值在 store → ok（结束时 remove 清理 store + 行）。
-        let record =
-            crate::credentials::registry::register(conn, "codex", "k1", "v1").unwrap();
+        let record = crate::credentials::registry::register(conn, "codex", "k1", "v1").unwrap();
         let item = credentials_check(conn, "codex");
         assert_eq!(item.status, CheckStatus::Ok, "{}", item.message);
 
