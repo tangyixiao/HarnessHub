@@ -194,6 +194,7 @@ const CODEX_PAYLOAD = {
     subagents: false,
     liveState: false,
     worktree: false,
+    profiles: false,
   },
   dataPaths: ['C:/Users/dev/.codex'],
 };
@@ -220,6 +221,7 @@ describe('normalizeHarnessSummary', () => {
       subagents: false,
       liveState: false,
       worktree: false,
+      profiles: false,
     });
     expect(incomplete?.installationId).toBeNull();
   });
@@ -253,6 +255,7 @@ describe('normalizeHarnessSummary', () => {
       subagents: false,
       liveState: false,
       worktree: false,
+      profiles: false,
     });
   });
 

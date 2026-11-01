@@ -207,6 +207,8 @@ export type HarnessCapabilities = {
   subagents: boolean;
   liveState: boolean;
   worktree: boolean;
+  /** 配置投影（E15）；当前只有 claude 为 true。 */
+  profiles: boolean;
 };
 
 /** 与 Rust `HarnessRegistry::summaries()` 的序列化结果同形。 */
@@ -232,6 +234,7 @@ const CAPABILITY_KEYS = [
   'subagents',
   'liveState',
   'worktree',
+  'profiles',
 ] as const satisfies ReadonlyArray<keyof HarnessCapabilities>;
 
 function unsupportedCapabilities(): HarnessCapabilities {
@@ -245,6 +248,7 @@ function unsupportedCapabilities(): HarnessCapabilities {
     subagents: false,
     liveState: false,
     worktree: false,
+    profiles: false,
   };
 }
 
