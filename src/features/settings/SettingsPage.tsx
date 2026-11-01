@@ -6,18 +6,34 @@ import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { PlaceholderCard } from '@/components/ui/placeholder-card';
 import { PageHeader } from '@/components/ui/page-header';
 import {
+  addMcpBinding,
+  applyMcpSync,
   discoverProfile,
   isTauriRuntime,
+  importMcpConfig,
   listCredentials,
+  listMcpBindings,
+  listMcpServers,
   listProfileBackups,
   projectProfile,
   registerCredential,
   removeCredential,
   restoreProfileBackup,
   runConfigDoctor,
+  previewMcpSync,
+  removeMcpBinding,
+  removeMcpServer,
+  upsertMcpServer,
   type BackupInfo,
   type CredentialRef,
   type DoctorCheckItem,
+  type McpBinding,
+  type McpImportReport,
+  type McpServer,
+  type McpServerInput,
+  type McpSyncPreview,
+  type McpSyncReport,
+  type McpTransport,
   type ProfileSummary,
   type ProjectionReport,
 } from '@/lib/ipc';
@@ -54,6 +70,7 @@ export function SettingsPage() {
       <ConfigProjectionCard />
       <CredentialsCard />
       <ConfigDoctorCard />
+      <McpCard />
       <PlaceholderCard
         title="尚未接入"
         icon={Settings}
@@ -654,6 +671,604 @@ function ConfigDoctorCard() {
             })}
           </ul>
         ) : null}
+      </div>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * MCP Servers（ROADMAP E18）
+ * ------------------------------------------------------------------ */
+
+/** 各 harness 的 MCP 配置文件位置（展示用；实际绝对路径由后端解析 home 目录）。 */
+const MCP_TARGET_HINTS: Record<string, string> = {
+  claude: '~/.claude.json',
+  codex: '~/.codex/config.toml',
+  gemini: '~/.gemini/settings.json',
+};
+
+/** 把逗号分隔的输入解析成字符串列表（去空白、丢空段）。 */
+function splitCommaList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+/**
+ * MCP Binding Registry（ROADMAP E18）：Hub 侧 source-of-truth 登记处。
+ *
+ * 纪律（spec docs/specs/，E18）：
+ * - **渲染路径零 IPC**：列表加载也是显式动作（「加载列表」按钮），与本页其它区块一致；
+ * - 绑定勾选只是 Registry 内的意图声明，**不写文件**，不需要 confirm；
+ * - 同步 = 预览差异（纯读）→ window.confirm（文案必须含目标文件路径）→ 原子写入；
+ * - 导入是显式动作，confirm 说明「导入后 Hub Registry 成为 source-of-truth」；
+ * - Hub 只管 command / args / url，条目内用户手写的 env / headers 由后端保留。
+ */
+function McpCard() {
+  const connected = isTauriRuntime();
+  const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [bindings, setBindings] = useState<McpBinding[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 新增表单
+  const [name, setName] = useState('');
+  const [transport, setTransport] = useState<McpTransport>('stdio');
+  const [command, setCommand] = useState('');
+  const [url, setUrl] = useState('');
+  const [args, setArgs] = useState('');
+  const [envKeys, setEnvKeys] = useState('');
+  const [enabled, setEnabled] = useState(true);
+
+  // 同步区：一次只保留一份预览 / 报告 / 导入结果（最新操作覆盖旧的）
+  const [preview, setPreview] = useState<McpSyncPreview | null>(null);
+  const [report, setReport] = useState<McpSyncReport | null>(null);
+  const [importReport, setImportReport] = useState<McpImportReport | null>(null);
+
+  /** 变更成功后刷新两个列表（servers + bindings）。 */
+  const reloadLists = async () => {
+    const [serversResult, bindingsResult] = await Promise.all([
+      listMcpServers(),
+      listMcpBindings(),
+    ]);
+    if (!serversResult.ok) {
+      setError(serversResult.error);
+      return;
+    }
+    setServers(serversResult.data);
+    if (!bindingsResult.ok) {
+      setError(bindingsResult.error);
+      return;
+    }
+    setBindings(bindingsResult.data);
+    setError(null);
+  };
+
+  // 列表加载是显式动作（「加载列表」按钮 / 各操作成功后的刷新）；
+  // 渲染路径与挂载路径都不发起 IPC，与本页其它区块同一纪律。
+
+  /** 某个 server 在给定 scope 下是否已有绑定（勾选态完全由列表数据推导）。 */
+  const isBound = (serverId: string, scope: string, harnessId: string | null): boolean =>
+    (bindings ?? []).some(
+      (binding) =>
+        binding.serverId === serverId &&
+        binding.scope === scope &&
+        (scope === 'global' ? binding.harnessId === null : binding.harnessId === harnessId),
+    );
+
+  /** 勾 = 增加绑定；取消勾 = 删除绑定。绑定不写文件，所以不需要 confirm。 */
+  const toggleBinding = async (
+    server: McpServer,
+    scope: 'global' | 'harness',
+    harnessId: string | null,
+    checked: boolean,
+  ) => {
+    setBusy(true);
+    setError(null);
+    if (checked) {
+      const result = await addMcpBinding(server.id, scope, harnessId);
+      if (!result.ok) {
+        setBusy(false);
+        setError(result.error);
+        return;
+      }
+    } else {
+      const binding = (bindings ?? []).find(
+        (item) =>
+          item.serverId === server.id &&
+          item.scope === scope &&
+          (scope === 'global' ? item.harnessId === null : item.harnessId === harnessId),
+      );
+      if (binding === undefined) {
+        setBusy(false);
+        return;
+      }
+      const result = await removeMcpBinding(binding.id);
+      if (!result.ok) {
+        setBusy(false);
+        setError(result.error);
+        return;
+      }
+    }
+    const listResult = await listMcpBindings();
+    setBusy(false);
+    if (!listResult.ok) {
+      setError(listResult.error);
+      return;
+    }
+    setBindings(listResult.data);
+  };
+
+  const submit = async () => {
+    const trimmedName = name.trim();
+    if (trimmedName.length === 0) {
+      setError('需要 Server 名称。');
+      return;
+    }
+    if (transport === 'stdio' && command.trim().length === 0) {
+      setError('stdio 传输需要命令（command）。');
+      return;
+    }
+    if (transport === 'http' && url.trim().length === 0) {
+      setError('http 传输需要 URL。');
+      return;
+    }
+
+    const input: McpServerInput = {
+      id: null,
+      name: trimmedName,
+      transport,
+      command: transport === 'stdio' ? command.trim() : null,
+      args: transport === 'stdio' ? splitCommaList(args) : [],
+      url: transport === 'http' ? url.trim() : null,
+      envKeys: splitCommaList(envKeys),
+      enabled,
+    };
+
+    setBusy(true);
+    setError(null);
+    const result = await upsertMcpServer(input);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setName('');
+    setCommand('');
+    setUrl('');
+    setArgs('');
+    setEnvKeys('');
+    setEnabled(true);
+    await reloadLists();
+  };
+
+  const removeServer = async (server: McpServer) => {
+    const confirmed = window.confirm(
+      `从 Hub Registry 删除 MCP Server「${server.name}」？只删除 Hub 侧登记，不会修改任何 harness 配置文件。继续？`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await removeMcpServer(server.id);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    await reloadLists();
+  };
+
+  /** 预览差异：**纯读**，可以反复调用；确认要写入时再走确认同步。 */
+  const runPreview = async (harnessId: string) => {
+    setBusy(true);
+    setError(null);
+    setReport(null);
+    setImportReport(null);
+    const result = await previewMcpSync(harnessId);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setPreview(result.data);
+  };
+
+  /** 确认同步：**显式写动作**，confirm 文案必须含预览返回的目标文件路径。 */
+  const applySync = async (harnessId: string) => {
+    const target = preview !== null && preview.harnessId === harnessId ? preview : null;
+    if (target === null || target.targetPath.length === 0) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `将把 Hub Registry 的 MCP 配置写入 ${target.targetPath}（写入前自动备份；Hub 管理的条目会被覆盖，条目内用户手写的 env / headers 保留）。继续？`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await applyMcpSync(harnessId);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setReport(result.data);
+  };
+
+  /** 导入现有：**显式动作**，导入后 Hub Registry 成为 source-of-truth。 */
+  const runImport = async (harnessId: string) => {
+    const confirmed = window.confirm(
+      `从 ${harnessId} 的现有配置导入 MCP Server 到 Hub Registry？导入后 Hub Registry 成为 source-of-truth，之后的同步会以 Hub 为准覆盖配置文件。继续？`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setPreview(null);
+    setReport(null);
+    const result = await importMcpConfig(harnessId);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setImportReport(result.data);
+    await reloadLists();
+  };
+
+  return (
+    <Card className="mb-6" data-testid="mcp-card">
+      <CardTitle>MCP Servers</CardTitle>
+      <CardDescription>
+        Hub 侧的 MCP 配置 source-of-truth 登记处：这里只登记 command / args / url 与环境变量**名**，
+        同步走「预览差异 → 确认 → 原子写入」，把登记内容投影进 harness 配置（claude ~/.claude.json、
+        codex ~/.codex/config.toml、gemini ~/.gemini/settings.json）。条目内用户手写的 env / headers
+        一律保留；绑定勾选只是 Registry 内声明，不写文件。
+      </CardDescription>
+
+      <div className="mt-3" aria-live="polite">
+        {busy ? (
+          <p className="flex items-center gap-2 text-xs text-content-muted">
+            <Loader2 aria-hidden className="size-3.5 animate-spin text-accent" />
+            处理中…
+          </p>
+        ) : null}
+
+        {error !== null ? (
+          <p className="text-xs text-signal-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
+        {servers === null ? (
+          connected ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs text-content-muted">
+                点击「加载列表」读取已登记的 MCP Server 与绑定；不会自动发起任何调用。
+              </p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void reloadLists()}
+                disabled={busy}
+                data-testid="mcp-load"
+              >
+                加载列表
+              </Button>
+            </div>
+          ) : (
+            <p className="text-xs text-content-muted">
+              未在 Tauri 环境中运行：列表不可用，本区按钮已禁用。
+            </p>
+          )
+        ) : servers.length === 0 ? (
+          <p className="text-xs text-content-muted">
+            还没有登记任何 MCP Server；用下面的表单新增，或用「导入现有」从 harness 配置导入。
+          </p>
+        ) : (
+          <ul
+            className="overflow-hidden rounded-md border border-border-subtle bg-white/[0.03]"
+            data-testid="mcp-server-list"
+          >
+            {servers.map((server) => (
+              <li
+                key={server.id}
+                data-testid={`mcp-server-row-${server.name}`}
+                className="border-b border-border-subtle/60 px-3 py-2 text-[11px] last:border-b-0"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-content-primary">{server.name}</span>
+                  <span className="shrink-0 rounded border border-border-subtle bg-white/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-content-muted">
+                    {server.transport}
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-content-muted">
+                    {server.transport === 'stdio' ? server.command : server.url}
+                  </span>
+                  <span className={server.enabled ? 'text-signal-ok' : 'text-content-muted'}>
+                    {server.enabled ? '已启用' : '已停用'}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="ml-auto"
+                    onClick={() => void removeServer(server)}
+                    disabled={!connected || busy}
+                    data-testid={`mcp-server-remove-${server.name}`}
+                  >
+                    删除
+                  </Button>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                  <label className="flex w-fit items-center gap-1.5 text-content-secondary">
+                    <input
+                      type="checkbox"
+                      checked={isBound(server.id, 'global', null)}
+                      onChange={(event) =>
+                        void toggleBinding(server, 'global', null, event.target.checked)
+                      }
+                      disabled={!connected || busy}
+                    />
+                    Global
+                  </label>
+                  {PROFILE_HARNESS_OPTIONS.map((option) => (
+                    <label
+                      key={option.id}
+                      className="flex w-fit items-center gap-1.5 text-content-secondary"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isBound(server.id, 'harness', option.id)}
+                        onChange={(event) =>
+                          void toggleBinding(server, 'harness', option.id, event.target.checked)
+                        }
+                        disabled={!connected || busy}
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <form
+        className="mt-3 space-y-2 rounded-md border border-white/[0.06] bg-white/[0.02] p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <p className="text-xs font-medium text-content-secondary">登记新的 MCP Server</p>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="名称（写入 harness 配置的键），例如 filesystem"
+            aria-label="MCP Server 名称"
+            className={INPUT_CLASS}
+            data-testid="mcp-name-input"
+            disabled={!connected || busy}
+          />
+          <select
+            value={transport}
+            onChange={(event) => setTransport(event.target.value === 'http' ? 'http' : 'stdio')}
+            aria-label="传输方式"
+            className={INPUT_CLASS}
+            data-testid="mcp-transport-select"
+            disabled={!connected || busy}
+          >
+            <option value="stdio">stdio</option>
+            <option value="http">http</option>
+          </select>
+        </div>
+        {transport === 'stdio' ? (
+          <input
+            type="text"
+            value={command}
+            onChange={(event) => setCommand(event.target.value)}
+            placeholder="命令，例如 npx"
+            aria-label="命令"
+            className={INPUT_CLASS}
+            data-testid="mcp-command-input"
+            disabled={!connected || busy}
+          />
+        ) : (
+          <input
+            type="text"
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder="URL，例如 https://example.com/mcp"
+            aria-label="URL"
+            className={INPUT_CLASS}
+            data-testid="mcp-url-input"
+            disabled={!connected || busy}
+          />
+        )}
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            value={args}
+            onChange={(event) => setArgs(event.target.value)}
+            placeholder="参数（逗号分隔），例如 -y, @modelcontextprotocol/server-filesystem"
+            aria-label="参数（逗号分隔）"
+            className={INPUT_CLASS}
+            data-testid="mcp-args-input"
+            disabled={!connected || busy}
+          />
+          <input
+            type="text"
+            value={envKeys}
+            onChange={(event) => setEnvKeys(event.target.value)}
+            placeholder="环境变量名（逗号分隔；只登记名字，值不进 Hub）"
+            aria-label="环境变量名（逗号分隔）"
+            className={INPUT_CLASS}
+            data-testid="mcp-envkeys-input"
+            disabled={!connected || busy}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex w-fit items-center gap-1.5 text-xs text-content-secondary">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+              disabled={!connected || busy}
+              aria-label="启用该 Server"
+            />
+            启用
+          </label>
+          <Button
+            type="submit"
+            variant="primary"
+            size="sm"
+            disabled={!connected || busy}
+            data-testid="mcp-submit"
+          >
+            登记到 Hub
+          </Button>
+        </div>
+      </form>
+
+      <div className="mt-4">
+        <p className="text-xs font-medium text-content-secondary">同步到 harness 配置</p>
+        <div className="mt-2 space-y-2">
+          {PROFILE_HARNESS_OPTIONS.map((option) => (
+            <div
+              key={option.id}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-[11px]"
+              data-testid={`mcp-sync-row-${option.id}`}
+            >
+              <span className="text-content-secondary">{option.label}</span>
+              <span className="font-mono text-content-muted">
+                {MCP_TARGET_HINTS[option.id] ?? ''}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void runPreview(option.id)}
+                disabled={!connected || busy}
+                data-testid={`mcp-preview-${option.id}`}
+              >
+                预览差异
+              </Button>
+              {preview !== null && preview.harnessId === option.id ? (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => void applySync(option.id)}
+                  disabled={!connected || busy}
+                  data-testid={`mcp-apply-${option.id}`}
+                >
+                  确认同步
+                </Button>
+              ) : null}
+              <Button
+                variant="secondary"
+                size="sm"
+                className="ml-auto"
+                onClick={() => void runImport(option.id)}
+                disabled={!connected || busy}
+                data-testid={`mcp-import-${option.id}`}
+              >
+                导入现有
+              </Button>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3" aria-live="polite">
+          {preview !== null ? (
+            <div data-testid="mcp-preview-result" className="text-xs text-content-secondary">
+              <p>
+                目标文件：
+                <span className="font-mono text-content-primary">{preview.targetPath}</span>
+              </p>
+              <p className="mt-1">新增（{preview.additions.length}）</p>
+              {preview.additions.length === 0 ? (
+                <p className="text-content-muted">无新增</p>
+              ) : (
+                <ul className="ml-4 list-disc font-mono">
+                  {preview.additions.map((addition) => (
+                    <li key={addition}>{addition}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1">更新（{preview.updates.length}）</p>
+              {preview.updates.length === 0 ? (
+                <p className="text-content-muted">无更新</p>
+              ) : (
+                <ul className="ml-4 list-disc">
+                  {preview.updates.map((entry) => (
+                    <li key={entry.name}>
+                      <span className="font-mono text-content-primary">{entry.name}</span>
+                      {entry.summary.length > 0 ? (
+                        <span className="ml-2 text-content-muted">{entry.summary}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1">移除（{preview.removals.length}）</p>
+              {preview.removals.length === 0 ? (
+                <p className="text-content-muted">无移除</p>
+              ) : (
+                <ul className="ml-4 list-disc">
+                  {preview.removals.map((entry) => (
+                    <li key={entry.name}>
+                      <span className="font-mono text-content-primary">{entry.name}</span>
+                      {entry.summary.length > 0 ? (
+                        <span className="ml-2 text-content-muted">{entry.summary}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+
+          {report !== null ? (
+            <div data-testid="mcp-sync-report" className="text-xs text-content-secondary">
+              <p>
+                已写入 <span className="font-mono text-content-primary">{report.targetPath}</span>
+                ，备份 id <span className="font-mono text-content-primary">{report.backupId}</span>
+                ；新增 {report.added}、更新 {report.updated}、移除 {report.removed}。
+              </p>
+            </div>
+          ) : null}
+
+          {importReport !== null ? (
+            <div data-testid="mcp-import-result" className="text-xs text-content-secondary">
+              <p>导入成功（{importReport.imported.length}）</p>
+              {importReport.imported.length === 0 ? (
+                <p className="text-content-muted">无</p>
+              ) : (
+                <ul className="ml-4 list-disc font-mono">
+                  {importReport.imported.map((imported) => (
+                    <li key={imported}>{imported}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1">跳过（{importReport.skipped.length}）</p>
+              {importReport.skipped.length === 0 ? (
+                <p className="text-content-muted">无</p>
+              ) : (
+                <ul className="ml-4 list-disc font-mono">
+                  {importReport.skipped.map((skipped) => (
+                    <li key={skipped}>{skipped}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
     </Card>
   );

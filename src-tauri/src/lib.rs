@@ -15,6 +15,7 @@ pub mod eval;
 pub mod git;
 pub mod harness;
 pub mod hhar;
+pub mod mcp;
 pub mod permissions;
 pub mod plugins;
 pub mod process;
@@ -186,6 +187,15 @@ pub fn run() {
             commands::list_harnesses,
             commands::list_projects,
             commands::list_sessions,
+            commands::mcp_binding_add,
+            commands::mcp_binding_list,
+            commands::mcp_binding_remove,
+            commands::mcp_import,
+            commands::mcp_server_list,
+            commands::mcp_server_remove,
+            commands::mcp_server_upsert,
+            commands::mcp_sync_apply,
+            commands::mcp_sync_preview,
             commands::plugin_list,
             commands::plugin_refresh,
             commands::profile_backups,

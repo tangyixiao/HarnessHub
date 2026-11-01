@@ -587,6 +587,100 @@ pub fn credential_remove(state: State<'_, AppState>, id: String) -> Result<bool>
     crate::credentials::registry::remove(database.connection(), &id)
 }
 
+/* ------------------------------------------------------------------ *
+ * MCP Binding Registry（ROADMAP E18；spec 2026-10-31-mcp-binding-registry-design.md）
+ * ------------------------------------------------------------------ */
+
+/// 已登记的 MCP Server 列表（**无 secret**——envKeys 只是变量名）。**纯读**。
+#[tauri::command]
+pub fn mcp_server_list(state: State<'_, AppState>) -> Result<Vec<crate::mcp::McpServer>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::list_servers(database.connection())
+}
+
+/// 新增 / 更新 MCP Server（显式动作）。校验：stdio 必须有 command、http 必须有 url、
+/// name 限安全字符。
+#[tauri::command]
+pub fn mcp_server_upsert(
+    state: State<'_, AppState>,
+    input: crate::mcp::registry::McpServerInput,
+) -> Result<crate::mcp::McpServer> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::upsert_server(database.connection(), &input)
+}
+
+/// 删除 MCP Server（绑定级联）。显式动作，前端 confirm。
+#[tauri::command]
+pub fn mcp_server_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::remove_server(database.connection(), &id)
+}
+
+/// 全部绑定（含 server 名冗余）。**纯读**。
+#[tauri::command]
+pub fn mcp_binding_list(state: State<'_, AppState>) -> Result<Vec<crate::mcp::McpBinding>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::list_bindings(database.connection())
+}
+
+/// 添加绑定（global 或 harness）。绑定只是 Registry 内声明，**不写文件**。
+#[tauri::command]
+pub fn mcp_binding_add(
+    state: State<'_, AppState>,
+    server_id: String,
+    scope: String,
+    harness_id: Option<String>,
+) -> Result<crate::mcp::McpBinding> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::add_binding(
+        database.connection(),
+        &server_id,
+        &scope,
+        harness_id.as_deref(),
+    )
+}
+
+/// 删除绑定。
+#[tauri::command]
+pub fn mcp_binding_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::remove_binding(database.connection(), &id)
+}
+
+/// 同步预览：desired vs 现有配置的 mcpServers 段差异。**纯读**；
+/// apply 前必须由用户 confirm（UI 文案含 targetPath）。
+#[tauri::command]
+pub fn mcp_sync_preview(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpSyncPreview> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::preview(database.connection(), &harness_id)
+}
+
+/// 执行同步（**显式写动作**）：调和 mcpServers 段 → E15 原子管线落盘
+/// （backup → temp → verify → rename；codex 走 toml_edit 保格式）。
+#[tauri::command]
+pub fn mcp_sync_apply(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpSyncReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::apply(database.connection(), &harness_id)
+}
+
+/// 从现有 harness 配置导入 MCP 条目（**显式动作**）。
+///
+/// 同名跳过（Registry 是 source-of-truth，以 Hub 为准）；env 只取变量名。
+#[tauri::command]
+pub fn mcp_import(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpImportReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::import(database.connection(), &harness_id)
+}
+
 /// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
 #[tauri::command]
 pub fn replay_search_reindex(

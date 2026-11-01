@@ -154,6 +154,16 @@ pub fn plan(target_path: &Path, new_fields: &BTreeMap<String, String>) -> Result
 static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn apply(target_path: &Path, rendered: &str, harness_id: &str) -> Result<ProjectionReport> {
+    apply_in(target_path, rendered, harness_id, &backup_dir(harness_id))
+}
+
+/// [`apply`] 的可注入变体：备份目录由调用方给定（测试用临时 home）。
+pub(crate) fn apply_in(
+    target_path: &Path,
+    rendered: &str,
+    _harness_id: &str,
+    backup_root: &Path,
+) -> Result<ProjectionReport> {
     // 混合 ID：纳秒时间戳 + 原子序号（保证单调递增，Windows 定时器分辨率不足时
     // 靠序号区分）——备份轮换需要按时间删最旧。
     let nanos = std::time::SystemTime::now()
@@ -164,7 +174,7 @@ pub fn apply(target_path: &Path, rendered: &str, harness_id: &str) -> Result<Pro
     let backup_id = format!("{nanos:020}-{seq:06}");
 
     // backup：拷贝当前文件到 Hub 自己的备份目录。
-    let dir = backup_dir(harness_id);
+    let dir = backup_root.to_path_buf();
     std::fs::create_dir_all(&dir)?;
     let current = std::fs::read_to_string(target_path)?;
     let backup_path = dir.join(format!("{backup_id}.json"));
@@ -194,6 +204,66 @@ pub fn apply(target_path: &Path, rendered: &str, harness_id: &str) -> Result<Pro
     }
 
     // atomic rename。
+    std::fs::rename(&temp_path, target_path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        Error::InvalidInput(format!("原子替换 {} 失败：{error}", target_path.display()))
+    })?;
+
+    Ok(ProjectionReport {
+        target_path: target_path.to_string_lossy().into_owned(),
+        backup_id,
+        changed_keys: 1,
+    })
+}
+
+/// 执行**文本通用**投影：backup → temp write → verify（逐字节比对）→ atomic rename。
+///
+/// 与 [`apply`] 的差别只在 verify：apply 面向 JSON（写坏 = 解析失败可发现），
+/// 本函数面向任意文本（TOML / Markdown 投影），verify 退化为逐字节比对。
+/// E18 的 codex `config.toml`（toml_edit 保格式输出）与 E19 的记忆文件渲染走这里。
+pub fn apply_text(
+    target_path: &Path,
+    rendered: &str,
+    harness_id: &str,
+) -> Result<ProjectionReport> {
+    apply_text_in(target_path, rendered, harness_id, &backup_dir(harness_id))
+}
+
+/// [`apply_text`] 的可注入变体：备份目录由调用方给定（测试用临时 home）。
+pub(crate) fn apply_text_in(
+    target_path: &Path,
+    rendered: &str,
+    _harness_id: &str,
+    backup_root: &Path,
+) -> Result<ProjectionReport> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let backup_id = format!("{nanos:020}-{seq:06}");
+
+    let dir = backup_root.to_path_buf();
+    std::fs::create_dir_all(&dir)?;
+    let current = std::fs::read_to_string(target_path)?;
+    let backup_path = dir.join(format!("{backup_id}.json"));
+    let backup_content = format!("// target: {}\n{}", target_path.to_string_lossy(), current);
+    std::fs::write(&backup_path, backup_content)?;
+
+    rotate_backups(&dir, 10)?;
+
+    let temp_path = target_path.with_extension("hh-tmp");
+    std::fs::write(&temp_path, rendered)?;
+
+    // verify：逐字节比对（写坏 = 不一致即中止，目标文件未被触碰）。
+    let written = std::fs::read_to_string(&temp_path)?;
+    if written != rendered {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(Error::InvalidInput(
+            "verify 失败：写出的内容与渲染结果不一致（磁盘问题？）".to_string(),
+        ));
+    }
+
     std::fs::rename(&temp_path, target_path).map_err(|error| {
         let _ = std::fs::remove_file(&temp_path);
         Error::InvalidInput(format!("原子替换 {} 失败：{error}", target_path.display()))

@@ -5,6 +5,8 @@ import opencodeSummary from '../../fixtures/opencode/summary.json';
 
 import {
   NOT_IN_TAURI,
+  addMcpBinding,
+  applyMcpSync,
   addWorktree,
   createSession,
   discoverProfile,
@@ -17,10 +19,13 @@ import {
   getReplaySearchSettings,
   getUsageSources,
   getUsageSummary,
+  importMcpConfig,
   invokeCommand,
   isTauriRuntime,
   listCredentials,
   listHarnesses,
+  listMcpBindings,
+  listMcpServers,
   listProfileBackups,
   listProjects,
   listReplaySessions,
@@ -34,6 +39,11 @@ import {
   normalizeCheckItem,
   normalizeCredentialRef,
   normalizeHarnessSummary,
+  normalizeMcpBinding,
+  normalizeMcpImportReport,
+  normalizeMcpServer,
+  normalizeMcpSyncPreview,
+  normalizeMcpSyncReport,
   normalizeMergeOutcome,
   normalizePlugin,
   normalizePluginRefreshReport,
@@ -56,6 +66,7 @@ import {
   normalizeWorktreeEntry,
   normalizeWorktreeStatusCounts,
   pluginRefresh,
+  previewMcpSync,
   projectProfile,
   readReplaySession,
   reindexReplaySearch,
@@ -64,6 +75,8 @@ import {
   registerCredential,
   registerProject,
   removeCredential,
+  removeMcpBinding,
+  removeMcpServer,
   removeProject,
   removeWorktree,
   restoreProfileBackup,
@@ -71,7 +84,9 @@ import {
   runConfigDoctor,
   searchReplay,
   setReplaySearchSettings,
+  upsertMcpServer,
 } from '@/lib/ipc';
+import type { McpServerInput } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
 
@@ -2718,5 +2733,330 @@ describe('normalizeCheckItem + runConfigDoctor（E17）', () => {
     expect(invokeSpy.mock.calls[0]?.[0]).toBe('config_doctor');
     expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
     expect(result).toEqual({ ok: true, data: [CHECK_ITEM_PAYLOAD] });
+  });
+});
+
+/**
+ * IPC 契约 `mcp_server_list` / `mcp_server_upsert` 的返回项（stdio 形状），
+ * 形状手工复刻自 Rust 契约测试 `mcp_dtos_serialize_with_camel_case_keys`
+ * （src-tauri/src/mcp/registry.rs）：envKeys 只是环境变量**名**，值不进 Hub。
+ */
+const MCP_SERVER_PAYLOAD = {
+  id: 'srv-1',
+  name: 'filesystem',
+  transport: 'stdio',
+  command: 'npx',
+  args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:/project'],
+  url: null,
+  envKeys: ['FILESYSTEM_ROOT'],
+  enabled: true,
+  source: 'hub',
+  createdAt: '2026-10-25T10:00:00Z',
+  updatedAt: '2026-11-01T09:30:00Z',
+};
+
+/** `mcp_server_upsert` 的入参形状（新建：id 为 null）。 */
+const MCP_SERVER_UPSERT_INPUT: McpServerInput = {
+  id: null,
+  name: 'fetch',
+  transport: 'http',
+  command: null,
+  args: [],
+  url: 'https://mcp.example.com',
+  envKeys: [],
+  enabled: true,
+};
+
+/** IPC 契约 `mcp_binding_list` / `mcp_binding_add` 的返回项（harness 作用域）。 */
+const MCP_BINDING_PAYLOAD = {
+  id: 'bind-1',
+  serverId: 'srv-1',
+  serverName: 'filesystem',
+  scope: 'harness',
+  harnessId: 'claude',
+  createdAt: '2026-11-01T09:30:00Z',
+};
+
+/** IPC 契约 `mcp_sync_preview` 的返回项（updates / removals 是 diff 条目）。 */
+const MCP_SYNC_PREVIEW_PAYLOAD = {
+  harnessId: 'claude',
+  targetPath: 'C:/Users/dev/.claude/settings.json',
+  additions: ['fetch'],
+  updates: [{ name: 'filesystem', summary: '命令从 npx 改为 bunx' }],
+  removals: [{ name: 'legacy', summary: 'Hub 侧已删除该 server' }],
+};
+
+/** IPC 契约 `mcp_sync_apply` 的返回项（写前备份的 id 用于回溯）。 */
+const MCP_SYNC_REPORT_PAYLOAD = {
+  targetPath: 'C:/Users/dev/.claude/settings.json',
+  backupId: 'bkp-42',
+  added: 1,
+  updated: 1,
+  removed: 1,
+};
+
+/** IPC 契约 `mcp_import` 的返回项。 */
+const MCP_IMPORT_REPORT_PAYLOAD = {
+  harnessId: 'codex',
+  imported: ['filesystem', 'git'],
+  skipped: ['legacy'],
+};
+
+describe('MCP Binding Registry IPC（ROADMAP E18）', () => {
+  it('normalizeMcpServer 保留 Rust 契约的每个 camelCase 字段（stdio 形状）', () => {
+    expect(normalizeMcpServer(MCP_SERVER_PAYLOAD)).toEqual(MCP_SERVER_PAYLOAD);
+  });
+
+  it('normalizeMcpServer 接受 http 形状（command / args 为空，url 有值）', () => {
+    const payload = {
+      ...MCP_SERVER_PAYLOAD,
+      transport: 'http',
+      command: null,
+      args: [],
+      url: 'https://mcp.example.com/sse',
+    };
+
+    expect(normalizeMcpServer(payload)).toEqual(payload);
+  });
+
+  it('normalizeMcpServer 丢掉缺 id / 未知 transport 的条目', () => {
+    expect(normalizeMcpServer({ ...MCP_SERVER_PAYLOAD, id: '' })).toBeNull();
+    expect(normalizeMcpServer({ ...MCP_SERVER_PAYLOAD, id: '   ' })).toBeNull();
+    expect(normalizeMcpServer({ ...MCP_SERVER_PAYLOAD, transport: 'websocket' })).toBeNull();
+    expect(normalizeMcpServer({ ...MCP_SERVER_PAYLOAD, transport: null })).toBeNull();
+    expect(normalizeMcpServer(null)).toBeNull();
+    expect(normalizeMcpServer('filesystem')).toBeNull();
+  });
+
+  it('normalizeMcpServer 的可选字段缺省为空值，enabled 缺省 false，不产生 undefined', () => {
+    expect(normalizeMcpServer({ id: 'srv-2', name: 'fetch', transport: 'http' })).toEqual({
+      id: 'srv-2',
+      name: 'fetch',
+      transport: 'http',
+      command: null,
+      args: [],
+      url: null,
+      envKeys: [],
+      enabled: false,
+      source: '',
+      createdAt: '',
+      updatedAt: '',
+    });
+  });
+
+  it('normalizeMcpBinding 保留字段，harness 作用域的 harnessId 是字符串', () => {
+    expect(normalizeMcpBinding(MCP_BINDING_PAYLOAD)).toEqual(MCP_BINDING_PAYLOAD);
+    expect(
+      normalizeMcpBinding({ ...MCP_BINDING_PAYLOAD, scope: 'global', harnessId: null }),
+    ).toEqual({ ...MCP_BINDING_PAYLOAD, scope: 'global', harnessId: null });
+  });
+
+  it('normalizeMcpBinding 丢掉缺 id 的条目，其余字段缺省空值', () => {
+    expect(normalizeMcpBinding({ serverId: 'srv-1' })).toBeNull();
+    expect(normalizeMcpBinding(null)).toBeNull();
+    expect(normalizeMcpBinding('bind-1')).toBeNull();
+    expect(normalizeMcpBinding({ id: 'bind-2' })).toEqual({
+      id: 'bind-2',
+      serverId: '',
+      serverName: '',
+      scope: '',
+      harnessId: null,
+      createdAt: '',
+    });
+  });
+
+  it('normalizeMcpSyncPreview 保留 additions 与 updates / removals 的 diff 条目', () => {
+    expect(normalizeMcpSyncPreview(MCP_SYNC_PREVIEW_PAYLOAD)).toEqual(MCP_SYNC_PREVIEW_PAYLOAD);
+  });
+
+  it('normalizeMcpSyncPreview 丢掉缺 name 的 diff 条目，非数组收敛为空', () => {
+    const preview = normalizeMcpSyncPreview({
+      ...MCP_SYNC_PREVIEW_PAYLOAD,
+      additions: ['fetch', 42, null],
+      updates: [
+        { name: 'filesystem', summary: '命令从 npx 改为 bunx' },
+        null,
+        { summary: '没有名字' },
+        'oops',
+      ],
+      removals: 'oops',
+    });
+
+    expect(preview.additions).toEqual(['fetch']);
+    expect(preview.updates).toEqual([{ name: 'filesystem', summary: '命令从 npx 改为 bunx' }]);
+    expect(preview.removals).toEqual([]);
+  });
+
+  it('normalizeMcpSyncPreview 形状漂移时收敛为空预览（纯读，不误报错误）', () => {
+    expect(normalizeMcpSyncPreview(null)).toEqual({
+      harnessId: '',
+      targetPath: '',
+      additions: [],
+      updates: [],
+      removals: [],
+    });
+  });
+
+  it('normalizeMcpSyncReport 保留审计计数，缺省 0（写路径不误报失败）', () => {
+    expect(normalizeMcpSyncReport(MCP_SYNC_REPORT_PAYLOAD)).toEqual(MCP_SYNC_REPORT_PAYLOAD);
+    expect(normalizeMcpSyncReport(null)).toEqual({
+      targetPath: '',
+      backupId: '',
+      added: 0,
+      updated: 0,
+      removed: 0,
+    });
+    expect(normalizeMcpSyncReport({ added: 'oops' })).toEqual({
+      targetPath: '',
+      backupId: '',
+      added: 0,
+      updated: 0,
+      removed: 0,
+    });
+  });
+
+  it('normalizeMcpImportReport 保留导入 / 跳过名单，缺省空数组', () => {
+    expect(normalizeMcpImportReport(MCP_IMPORT_REPORT_PAYLOAD)).toEqual(MCP_IMPORT_REPORT_PAYLOAD);
+    expect(normalizeMcpImportReport(null)).toEqual({ harnessId: '', imported: [], skipped: [] });
+    expect(normalizeMcpImportReport({ imported: 'oops' })).toEqual({
+      harnessId: '',
+      imported: [],
+      skipped: [],
+    });
+  });
+
+  it('listMcpServers 使用 mcp_server_list 命令名并过滤坏条目（null / 缺 id / 未知 transport）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      MCP_SERVER_PAYLOAD,
+      null,
+      { ...MCP_SERVER_PAYLOAD, id: '' },
+      { ...MCP_SERVER_PAYLOAD, transport: 'websocket' },
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await listMcpServers();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_server_list');
+    expect(result).toEqual({ ok: true, data: [MCP_SERVER_PAYLOAD] });
+  });
+
+  it('listMcpServers 对非数组响应收敛为空数组，不报错', async () => {
+    stubTauri(async () => 'nope');
+
+    await expect(listMcpServers()).resolves.toEqual({ ok: true, data: [] });
+  });
+
+  it('listMcpBindings 使用 mcp_binding_list 命令名并过滤坏条目（null / 缺 id）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => [
+      MCP_BINDING_PAYLOAD,
+      null,
+      { ...MCP_BINDING_PAYLOAD, id: '   ' },
+    ]);
+    stubTauri(invokeSpy);
+
+    const result = await listMcpBindings();
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_binding_list');
+    expect(result).toEqual({ ok: true, data: [MCP_BINDING_PAYLOAD] });
+  });
+
+  it('upsertMcpServer 使用 mcp_server_upsert 命令名并以 { input } 包参，归一化返回', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_SERVER_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await upsertMcpServer(MCP_SERVER_UPSERT_INPUT);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_server_upsert');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ input: MCP_SERVER_UPSERT_INPUT });
+    expect(result).toEqual({ ok: true, data: MCP_SERVER_PAYLOAD });
+  });
+
+  it('upsertMcpServer 收到无法解析的返回时报 invalid-mcp-server-payload', async () => {
+    stubTauri(async () => ({ id: '' }));
+
+    await expect(upsertMcpServer(MCP_SERVER_UPSERT_INPUT)).resolves.toEqual({
+      ok: false,
+      error: 'invalid-mcp-server-payload',
+    });
+  });
+
+  it('addMcpBinding 使用 mcp_binding_add 命令名并传 { serverId, scope, harnessId }', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_BINDING_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await addMcpBinding('srv-1', 'harness', 'claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_binding_add');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      serverId: 'srv-1',
+      scope: 'harness',
+      harnessId: 'claude',
+    });
+    expect(result).toEqual({ ok: true, data: MCP_BINDING_PAYLOAD });
+  });
+
+  it('addMcpBinding 的 global 作用域 harnessId 传 null，返回无法解析时报 invalid-mcp-binding-payload', async () => {
+    stubTauri(async () => ({ serverId: 'srv-1' }));
+
+    await expect(addMcpBinding('srv-1', 'global', null)).resolves.toEqual({
+      ok: false,
+      error: 'invalid-mcp-binding-payload',
+    });
+  });
+
+  it('previewMcpSync 使用 mcp_sync_preview 命令名并传 harnessId（纯读，归一化预览）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_SYNC_PREVIEW_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await previewMcpSync('claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_sync_preview');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: MCP_SYNC_PREVIEW_PAYLOAD });
+  });
+
+  it('applyMcpSync 使用 mcp_sync_apply 命令名并传 harnessId（显式动作，调用方必须先 confirm）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_SYNC_REPORT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await applyMcpSync('claude');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_sync_apply');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'claude' });
+    expect(result).toEqual({ ok: true, data: MCP_SYNC_REPORT_PAYLOAD });
+  });
+
+  it('importMcpConfig 使用 mcp_import 命令名并传 harnessId（显式动作，调用方必须先 confirm）', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_IMPORT_REPORT_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await importMcpConfig('codex');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_import');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ harnessId: 'codex' });
+    expect(result).toEqual({ ok: true, data: MCP_IMPORT_REPORT_PAYLOAD });
+  });
+
+  it('removeMcpServer / removeMcpBinding 使用 { id } 传参', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => true);
+    stubTauri(invokeSpy);
+
+    await expect(removeMcpServer('srv-1')).resolves.toEqual({ ok: true, data: true });
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_server_remove');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ id: 'srv-1' });
+
+    await expect(removeMcpBinding('bind-1')).resolves.toEqual({ ok: true, data: true });
+    expect(invokeSpy.mock.calls[1]?.[0]).toBe('mcp_binding_remove');
+    expect(invokeSpy.mock.calls[1]?.[1]).toEqual({ id: 'bind-1' });
+  });
+
+  it('不在 Tauri 运行时一律返回 not-running-in-tauri', async () => {
+    await expect(listMcpServers()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(upsertMcpServer(MCP_SERVER_UPSERT_INPUT)).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(applyMcpSync('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(importMcpConfig('claude')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

@@ -2531,3 +2531,372 @@ export async function runConfigDoctor(harnessId: string): Promise<IpcResult<Doct
     .filter((item): item is DoctorCheckItem => item !== null);
   return { ok: true, data: items };
 }
+
+/* ------------------------------------------------------------------ *
+ * MCP Binding Registry（ROADMAP E18）
+ *
+ * Hub 的 SQLite 是 MCP 配置的 source-of-truth；projection / sync 复用 E15
+ * 的 backup / temp / verify / rename 管线写 harness 原生配置（见
+ * src-tauri/src/mcp/mod.rs）。安全红线：
+ * - envKeys 只是环境变量**名**元数据，任何变量值都不进 Hub；
+ * - sync 只覆盖 Hub 管理的键，条目内用户手写的 env / headers 一律保留。
+ * preview 纯读；apply / import 是**显式动作**，调用方必须 confirm 后才调用。
+ * ------------------------------------------------------------------ */
+
+/** MCP Server 的传输方式（与 Rust `McpTransport`，serde snake_case 同形）。 */
+export type McpTransport = 'stdio' | 'http';
+
+/** 一个登记在 Hub 的 MCP Server（与 Rust `McpServer`，serde camelCase 同形）。 */
+export type McpServer = {
+  id: string;
+  /** 写进 harness 配置时使用的键（限 `[A-Za-z0-9._-]`）。 */
+  name: string;
+  transport: McpTransport;
+  /** stdio：可执行文件。 */
+  command: string | null;
+  /** stdio：参数。 */
+  args: string[];
+  /** http：endpoint。 */
+  url: string | null;
+  /** 需要的环境变量**名**（展示 / Doctor 提示用；值绝不进 Hub）。 */
+  envKeys: string[];
+  enabled: boolean;
+  /** `hub`（用户登记）或 `imported:<harness>`（从 harness 配置导入）。 */
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** 新建 / 更新 MCP Server 的入参（与 Rust 命令 `mcp_server_upsert` 的 input 同形）。 */
+export type McpServerInput = {
+  /** null = 新建；否则按 id 覆盖。 */
+  id: string | null;
+  name: string;
+  transport: McpTransport;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  envKeys: string[];
+  enabled: boolean;
+};
+
+/** 一条绑定：某 server 在哪个 scope 生效（与 Rust `McpBinding`，serde camelCase 同形）。 */
+export type McpBinding = {
+  id: string;
+  serverId: string;
+  /** 冗余展示名（JOIN 取出，前端不必再查一遍）。 */
+  serverName: string;
+  /** `global` | `harness`。 */
+  scope: string;
+  /** harness 作用域时是目标 harness 的 id；global 为 null。 */
+  harnessId: string | null;
+  createdAt: string;
+};
+
+/** 一条同步差异（与 Rust `McpDiffEntry`，serde camelCase 同形）。 */
+export type McpDiffEntry = {
+  /** harness 配置里的 server 键名。 */
+  name: string;
+  /** 给 UI 的一句人话摘要（如「命令从 npx 改为 bunx」）。 */
+  summary: string;
+};
+
+/** 一次同步的预览（与 Rust `McpSyncPreview`，serde camelCase 同形）。 */
+export type McpSyncPreview = {
+  harnessId: string;
+  /** 目标 harness 配置文件的绝对路径（confirm 文案里要展示给用户看）。 */
+  targetPath: string;
+  /** 将新增的 server 键名。 */
+  additions: string[];
+  /** 将覆盖的条目（两侧都有但内容有差异）。 */
+  updates: McpDiffEntry[];
+  /** 将移除的条目（harness 配置里有、Hub 侧没有）。 */
+  removals: McpDiffEntry[];
+};
+
+/** 一次同步的结果（与 Rust `McpSyncReport`，serde camelCase 同形）。 */
+export type McpSyncReport = {
+  targetPath: string;
+  /** 写入前备份的 id（回溯用，对应 E15 的备份管线）。 */
+  backupId: string;
+  added: number;
+  updated: number;
+  removed: number;
+};
+
+/** 一次导入的结果（与 Rust `McpImportReport`，serde camelCase 同形）。 */
+export type McpImportReport = {
+  harnessId: string;
+  /** 导入成功的 server 键名（Registry 里 source = imported:<harness>）。 */
+  imported: string[];
+  /** 被跳过的键名（如重名冲突 / 键名不合法）。 */
+  skipped: string[];
+};
+
+/**
+ * 收敛 IPC 边界上的未知 JSON 成安全的 `McpServer`。
+ *
+ * 拿不到 `id` 丢弃 —— Registry 条目的改删 / 绑定都靠 id 定位；`transport`
+ * 只认 `stdio` / `http`，未知值整条丢弃（绝不能把未知传输的 server 当成
+ * stdio 渲染或投影）；`enabled` 只认 `true`，缺省 false ——「不确定」绝不
+ * 能渲染成已启用。
+ */
+export function normalizeMcpServer(raw: unknown): McpServer | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  const transport = source.transport;
+  if (transport !== 'stdio' && transport !== 'http') {
+    return null;
+  }
+
+  return {
+    id,
+    name: typeof source.name === 'string' ? source.name : '',
+    transport,
+    command: asStringOrNull(source.command),
+    args: asStringArray(source.args),
+    url: asStringOrNull(source.url),
+    envKeys: asStringArray(source.envKeys),
+    enabled: source.enabled === true,
+    source: typeof source.source === 'string' ? source.source : '',
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+  };
+}
+
+/**
+ * 收敛一条绑定。拿不到 `id` 丢弃 —— 删除 / 展示都要靠它定位；
+ * `harnessId` 只认非空字符串或 null，global 作用域的 null 不折算成 ''。
+ */
+export function normalizeMcpBinding(raw: unknown): McpBinding | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  const id = typeof source.id === 'string' ? source.id.trim() : '';
+  if (id.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    serverId: typeof source.serverId === 'string' ? source.serverId : '',
+    serverName: typeof source.serverName === 'string' ? source.serverName : '',
+    scope: typeof source.scope === 'string' ? source.scope : '',
+    harnessId: asStringOrNull(source.harnessId),
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+  };
+}
+
+/**
+ * 收敛 diff 条目列表。拿不到 `name` 的条目丢弃 —— 差异没有键名无法落地；
+ * `summary` 缺省空串（UI 显示「无说明」即可，不该因此丢整条差异）。
+ */
+function asMcpDiffEntries(value: unknown): McpDiffEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries: McpDiffEntry[] = [];
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const source = item as Record<string, unknown>;
+    const name = typeof source.name === 'string' ? source.name.trim() : '';
+    if (name.length === 0) {
+      continue;
+    }
+    entries.push({ name, summary: typeof source.summary === 'string' ? source.summary : '' });
+  }
+  return entries;
+}
+
+/**
+ * 收敛同步预览。
+ *
+ * preview 是**纯读**，形状漂移时收敛为空预览而不是报错：让 UI 因为解析失败
+ * 弹「预览加载失败」没有意义，空预览里没有 targetPath / 差异，调用方自然
+ * 不会走到下一步的 confirm。
+ */
+export function normalizeMcpSyncPreview(raw: unknown): McpSyncPreview {
+  if (typeof raw !== 'object' || raw === null) {
+    return { harnessId: '', targetPath: '', additions: [], updates: [], removals: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    targetPath: typeof source.targetPath === 'string' ? source.targetPath : '',
+    additions: asStringArray(source.additions),
+    updates: asMcpDiffEntries(source.updates),
+    removals: asMcpDiffEntries(source.removals),
+  };
+}
+
+/**
+ * 收敛同步报告。apply 是写路径，响应形状漂移时**不报错**（写已经发生了，
+ * 误报「失败」会诱导用户重试造成二次写入）；计数缺省 0，路径缺省空串，
+ * 绝不渲染 NaN / undefined。
+ */
+export function normalizeMcpSyncReport(raw: unknown): McpSyncReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { targetPath: '', backupId: '', added: 0, updated: 0, removed: 0 };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    targetPath: typeof source.targetPath === 'string' ? source.targetPath : '',
+    backupId: typeof source.backupId === 'string' ? source.backupId : '',
+    added: asNumber(source.added),
+    updated: asNumber(source.updated),
+    removed: asNumber(source.removed),
+  };
+}
+
+/**
+ * 收敛导入报告。import 也是显式写动作，报告形状漂移同样不报错（导入已经
+ * 发生）；名单缺省 []，宁可显示空报告也不渲染 undefined。
+ */
+export function normalizeMcpImportReport(raw: unknown): McpImportReport {
+  if (typeof raw !== 'object' || raw === null) {
+    return { harnessId: '', imported: [], skipped: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    harnessId: typeof source.harnessId === 'string' ? source.harnessId : '',
+    imported: asStringArray(source.imported),
+    skipped: asStringArray(source.skipped),
+  };
+}
+
+/** 列出 Registry 里登记的全部 MCP Server。**纯读**：不改库、不碰配置文件。 */
+export async function listMcpServers(): Promise<IpcResult<McpServer[]>> {
+  const result = await invokeCommand<unknown>('mcp_server_list');
+  if (!result.ok) {
+    return result;
+  }
+
+  const servers = Array.isArray(result.data)
+    ? result.data.map(normalizeMcpServer).filter((server): server is McpServer => server !== null)
+    : [];
+
+  return { ok: true, data: servers };
+}
+
+/**
+ * 新建（id 为 null）或更新一个 MCP Server 的登记信息。
+ *
+ * 只写 Registry：本命令不触碰任何 harness 配置文件；真正写配置是
+ * preview → apply 的显式两步（见 `applyMcpSync`）。
+ */
+export async function upsertMcpServer(input: McpServerInput): Promise<IpcResult<McpServer>> {
+  const result = await invokeCommand<unknown>('mcp_server_upsert', { input });
+  if (!result.ok) {
+    return result;
+  }
+
+  const server = normalizeMcpServer(result.data);
+  return server ? { ok: true, data: server } : { ok: false, error: 'invalid-mcp-server-payload' };
+}
+
+/** 从 Registry 删除一个 MCP Server（只删登记行，不动 harness 配置）。 */
+export async function removeMcpServer(id: string): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('mcp_server_remove', { id });
+}
+
+/** 列出全部绑定（server × scope）。**纯读**：不改库、不碰配置文件。 */
+export async function listMcpBindings(): Promise<IpcResult<McpBinding[]>> {
+  const result = await invokeCommand<unknown>('mcp_binding_list');
+  if (!result.ok) {
+    return result;
+  }
+
+  const bindings = Array.isArray(result.data)
+    ? result.data
+        .map(normalizeMcpBinding)
+        .filter((binding): binding is McpBinding => binding !== null)
+    : [];
+
+  return { ok: true, data: bindings };
+}
+
+/**
+ * 新增一条绑定：某 server 在 `global` 或某个 harness 作用域生效。
+ *
+ * 绑定只是 Registry 里的意图记录，不触碰 harness 配置文件。
+ */
+export async function addMcpBinding(
+  serverId: string,
+  scope: string,
+  harnessId: string | null,
+): Promise<IpcResult<McpBinding>> {
+  const result = await invokeCommand<unknown>('mcp_binding_add', { serverId, scope, harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  const binding = normalizeMcpBinding(result.data);
+  return binding
+    ? { ok: true, data: binding }
+    : { ok: false, error: 'invalid-mcp-binding-payload' };
+}
+
+/** 删除一条绑定（只删意图记录，不动 harness 配置）。 */
+export async function removeMcpBinding(id: string): Promise<IpcResult<boolean>> {
+  return invokeCommand<boolean>('mcp_binding_remove', { id });
+}
+
+/**
+ * 预演「把 Registry 内容同步进某 harness 配置」的差异。**纯读**：不写库、
+ * 不写文件，UI 可以反复调用；确认要执行时再走 `applyMcpSync`。
+ */
+export async function previewMcpSync(harnessId: string): Promise<IpcResult<McpSyncPreview>> {
+  const result = await invokeCommand<unknown>('mcp_sync_preview', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeMcpSyncPreview(result.data) };
+}
+
+/**
+ * 真正执行同步：把 Registry 内容写入 harness 原生配置（写前自动备份）。
+ *
+ * **显式动作，调用方必须 confirm**：UI 必须先展示 `previewMcpSync` 的差异
+ * （含 targetPath 与增 / 改 / 删清单）并让用户确认后才可调用；绝不可以
+ * 在渲染路径自动触发。
+ */
+export async function applyMcpSync(harnessId: string): Promise<IpcResult<McpSyncReport>> {
+  const result = await invokeCommand<unknown>('mcp_sync_apply', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeMcpSyncReport(result.data) };
+}
+
+/**
+ * 从 harness 现有配置反向导入 MCP Server 到 Registry（source = imported:<harness>）。
+ *
+ * **显式动作，调用方必须 confirm**：导入会新增 Registry 行，UI 必须
+ * `window.confirm` 后才可调用；本命令不修改 harness 配置文件本身。
+ */
+export async function importMcpConfig(harnessId: string): Promise<IpcResult<McpImportReport>> {
+  const result = await invokeCommand<unknown>('mcp_import', { harnessId });
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeMcpImportReport(result.data) };
+}
