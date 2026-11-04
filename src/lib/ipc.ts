@@ -3163,3 +3163,131 @@ export async function listSkills(): Promise<IpcResult<SkillsReport>> {
 
   return { ok: true, data: normalizeSkillsReport(result.data) };
 }
+
+/* ------------------------------------------------------------------ *
+ * Python Sidecar 生命周期状态（F20，spec §5）
+ *
+ * 与 Rust `SidecarStatus`（serde rename_all = "camelCase"）一一对应。
+ * 契约纪律：Rust 侧 contract test 锁实际键名，这里用同形状 fixture 锁解析行为；
+ * 不靠「看起来应该是 camelCase」猜。
+ *
+ * 失败一律收敛成状态、不向上传播为 IPC 错误（验收 #5）：Python 缺失只影响
+ * 这一张卡片，PTY / Git / Session 等主功能零感知。
+ * ------------------------------------------------------------------ */
+
+export type SidecarState = 'stopped' | 'ready' | 'degraded';
+
+/** 与 Rust `RuntimeInfo`（serde camelCase）同形。 */
+export interface SidecarRuntimeInfo {
+  name: string;
+  version: string;
+  transport: string;
+  python: string;
+  protocolVersion: string;
+  providers: string[];
+  capabilities: string[];
+  methods: string[];
+}
+
+/** 与 Rust `SidecarStatus`（serde camelCase）同形。 */
+export interface SidecarStatus {
+  state: SidecarState;
+  pid: number | null;
+  runtime: SidecarRuntimeInfo | null;
+  negotiatedCapabilities: string[];
+  protocolVersion: string | null;
+  lastError: string | null;
+  restartCount: number;
+}
+
+function isSidecarState(value: unknown): value is SidecarState {
+  return value === 'stopped' || value === 'ready' || value === 'degraded';
+}
+
+/** 每次返回全新对象，避免多处共用同一个数组引用。 */
+function degradedSidecarStatus(): SidecarStatus {
+  return {
+    state: 'degraded',
+    pid: null,
+    runtime: null,
+    negotiatedCapabilities: [],
+    protocolVersion: null,
+    lastError: null,
+    restartCount: 0,
+  };
+}
+
+function normalizeSidecarRuntime(raw: unknown): SidecarRuntimeInfo | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    name: typeof source.name === 'string' ? source.name : '',
+    version: typeof source.version === 'string' ? source.version : '',
+    transport: typeof source.transport === 'string' ? source.transport : '',
+    python: typeof source.python === 'string' ? source.python : '',
+    protocolVersion: typeof source.protocolVersion === 'string' ? source.protocolVersion : '',
+    providers: asStringArray(source.providers),
+    capabilities: asStringArray(source.capabilities),
+    methods: asStringArray(source.methods),
+  };
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `SidecarStatus`。
+ *
+ * `state` 是判别字段：**认不出来就整体 fail-closed**，连同一 payload 里的
+ * `pid` / `runtime` 也不采信 —— 一个连状态都说不清的后端，没资格让 UI 显示
+ * 「ready」。其余字段逐项安全默认（null / [] / 0 / ''），绝不抛异常。
+ */
+export function normalizeSidecarStatus(raw: unknown): SidecarStatus {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return degradedSidecarStatus();
+  }
+
+  const source = raw as Record<string, unknown>;
+  if (!isSidecarState(source.state)) {
+    return degradedSidecarStatus();
+  }
+
+  return {
+    state: source.state,
+    pid: typeof source.pid === 'number' && Number.isFinite(source.pid) ? source.pid : null,
+    runtime: normalizeSidecarRuntime(source.runtime),
+    negotiatedCapabilities: asStringArray(source.negotiatedCapabilities),
+    protocolVersion: typeof source.protocolVersion === 'string' ? source.protocolVersion : null,
+    lastError: typeof source.lastError === 'string' ? source.lastError : null,
+    restartCount: asNumber(source.restartCount),
+  };
+}
+
+async function invokeSidecar(command: string): Promise<IpcResult<SidecarStatus>> {
+  const result = await invokeCommand<unknown>(command);
+  if (!result.ok) {
+    return result;
+  }
+
+  return { ok: true, data: normalizeSidecarStatus(result.data) };
+}
+
+/** 纯读：含崩溃检出（status 会把已退出的进程翻成 degraded）。 */
+export function sidecarStatus(): Promise<IpcResult<SidecarStatus>> {
+  return invokeSidecar('sidecar_status');
+}
+
+/** 幂等启动；失败由 Rust 侧降级为状态，不返回 Err。 */
+export function sidecarStart(): Promise<IpcResult<SidecarStatus>> {
+  return invokeSidecar('sidecar_start');
+}
+
+/** 幂等停止。 */
+export function sidecarStop(): Promise<IpcResult<SidecarStatus>> {
+  return invokeSidecar('sidecar_stop');
+}
+
+/** 显式恢复入口：stop + start，restartCount += 1。 */
+export function sidecarRestart(): Promise<IpcResult<SidecarStatus>> {
+  return invokeSidecar('sidecar_restart');
+}
