@@ -149,4 +149,30 @@ mod tests {
         assert!(matches!(closed, Error::InputClosed { .. }));
         assert!(matches!(failed, Error::InputWorkerFailed { .. }));
     }
+
+    /// F20 sidecar 的 6 个错误变体：中文文案 + 跨 IPC 仍是字符串（spec §4.5）。
+    /// `impl Serialize` 已统一走 `to_string()`，新增变体不该改变这个形状。
+    #[test]
+    fn sidecar_error_variants_serialize_as_string_with_chinese_prefix() {
+        let cases: Vec<(Error, &str)> = vec![
+            (Error::SidecarSpawn("找不到解释器".into()), "启动失败"),
+            (Error::SidecarHandshake("缺能力".into()), "握手失败"),
+            (Error::SidecarTimeout("10000ms".into()), "调用超时"),
+            (Error::SidecarProtocol("坏 JSON".into()), "协议错误"),
+            (Error::SidecarDegraded("管道断开".into()), "降级"),
+            (Error::SidecarUnavailable("未启动".into()), "不可用"),
+        ];
+
+        for (error, needle) in cases {
+            let message = error.to_string();
+            assert!(message.starts_with("Python sidecar "), "{message}");
+            assert!(message.contains(needle), "{message}");
+            // 跨 IPC 形状：to_value 必须是字符串，且等于 to_string()。
+            assert_eq!(
+                serde_json::to_value(&error).expect("序列化"),
+                serde_json::json!(message),
+                "{message}"
+            );
+        }
+    }
 }
