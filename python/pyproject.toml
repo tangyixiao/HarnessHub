@@ -1,6 +1,6 @@
 [project]
 name = "harness-hub-runtime"
-version = "0.0.0"
+version = "0.5.0"
 description = "Harness Hub AI Runtime sidecar（通过 stdio JSON-RPC 与 Rust Control Plane 通信）"
 readme = "README.md"
 requires-python = ">=3.10"
