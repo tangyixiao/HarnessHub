@@ -5,35 +5,36 @@
 
 ## 按任务找入口
 
-| 我要做的事                         | 去哪里                                                                                                                                                                    |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Harness 检测 / 版本 / 能力 / 启动  | `src-tauri/src/harness/`（`adapter.rs` = trait，`registry.rs` = 注册表，`adapters/` = 具体 Harness）                                                                      |
-| Usage 发现 / 调用 / 归一化 / 导入  | `src-tauri/src/usage/`（`adapter.rs` = trait，`ccusage.rs` = 解析+归一化，`runner.rs` = 外部命令，`importer.rs` = 幂等落库，`cost.rs` = 金额边界，`key.rs` = stable key） |
-| Usage 契约与取证                   | `docs/adr/0011-usage-import-contracts.md`、`fixtures/ccusage/README.md`                                                                                                   |
-| Session 生命周期与索引             | `src-tauri/src/session/`                                                                                                                                                  |
-| SQLite schema / 迁移               | `src-tauri/src/db/`（`migrations/` 下为 SQL，`migrations.rs` 为执行器）                                                                                                   |
-| 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`（Windows 进程包含 = `pty/containment.rs`，Job Object；真机 Gate = `src-tauri/tests/process_tree_ownership.rs`）            |
-| Git / Worktree 观察                | `src-tauri/src/git/`（生产 `capture`；真实仓库测试 `src-tauri/tests/git_snapshot.rs`）                                                                                    |
-| Project Registry（repo root/登记） | `src-tauri/src/project/`、真机测试 `src-tauri/tests/project_registry.rs`                                                                                                  |
-| 文件监听                           | `src-tauri/src/watcher/`                                                                                                                                                  |
-| Python Sidecar 生命周期 / JSON-RPC | `src-tauri/src/sidecar/`（Rust 侧）、`python/harness_hub_runtime/`（Python 侧）                                                                                           |
-| Trace / Canonical Event            | `src-tauri/src/trace/`、`schemas/events/`                                                                                                                                 |
-| 权限与策略                         | `src-tauri/src/permissions/`                                                                                                                                              |
-| 插件宿主                           | `src-tauri/src/plugins/`、`plugins/sdk/`                                                                                                                                  |
-| RuntimeTarget 抽象                 | `src-tauri/src/runtime/`                                                                                                                                                  |
-| HHAR 导出                          | `src-tauri/src/hhar/`、`schemas/hhar/`                                                                                                                                    |
-| Eval / 回归                        | `src-tauri/src/eval/`、`evals/promptfoo/`                                                                                                                                 |
-| Tauri IPC 命令                     | `src-tauri/src/commands.rs`                                                                                                                                               |
-| 前端路由与应用壳                   | `src/app/`                                                                                                                                                                |
-| Dashboard                          | `src/features/dashboard/`                                                                                                                                                 |
-| Harness 列表页                     | `src/features/harnesses/`                                                                                                                                                 |
-| 项目页                             | `src/features/projects/`                                                                                                                                                  |
-| Session / Terminal                 | `src/features/sessions/`、`src/features/terminal/`                                                                                                                        |
-| 历史 / Activity Timeline           | `src/features/history/`、`src-tauri/src/activity/`（`query.rs` = 统一活动流只读投影，真机测试 `src-tauri/tests/real_activity_timeline.rs`）                               |
-| 设置                               | `src/features/settings/`                                                                                                                                                  |
-| 前端调用 Rust                      | `src/lib/ipc.ts`（唯一 IPC 入口，不要在组件里直接 `invoke`）                                                                                                              |
-| Adapter 测试夹具                   | `fixtures/<harness>/`、`docs/adr/`                                                                                                                                        |
-| 规格 / 设计 / 计划                 | `docs/specs/`、`docs/plans/`、根目录 `HARNESS_HUB_PROJECT_PLAN.md`                                                                                                        |
+| 我要做的事                         | 去哪里                                                                                                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Harness 检测 / 版本 / 能力 / 启动  | `src-tauri/src/harness/`（`adapter.rs` = trait，`registry.rs` = 注册表，`adapters/` = 具体 Harness）                                                                           |
+| Usage 发现 / 调用 / 归一化 / 导入  | `src-tauri/src/usage/`（`adapter.rs` = trait，`ccusage.rs` = 解析+归一化，`runner.rs` = 外部命令，`importer.rs` = 幂等落库，`cost.rs` = 金额边界，`key.rs` = stable key）      |
+| Usage 契约与取证                   | `docs/adr/0011-usage-import-contracts.md`、`fixtures/ccusage/README.md`                                                                                                        |
+| Session 生命周期与索引             | `src-tauri/src/session/`                                                                                                                                                       |
+| SQLite schema / 迁移               | `src-tauri/src/db/`（`migrations/` 下为 SQL，`migrations.rs` 为执行器）                                                                                                        |
+| 进程与 PTY                         | `src-tauri/src/process/`、`src-tauri/src/pty/`（Windows 进程包含 = `pty/containment.rs`，Job Object；真机 Gate = `src-tauri/tests/process_tree_ownership.rs`）                 |
+| Git / Worktree 观察                | `src-tauri/src/git/`（生产 `capture`；真实仓库测试 `src-tauri/tests/git_snapshot.rs`）                                                                                         |
+| Project Registry（repo root/登记） | `src-tauri/src/project/`、真机测试 `src-tauri/tests/project_registry.rs`                                                                                                       |
+| 文件监听                           | `src-tauri/src/watcher/`                                                                                                                                                       |
+| Python Sidecar 生命周期 / JSON-RPC | `src-tauri/src/sidecar/`（Rust 侧）、`python/harness_hub_runtime/`（Python 侧）                                                                                                |
+| Trace / Canonical Event            | `src-tauri/src/trace/`、`schemas/events/`                                                                                                                                      |
+| 权限与策略                         | `src-tauri/src/permissions/`                                                                                                                                                   |
+| 插件宿主                           | `src-tauri/src/plugins/`、`plugins/sdk/`                                                                                                                                       |
+| RuntimeTarget 抽象                 | `src-tauri/src/runtime/`                                                                                                                                                       |
+| HHAR 导出                          | `src-tauri/src/hhar/`、`schemas/hhar/`                                                                                                                                         |
+| Eval / 回归                        | `src-tauri/src/eval/`、`evals/promptfoo/`                                                                                                                                      |
+| Tauri IPC 命令                     | `src-tauri/src/commands.rs`                                                                                                                                                    |
+| 前端路由与应用壳                   | `src/app/`                                                                                                                                                                     |
+| Dashboard                          | `src/features/dashboard/`                                                                                                                                                      |
+| Harness 列表页                     | `src/features/harnesses/`                                                                                                                                                      |
+| 项目页                             | `src/features/projects/`                                                                                                                                                       |
+| Session / Terminal                 | `src/features/sessions/`、`src/features/terminal/`                                                                                                                             |
+| 历史 / Activity Timeline           | `src/features/history/`、`src-tauri/src/activity/`（`query.rs` = 统一活动流只读投影，真机测试 `src-tauri/tests/real_activity_timeline.rs`）                                    |
+| 设置                               | `src/features/settings/`                                                                                                                                                       |
+| 前端调用 Rust                      | `src/lib/ipc.ts`（唯一 IPC 入口，不要在组件里直接 `invoke`）                                                                                                                   |
+| Adapter 测试夹具                   | `fixtures/<harness>/`、`docs/adr/`                                                                                                                                             |
+| 规格 / 设计 / 计划                 | `docs/specs/`、`docs/plans/`、根目录 `HARNESS_HUB_PROJECT_PLAN.md`                                                                                                             |
+| 多工具互通的复用研究与后续方向     | `docs/research/2026-10-23-interop-reuse-review.md`、`docs/specs/2026-10-23-ecosystem-interoperability-direction.md`（2026-10-23 历史研究与提案，当前状态见 CONTEXT / ROADMAP） |
 
 ## 层与依赖方向（不可反向依赖）
 
