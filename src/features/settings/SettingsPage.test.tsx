@@ -738,3 +738,116 @@ describe('SettingsPage — Skills 只读发现（E19 缩范围）', () => {
     expect(screen.getByTestId('skills-scan')).toBeDisabled();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * F20 Sidecar 状态面板（Task 5）—— 手工复刻 Rust `SidecarStatus`
+ * （serde camelCase）的形状，与 src/lib/ipc.test.ts 的 fixture 同源。
+ * ------------------------------------------------------------------ */
+
+const SIDECAR_READY_PAYLOAD = {
+  state: 'ready',
+  pid: 1234,
+  runtime: {
+    name: 'harness-hub-runtime',
+    version: '0.5.0',
+    transport: 'stdio-jsonrpc',
+    python: '3.14.3',
+    protocolVersion: '1.0',
+    providers: [],
+    capabilities: ['ping'],
+    methods: ['ping'],
+  },
+  negotiatedCapabilities: ['ping', 'runtime.info', 'shutdown'],
+  protocolVersion: '1.0',
+  lastError: null,
+  restartCount: 0,
+};
+
+const SIDECAR_DEGRADED_PAYLOAD = {
+  state: 'degraded',
+  pid: null,
+  runtime: null,
+  negotiatedCapabilities: [],
+  protocolVersion: null,
+  lastError: 'Python sidecar 启动失败：python 不存在',
+  restartCount: 2,
+};
+
+describe('SettingsPage — Sidecar 状态面板（F20）', () => {
+  function sidecarCard(): HTMLElement {
+    return screen.getByTestId('sidecar-card');
+  }
+
+  it('渲染 sidecar-card，含「刷新 / 启动 / 停止 / 重启」四个按钮；渲染路径零 IPC', async () => {
+    const invoke = stubCommands({ sidecar_status: SIDECAR_READY_PAYLOAD });
+
+    render(<SettingsPage />);
+
+    expect(sidecarCard()).toBeInTheDocument();
+    for (const name of ['刷新', '启动', '停止', '重启']) {
+      expect(within(sidecarCard()).getByRole('button', { name })).toBeInTheDocument();
+    }
+    // 渲染路径零 IPC：只有点击按钮才调用。
+    expect(invoke.mock.calls).toHaveLength(0);
+  });
+
+  it('点击「刷新」→ sidecar_status 命令名并展示 state / pid / runtime / 能力 / restartCount', async () => {
+    const invoke = stubCommands({ sidecar_status: SIDECAR_READY_PAYLOAD });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(sidecarCard()).getByRole('button', { name: '刷新' }));
+
+    expect(invoke.mock.calls[0]?.[0]).toBe('sidecar_status');
+
+    const card = sidecarCard();
+    expect(await within(card).findByText('ready')).toBeInTheDocument();
+    expect(within(card).getByText('1234')).toBeInTheDocument();
+    expect(within(card).getByText('0.5.0')).toBeInTheDocument();
+    expect(within(card).getByText('3.14.3')).toBeInTheDocument();
+    expect(within(card).getByText('1.0')).toBeInTheDocument();
+    expect(within(card).getByText('ping, runtime.info, shutdown')).toBeInTheDocument();
+    expect(within(card).getByText('0')).toBeInTheDocument();
+  });
+
+  it('启动 / 停止 / 重启各调用对应命令名', async () => {
+    const invoke = stubCommands({
+      sidecar_start: SIDECAR_READY_PAYLOAD,
+      sidecar_stop: { ...SIDECAR_READY_PAYLOAD, state: 'stopped', pid: null },
+      sidecar_restart: SIDECAR_READY_PAYLOAD,
+    });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(sidecarCard()).getByRole('button', { name: '启动' }));
+    await userEvent.click(within(sidecarCard()).getByRole('button', { name: '停止' }));
+    await userEvent.click(within(sidecarCard()).getByRole('button', { name: '重启' }));
+
+    expect(invoke.mock.calls.map((call) => call[0])).toEqual([
+      'sidecar_start',
+      'sidecar_stop',
+      'sidecar_restart',
+    ]);
+  });
+
+  it('degraded 时显示警示文案「Python sidecar 不可用，主 Harness 功能不受影响」', async () => {
+    stubCommands({ sidecar_status: SIDECAR_DEGRADED_PAYLOAD });
+
+    render(<SettingsPage />);
+    await userEvent.click(within(sidecarCard()).getByRole('button', { name: '刷新' }));
+
+    expect(
+      await within(sidecarCard()).findByText('Python sidecar 不可用，主 Harness 功能不受影响'),
+    ).toBeInTheDocument();
+    expect(
+      within(sidecarCard()).getByText('Python sidecar 启动失败：python 不存在'),
+    ).toBeInTheDocument();
+  });
+
+  it('浏览器模式：四个按钮均禁用', async () => {
+    render(<SettingsPage />);
+    await screen.findByTestId('sidecar-card');
+
+    for (const name of ['刷新', '启动', '停止', '重启']) {
+      expect(within(sidecarCard()).getByRole('button', { name })).toBeDisabled();
+    }
+  });
+});

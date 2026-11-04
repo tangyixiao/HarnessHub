@@ -21,6 +21,10 @@ import {
   removeCredential,
   restoreProfileBackup,
   runConfigDoctor,
+  sidecarRestart,
+  sidecarStart,
+  sidecarStatus,
+  sidecarStop,
   previewMcpSync,
   removeMcpBinding,
   removeMcpServer,
@@ -35,8 +39,11 @@ import {
   type McpSyncPreview,
   type McpSyncReport,
   type McpTransport,
+  type IpcResult,
   type ProfileSummary,
   type ProjectionReport,
+  type SidecarState,
+  type SidecarStatus,
   type SkillsReport,
 } from '@/lib/ipc';
 
@@ -74,6 +81,7 @@ export function SettingsPage() {
       <ConfigDoctorCard />
       <McpCard />
       <SkillsCard />
+      <SidecarCard />
       <PlaceholderCard
         title="尚未接入"
         icon={Settings}
@@ -1382,6 +1390,152 @@ function SkillsCard() {
               </p>
             ) : null}
           </>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Python Sidecar 生命周期状态（F20，spec §5）
+ * ------------------------------------------------------------------ */
+
+const SIDECAR_STATE_STYLE: Record<SidecarState, string> = {
+  stopped: 'border-white/10 bg-white/[0.05] text-content-muted',
+  ready: 'border-signal-ok/30 bg-signal-ok/12 text-signal-ok',
+  degraded: 'border-signal-error/30 bg-signal-error/12 text-signal-error',
+};
+
+const SIDECAR_ACTIONS: ReadonlyArray<{
+  label: string;
+  testId: string;
+  run: () => Promise<IpcResult<SidecarStatus>>;
+}> = [
+  { label: '刷新', testId: 'sidecar-refresh', run: sidecarStatus },
+  { label: '启动', testId: 'sidecar-start', run: sidecarStart },
+  { label: '停止', testId: 'sidecar-stop', run: sidecarStop },
+  { label: '重启', testId: 'sidecar-restart', run: sidecarRestart },
+];
+
+/**
+ * Sidecar 状态卡片（F20）：只读状态 + 四个显式动作。
+ *
+ * 纪律（spec §5 / AGENTS.md）：
+ * - **渲染路径零 IPC**：只在用户点按钮时才调用，与本页其它卡片同一纪律；
+ * - 组件内**禁止** `invoke()`，全部走 `@/lib/ipc` 的 wrapper；
+ * - Rust 侧所有失败都收敛为 `SidecarStatus{state:degraded}`，不向上传播为
+ *   IPC 错误 —— degraded 只影响本卡片，主 Harness 功能不受影响。
+ */
+function SidecarCard() {
+  const connected = isTauriRuntime();
+  const [status, setStatus] = useState<SidecarStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const act = async (run: () => Promise<IpcResult<SidecarStatus>>) => {
+    setBusy(true);
+    setError(null);
+    const result = await run();
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setStatus(result.data);
+  };
+
+  return (
+    <Card className="mb-6" data-testid="sidecar-card">
+      <CardTitle>Python Sidecar 状态</CardTitle>
+      <CardDescription>
+        stdio JSON-RPC 运行时（F20）。状态只在点击按钮时读取；所有失败降级为状态，不影响主 Harness
+        功能。
+      </CardDescription>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {SIDECAR_ACTIONS.map(({ label, testId, run }) => (
+          <Button
+            key={testId}
+            variant="secondary"
+            size="sm"
+            onClick={() => void act(run)}
+            disabled={!connected || busy}
+            data-testid={testId}
+          >
+            {label}
+          </Button>
+        ))}
+      </div>
+
+      <div className="mt-4" aria-live="polite">
+        {busy ? (
+          <p className="flex items-center gap-2 text-xs text-content-muted">
+            <Loader2 aria-hidden className="size-3.5 animate-spin text-accent" />
+            正在执行…
+          </p>
+        ) : null}
+
+        {error !== null ? (
+          <p className="text-xs text-signal-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
+        {status !== null && !busy ? (
+          <div className="space-y-2 text-xs" data-testid="sidecar-status">
+            <div className="flex items-center gap-2">
+              <span
+                className={`rounded border px-1.5 py-0.5 font-mono font-medium ${SIDECAR_STATE_STYLE[status.state]}`}
+                data-testid="sidecar-state"
+              >
+                {status.state}
+              </span>
+              {status.state === 'degraded' ? (
+                <span className="text-signal-error" data-testid="sidecar-degraded-warning">
+                  Python sidecar 不可用，主 Harness 功能不受影响
+                </span>
+              ) : null}
+            </div>
+
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt className="text-content-muted">PID</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-pid">
+                {status.pid ?? '—'}
+              </dd>
+              <dt className="text-content-muted">Runtime 版本</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-runtime-version">
+                {status.runtime?.version ?? '—'}
+              </dd>
+              <dt className="text-content-muted">Python 版本</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-python">
+                {status.runtime?.python ?? '—'}
+              </dd>
+              <dt className="text-content-muted">协议版本</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-protocol">
+                {status.protocolVersion ?? '—'}
+              </dd>
+              <dt className="text-content-muted">协商能力</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-capabilities">
+                {status.negotiatedCapabilities.length > 0
+                  ? status.negotiatedCapabilities.join(', ')
+                  : '—'}
+              </dd>
+              <dt className="text-content-muted">重启次数</dt>
+              <dd className="font-mono text-content-primary" data-testid="sidecar-restart-count">
+                {status.restartCount}
+              </dd>
+            </dl>
+
+            {status.lastError !== null ? (
+              <p
+                className="text-xs text-signal-error"
+                role="alert"
+                data-testid="sidecar-last-error"
+              >
+                {status.lastError}
+              </p>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </Card>
