@@ -10,13 +10,13 @@
 
 `HARNESS_HUB_PROJECT_PLAN.md` §8.1 的五项验收逐条落到可测行为：
 
-| # | 验收项 | 本规格的落点 |
-| --- | --- | --- |
-| 1 | Rust 能启动 / 关闭 Python sidecar | `SidecarProcess::spawn` / `shutdown`；IPC `sidecar_start` / `sidecar_stop` |
-| 2 | stdio JSON-RPC handshake | `initialize` 请求 + 版本校验 + 能力协商 |
-| 3 | Runtime version / capability negotiation | `RuntimeInfo` DTO + 交集协商 + 不兼容即降级 |
-| 4 | Sidecar crash 可恢复 | `SidecarManager` 状态机 `Degraded → Ready`；`sidecar_restart` |
-| 5 | 无 Python AI 功能时主 Harness 功能仍能工作 | sidecar 全部失败都收敛为 `SidecarStatus`，**不向上传播为 IPC 错误**；`AppState` 构造不依赖 Python 存在 |
+| #   | 验收项                                     | 本规格的落点                                                                                           |
+| --- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| 1   | Rust 能启动 / 关闭 Python sidecar          | `SidecarProcess::spawn` / `shutdown`；IPC `sidecar_start` / `sidecar_stop`                             |
+| 2   | stdio JSON-RPC handshake                   | `initialize` 请求 + 版本校验 + 能力协商                                                                |
+| 3   | Runtime version / capability negotiation   | `RuntimeInfo` DTO + 交集协商 + 不兼容即降级                                                            |
+| 4   | Sidecar crash 可恢复                       | `SidecarManager` 状态机 `Degraded → Ready`；`sidecar_restart`                                          |
+| 5   | 无 Python AI 功能时主 Harness 功能仍能工作 | sidecar 全部失败都收敛为 `SidecarStatus`，**不向上传播为 IPC 错误**；`AppState` 构造不依赖 Python 存在 |
 
 ### Non-goals（明确不做，留给 F21/F23）
 
@@ -160,10 +160,14 @@ pub struct SidecarStatus {
   "state": "ready",
   "pid": 1234,
   "runtime": {
-    "name": "harness-hub-runtime", "version": "0.5.0",
-    "transport": "stdio-jsonrpc", "python": "3.14.3",
-    "protocolVersion": "1.0", "providers": [],
-    "capabilities": ["ping"], "methods": ["ping"]
+    "name": "harness-hub-runtime",
+    "version": "0.5.0",
+    "transport": "stdio-jsonrpc",
+    "python": "3.14.3",
+    "protocolVersion": "1.0",
+    "providers": [],
+    "capabilities": ["ping"],
+    "methods": ["ping"]
   },
   "negotiatedCapabilities": ["ping", "runtime.info", "shutdown"],
   "protocolVersion": "1.0",
@@ -271,12 +275,12 @@ SidecarUnavailable(String) // "Python sidecar 不可用：{0}"
 
 ### 4.6 IPC 命令（`src-tauri/src/commands.rs`）
 
-| 命令 | 签名 | 说明 |
-| --- | --- | --- |
-| `sidecar_status` | `fn sidecar_status(state: State<'_, AppState>) -> Result<SidecarStatus>` | 纯读，含崩溃检出 |
-| `sidecar_start` | `fn sidecar_start(state: State<'_, AppState>) -> Result<SidecarStatus>` | 幂等；失败降级为状态 |
-| `sidecar_stop` | `fn sidecar_stop(state: State<'_, AppState>) -> Result<SidecarStatus>` | 幂等 |
-| `sidecar_restart` | `fn sidecar_restart(state: State<'_, AppState>) -> Result<SidecarStatus>` | 显式恢复入口 |
+| 命令              | 签名                                                                      | 说明                 |
+| ----------------- | ------------------------------------------------------------------------- | -------------------- |
+| `sidecar_status`  | `fn sidecar_status(state: State<'_, AppState>) -> Result<SidecarStatus>`  | 纯读，含崩溃检出     |
+| `sidecar_start`   | `fn sidecar_start(state: State<'_, AppState>) -> Result<SidecarStatus>`   | 幂等；失败降级为状态 |
+| `sidecar_stop`    | `fn sidecar_stop(state: State<'_, AppState>) -> Result<SidecarStatus>`    | 幂等                 |
+| `sidecar_restart` | `fn sidecar_restart(state: State<'_, AppState>) -> Result<SidecarStatus>` | 显式恢复入口         |
 
 全部加入 `lib.rs` 的 `tauri::generate_handler![...]`（按字母序插在 `session_*` 与 `skills_*` 之间）。`AppState` 新增 `pub sidecar: Arc<SidecarManager>`；`setup()` 里用 `SidecarConfig::from_env()` 构造并 manage，**不主动 spawn**（懒启动：用户点「启动」或 F21 首次调用才拉起）。
 
@@ -342,14 +346,14 @@ export interface SidecarStatus {
 
 按小 Task 拆 commit（Conventional Commits），按**互不重叠的写作用域**拆 PR：
 
-| 切片 | 写作用域（唯一） | 分支 | PR 目标 |
-| --- | --- | --- | --- |
-| S0 规格与计划 | `docs/specs/2026-11-04-*`、`docs/plans/2026-11-04-*` | `feat/f20-sidecar-lifecycle`（集成基线） | — |
-| S1 Python 协议 | `python/**` | `f20/python-protocol` | `feat/f20-sidecar-lifecycle` |
-| S2 Rust 核心 | `src-tauri/src/sidecar/**`、`src-tauri/src/error.rs`、`src-tauri/tests/fixtures/sidecar/**` | `f20/rust-core` | 同上 |
-| S3 前端 | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/**` | `f20/frontend` | 同上 |
-| S4 文档 | `docs/CONTEXT.md`、`docs/CONTEXT-MAP.md`、`docs/ROADMAP.md` | `f20/docs` | 同上 |
-| S5 Rust 接线（**依赖 S2 合并后**） | `src-tauri/src/commands.rs`、`src-tauri/src/lib.rs` | `f20/rust-wiring` | 同上 |
+| 切片                               | 写作用域（唯一）                                                                            | 分支                                     | PR 目标                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------- | ---------------------------- |
+| S0 规格与计划                      | `docs/specs/2026-11-04-*`、`docs/plans/2026-11-04-*`                                        | `feat/f20-sidecar-lifecycle`（集成基线） | —                            |
+| S1 Python 协议                     | `python/**`                                                                                 | `f20/python-protocol`                    | `feat/f20-sidecar-lifecycle` |
+| S2 Rust 核心                       | `src-tauri/src/sidecar/**`、`src-tauri/src/error.rs`、`src-tauri/tests/fixtures/sidecar/**` | `f20/rust-core`                          | 同上                         |
+| S3 前端                            | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/**`                         | `f20/frontend`                           | 同上                         |
+| S4 文档                            | `docs/CONTEXT.md`、`docs/CONTEXT-MAP.md`、`docs/ROADMAP.md`                                 | `f20/docs`                               | 同上                         |
+| S5 Rust 接线（**依赖 S2 合并后**） | `src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`                                         | `f20/rust-wiring`                        | 同上                         |
 
 S1/S2/S3/S4 可完全并行（写作用域零交集，且 S3 只依赖命令名字符串、不依赖 Rust 编译产物）。S5 必须等 S2 合并进集成分支后再基于新基线开工。
 

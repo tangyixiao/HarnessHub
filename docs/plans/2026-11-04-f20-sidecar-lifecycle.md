@@ -9,36 +9,36 @@
 
 ## 前置确认（已实测）
 
-| 项 | 结果 |
-| --- | --- |
-| 分支 | 从 `docs/v040-evidence` 切到 `feat/f20-sidecar-lifecycle`，已 `merge --ff-only 3ebcb2e` |
-| 远程 main | `3ebcb2e5df6c365c2af75c8336d8128afc6c4bd0`（gh API / HTTPS 实测），PR #52 已合并 |
-| 本地 `main` | `412cd4f`（**落后 55 提交，不用作基线**） |
-| 工具 | Python 3.14.3 / uv 0.12.7 / cargo 1.98.1 / node v26.9.0 / pnpm 11.0.9 / gh 2.97.0 |
-| `HARNESS_HUB_PYTHON` | 空 → 走 PATH 的 `python` |
-| git 通道 | SSH 被 `198.18.0.132:443` 拦；`gh` + HTTPS fetch/push 正常 |
-| 工作树遗留 | `build-release-040/`（未跟踪，勿提交）、v0.4.0 证据回填已 `git stash` |
+| 项                   | 结果                                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| 分支                 | 从 `docs/v040-evidence` 切到 `feat/f20-sidecar-lifecycle`，已 `merge --ff-only 3ebcb2e` |
+| 远程 main            | `3ebcb2e5df6c365c2af75c8336d8128afc6c4bd0`（gh API / HTTPS 实测），PR #52 已合并        |
+| 本地 `main`          | `412cd4f`（**落后 55 提交，不用作基线**）                                               |
+| 工具                 | Python 3.14.3 / uv 0.12.7 / cargo 1.98.1 / node v26.9.0 / pnpm 11.0.9 / gh 2.97.0       |
+| `HARNESS_HUB_PYTHON` | 空 → 走 PATH 的 `python`                                                                |
+| git 通道             | SSH 被 `198.18.0.132:443` 拦；`gh` + HTTPS fetch/push 正常                              |
+| 工作树遗留           | `build-release-040/`（未跟踪，勿提交）、v0.4.0 证据回填已 `git stash`                   |
 
 ## 目标（对照 §8.1 验收清单）
 
-| # | 验收项 | 交付物 | 验证方式 |
-| --- | --- | --- | --- |
-| 1 | 启动 / 关闭 | `SidecarProcess::spawn/shutdown`、`sidecar_start/stop` | 真机集成测试 + 进程探活 |
-| 2 | stdio JSON-RPC handshake | `initialize` 方法 + Rust `handshake()` | Rust 单测 + Python 单测 + 真机 |
-| 3 | version / capability negotiation | `RuntimeInfo` DTO + 交集校验 | DTO contract test + 不兼容降级用例 |
-| 4 | crash 可恢复 | `SidecarManager` 状态机 + `sidecar_restart` | 状态机单测（真冷启动）+ 崩溃检出 |
-| 5 | 无 Python 时主功能不受影响 | 失败一律收敛为 `SidecarStatus`，不返回 Err | `python` 缺失路径单测 + 全量既有用例仍绿 |
+| #   | 验收项                           | 交付物                                                 | 验证方式                                 |
+| --- | -------------------------------- | ------------------------------------------------------ | ---------------------------------------- |
+| 1   | 启动 / 关闭                      | `SidecarProcess::spawn/shutdown`、`sidecar_start/stop` | 真机集成测试 + 进程探活                  |
+| 2   | stdio JSON-RPC handshake         | `initialize` 方法 + Rust `handshake()`                 | Rust 单测 + Python 单测 + 真机           |
+| 3   | version / capability negotiation | `RuntimeInfo` DTO + 交集校验                           | DTO contract test + 不兼容降级用例       |
+| 4   | crash 可恢复                     | `SidecarManager` 状态机 + `sidecar_restart`            | 状态机单测（真冷启动）+ 崩溃检出         |
+| 5   | 无 Python 时主功能不受影响       | 失败一律收敛为 `SidecarStatus`，不返回 Err             | `python` 缺失路径单测 + 全量既有用例仍绿 |
 
 ## 提交切分
 
-| 切片 | 分支 | 写作用域 | 依赖 |
-| --- | --- | --- | --- |
-| S0 | 集成分支 | `docs/specs/2026-11-04-*`、`docs/plans/2026-11-04-*` | — |
-| S1 | `f20/python-protocol` | `python/**` | 无，可并行 |
-| S2 | `f20/rust-core` | `src-tauri/src/sidecar/**`、`src-tauri/src/error.rs`、`src-tauri/tests/fixtures/sidecar/**` | 无，可并行 |
-| S3 | `f20/frontend` | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/**` | 无，可并行 |
-| S4 | `f20/docs` | `docs/CONTEXT.md`、`docs/CONTEXT-MAP.md`、`docs/ROADMAP.md` | 无，可并行 |
-| S5 | `f20/rust-wiring` | `src-tauri/src/commands.rs`、`src-tauri/src/lib.rs` | **S2 合并后** |
+| 切片 | 分支                  | 写作用域                                                                                    | 依赖          |
+| ---- | --------------------- | ------------------------------------------------------------------------------------------- | ------------- |
+| S0   | 集成分支              | `docs/specs/2026-11-04-*`、`docs/plans/2026-11-04-*`                                        | —             |
+| S1   | `f20/python-protocol` | `python/**`                                                                                 | 无，可并行    |
+| S2   | `f20/rust-core`       | `src-tauri/src/sidecar/**`、`src-tauri/src/error.rs`、`src-tauri/tests/fixtures/sidecar/**` | 无，可并行    |
+| S3   | `f20/frontend`        | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/**`                         | 无，可并行    |
+| S4   | `f20/docs`            | `docs/CONTEXT.md`、`docs/CONTEXT-MAP.md`、`docs/ROADMAP.md`                                 | 无，可并行    |
+| S5   | `f20/rust-wiring`     | `src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`                                         | **S2 合并后** |
 
 每个切片至少 2 个 commit：`test:` 先行（RED）→ `feat:`/`fix:` 实现（GREEN）。合并顺序 S1 → S2 → S3 → S4 → S5 → 质量门。
 
@@ -148,16 +148,16 @@ pnpm rust:clippy
 
 ## 完成门记录
 
-| 门 | 命令 | 结果 | 输出 |
-| --- | --- | --- | --- |
-| format | `pnpm format:check && pnpm rust:fmt:check` | 待跑 | 待填 |
-| lint | `pnpm lint` | 待跑 | 待填 |
-| typecheck | `pnpm typecheck` | 待跑 | 待填 |
-| unit (web) | `pnpm test` | 待跑 | 待填 |
-| unit (rust) | `pnpm rust:test` | 待跑 | 待填 |
-| unit (python) | `pnpm python:test` | 待跑 | 待填 |
-| build | `pnpm build` | 待跑 | 待填 |
-| clippy | `pnpm rust:clippy` | 待跑 | 待填 |
+| 门            | 命令                                       | 结果 | 输出 |
+| ------------- | ------------------------------------------ | ---- | ---- |
+| format        | `pnpm format:check && pnpm rust:fmt:check` | 待跑 | 待填 |
+| lint          | `pnpm lint`                                | 待跑 | 待填 |
+| typecheck     | `pnpm typecheck`                           | 待跑 | 待填 |
+| unit (web)    | `pnpm test`                                | 待跑 | 待填 |
+| unit (rust)   | `pnpm rust:test`                           | 待跑 | 待填 |
+| unit (python) | `pnpm python:test`                         | 待跑 | 待填 |
+| build         | `pnpm build`                               | 待跑 | 待填 |
+| clippy        | `pnpm rust:clippy`                         | 待跑 | 待填 |
 
 ## 已知风险
 
