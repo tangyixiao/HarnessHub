@@ -5,6 +5,61 @@
 //! 不能靠「看起来应该是 camelCase」猜。枚举只用单元变体，规避 `rename_all` 不改
 //! 结构变体字段名的坑。
 
+use serde::Serialize;
+
+/// Python runtime 自报的运行期信息（来自 `initialize` / `runtime.info`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub name: String,
+    pub version: String,
+    pub transport: String,
+    pub python: String,
+    pub protocol_version: String,
+    pub providers: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub methods: Vec<String>,
+}
+
+/// sidecar 生命周期状态。**只用单元变体**：`rename_all` 只改体名，
+/// 结构变体字段需要 `rename_all_fields`，会埋下跨 IPC 形状漂移的坑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SidecarState {
+    Stopped,
+    Ready,
+    Degraded,
+}
+
+/// 对外暴露的状态快照。IPC 命令 `sidecar_*` 一律返回这个结构，
+/// 失败也收敛到这里（`state: Degraded` + `last_error`），**不向上传播为 IPC 错误**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarStatus {
+    pub state: SidecarState,
+    pub pid: Option<u32>,
+    pub runtime: Option<RuntimeInfo>,
+    pub negotiated_capabilities: Vec<String>,
+    pub protocol_version: Option<String>,
+    pub last_error: Option<String>,
+    pub restart_count: u32,
+}
+
+impl SidecarStatus {
+    /// `Stopped` 的默认快照：构造 manager 时用它，避免手写一堆 `None` / `vec![]`。
+    pub fn stopped() -> Self {
+        Self {
+            state: SidecarState::Stopped,
+            pid: None,
+            runtime: None,
+            negotiated_capabilities: vec![],
+            protocol_version: None,
+            last_error: None,
+            restart_count: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +228,23 @@ mod tests {
                 "lastError": null,
                 "restartCount": 0
             })
+        );
+    }
+
+    /// `stopped()` 构造器与手写 `Stopped` 快照逐字段一致。
+    #[test]
+    fn stopped_constructor_matches_explicit_stopped_status() {
+        assert_eq!(
+            SidecarStatus::stopped(),
+            SidecarStatus {
+                state: SidecarState::Stopped,
+                pid: None,
+                runtime: None,
+                negotiated_capabilities: vec![],
+                protocol_version: None,
+                last_error: None,
+                restart_count: 0,
+            }
         );
     }
 }

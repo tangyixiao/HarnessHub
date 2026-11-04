@@ -95,6 +95,33 @@ pub enum Error {
     /// 插件已经不可用（进程崩溃、管道断开），需要重新拉起。
     #[error("插件已失效：{0}")]
     PluginDegraded(String),
+
+    // ---- F20 Python sidecar（spec §4.5，只新增不改既有）----
+    // `impl Serialize` 统一用 `to_string()`，跨 IPC 仍是字符串，无需改 Serialize。
+
+    /// 启动 Python sidecar 子进程失败（解释器不存在、权限不足、命令行非法）。
+    #[error("Python sidecar 启动失败：{0}")]
+    SidecarSpawn(String),
+
+    /// 握手未按约定完成：版本主号不一致、必需能力缺失、runtime 名字不符。
+    #[error("Python sidecar 握手失败：{0}")]
+    SidecarHandshake(String),
+
+    /// 握手 / 方法调用在超时时间内没有回包（进程还活着，只是不响应）。
+    #[error("Python sidecar 调用超时：{0}")]
+    SidecarTimeout(String),
+
+    /// 收到了不符合 JSON-RPC 2.0 / 本协议约定的数据（服务端返回 error 等）。
+    #[error("Python sidecar 协议错误：{0}")]
+    SidecarProtocol(String),
+
+    /// sidecar 已不可用（stdout 关闭、写 stdin 失败），需要重新拉起。
+    #[error("Python sidecar 降级：{0}")]
+    SidecarDegraded(String),
+
+    /// sidecar 尚未启动或已停止，调用方却请求了需要活进程的操作。
+    #[error("Python sidecar 不可用：{0}")]
+    SidecarUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
