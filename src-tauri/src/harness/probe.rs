@@ -45,7 +45,13 @@ pub fn candidate_paths(dir: &Path, name: &str) -> Vec<PathBuf> {
 /// 这里只要求「前两段是数字」，其余部分原样保留。
 pub fn parse_version(raw: &str) -> Option<String> {
     raw.split_whitespace()
-        .map(|token| token.trim_start_matches('v'))
+        .map(|token| {
+            // 真机取证（2026-10-25，Copilot CLI）：`GitHub Copilot CLI 1.0.91.`——
+            // 句末句号会被一起当成 token。剥掉首尾的非字母数字饰边（v 前缀、尾点）。
+            token
+                .trim_start_matches('v')
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        })
         .find(|token| {
             let mut parts = token.split('.');
             match (parts.next(), parts.next()) {
@@ -208,6 +214,18 @@ mod tests {
             Some("0.152.1".to_string())
         );
         assert_eq!(parse_version("codex-cli 1.2"), Some("1.2".to_string()));
+    }
+
+    /// 真机取证（2026-10-25，Copilot CLI 1.0.91）：句末句号与 update 提示行
+    /// 不得混进版本号。
+    #[test]
+    fn parse_version_strips_trailing_punctuation_and_ignores_hint_lines() {
+        assert_eq!(
+            parse_version(
+                "GitHub Copilot CLI 1.0.91.\nRun 'copilot update' to check for updates.\n"
+            ),
+            Some("1.0.91".to_string())
+        );
     }
 
     #[test]

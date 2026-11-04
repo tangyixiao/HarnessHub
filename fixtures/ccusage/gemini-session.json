@@ -1,0 +1,68 @@
+{
+  "session": [
+    {
+      "agent": "gemini",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 9800,
+      "inputTokens": 1200,
+      "metadata": {
+        "lastActivity": "2026-10-18T09:30:12.000Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 9800,
+          "cost": 0.0042,
+          "inputTokens": 1200,
+          "modelName": "gemini-3-flash-preview",
+          "outputTokens": 45
+        }
+      ],
+      "modelsUsed": ["gemini-3-flash-preview"],
+      "outputTokens": 45,
+      "period": "00000000-0000-4000-8000-000000000006",
+      "totalCost": 0.0042,
+      "totalTokens": 11395
+    },
+    {
+      "agent": "gemini",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 87000,
+      "inputTokens": 6380,
+      "metadata": {
+        "lastActivity": "2026-10-22T21:05:44.000Z"
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 72000,
+          "cost": 0.0831,
+          "inputTokens": 5400,
+          "modelName": "gemini-3-pro-preview",
+          "outputTokens": 310
+        },
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 15000,
+          "cost": 0.0008,
+          "inputTokens": 980,
+          "modelName": "gemini-2.5-flash",
+          "outputTokens": 120
+        }
+      ],
+      "modelsUsed": ["gemini-2.5-flash", "gemini-3-pro-preview"],
+      "outputTokens": 430,
+      "period": "00000000-0000-4000-8000-000000000007",
+      "totalCost": 0.0839,
+      "totalTokens": 96410
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 96800,
+    "inputTokens": 7580,
+    "outputTokens": 475,
+    "totalCost": 0.0881,
+    "totalTokens": 107805
+  }
+}

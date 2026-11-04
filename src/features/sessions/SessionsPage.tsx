@@ -6,7 +6,11 @@ import { harnessIdentity } from '@/lib/harness-colors';
 import { cn } from '@/lib/utils';
 import {
   NOT_IN_TAURI,
+  getSessionGitSnapshots,
+  getSessionGitSummary,
   listSessions,
+  type SessionGitSnapshot,
+  type SessionGitSummary,
   type SessionRecord,
   type SessionStatus,
   type TerminationReason,
@@ -169,6 +173,33 @@ export function SessionsPage() {
 
 function SessionCard({ session }: { session: SessionRecord }) {
   const identity = harnessIdentity(session.harnessId ?? '');
+  const [gitSnapshots, setGitSnapshots] = useState<SessionGitSnapshot[] | null>(null);
+  const [gitSummary, setGitSummary] = useState<SessionGitSummary | null>(null);
+
+  // Git 快照是 best-effort 观测：读取失败或没有快照（cwd 缺失 / 非 Git 仓库）时
+  // 完全不渲染区块 —— 不报错也不转圈，绝不影响卡片其余内容。
+  // 摘要与快照并行拉取：摘要按需现算（后端锁外至多两条有界 git 命令），
+  // 没有窗口（缺快照 / unborn HEAD）时后端直接给 null，不起进程。
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const [snapshotsResult, summaryResult] = await Promise.all([
+        getSessionGitSnapshots(session.hubSessionId),
+        getSessionGitSummary(session.hubSessionId),
+      ]);
+      if (cancelled) return;
+
+      setGitSnapshots(
+        snapshotsResult.ok && snapshotsResult.data.length > 0 ? snapshotsResult.data : null,
+      );
+      setGitSummary(summaryResult.ok ? summaryResult.data : null);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session.hubSessionId]);
 
   return (
     <section aria-label={session.hubSessionId}>
@@ -221,8 +252,65 @@ function SessionCard({ session }: { session: SessionRecord }) {
             ? ' · 无外部 source session id（由 Harness Hub 创建）'
             : ` · 外部 session：${session.sourceSessionId}`}
         </p>
+
+        {gitSnapshots !== null ? (
+          <GitSnapshotBlock snapshots={gitSnapshots} windowSummary={gitSummary} />
+        ) : null}
       </Card>
     </section>
+  );
+}
+
+/** head 短 sha（前 7 位）。仓库还没有任何提交（unborn HEAD）时如实显示，不编造 sha。 */
+function shortHead(head: string | null): string {
+  return head === null ? 'unborn（无提交）' : head.slice(0, 7);
+}
+
+/**
+ * 「Git · 会话期间的变更」区块。
+ *
+ * 用词纪律（规划 R5）：这里展示的是**仓库状态**（head 迁移 + 四类文件计数 +
+ * start..end 窗口摘要），不是产出归因 —— 绝不能写「AI 写了 N 行」这类
+ * 声称变更是谁做的文案。
+ */
+function GitSnapshotBlock({
+  snapshots,
+  windowSummary,
+}: {
+  snapshots: SessionGitSnapshot[];
+  windowSummary: SessionGitSummary | null;
+}) {
+  const start = snapshots.find((snapshot) => snapshot.phase === 'start') ?? null;
+  const end = snapshots.find((snapshot) => snapshot.phase === 'end') ?? null;
+  // 四类计数是快照时刻的工作区状态：优先取会话结束时刻；只有 start 时如实展示 start 的。
+  const counts = end ?? start;
+
+  if (counts === null) {
+    return null;
+  }
+
+  // 两端都有快照时展示 head 的迁移；只有一端时只展示那一端，不编造另一端。
+  const head =
+    start !== null && end !== null
+      ? `${shortHead(start.head)} → ${shortHead(end.head)}`
+      : shortHead(counts.head);
+
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-3">
+      <p className="text-[11px] font-medium text-content-muted">
+        Git · 会话期间的变更
+        {windowSummary === null
+          ? ''
+          : `（${windowSummary.commits} commits · +${windowSummary.insertions} / −${windowSummary.deletions}）`}
+      </p>
+      <dl className="mt-2 grid gap-3 text-xs sm:grid-cols-5">
+        <Field label="HEAD" value={head} mono />
+        <Field label="已暂存文件" value={String(counts.stagedFiles)} />
+        <Field label="未暂存文件" value={String(counts.unstagedFiles)} />
+        <Field label="未跟踪文件" value={String(counts.untrackedFiles)} />
+        <Field label="冲突文件" value={String(counts.conflictedFiles)} />
+      </dl>
+    </div>
   );
 }
 

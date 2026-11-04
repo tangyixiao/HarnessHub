@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::launch::LaunchSpec;
 
 /// Harness 的规范标识，例如 `codex` / `claude-code` / `gemini-cli`。
@@ -51,6 +51,12 @@ pub struct HarnessCapabilities {
     pub subagents: bool,
     pub live_state: bool,
     pub worktree: bool,
+    /// 配置投影（read→parse→validate→backup→atomic write→verify 管线，E15）。
+    /// 只有走完这条管线并有测试回归的 harness 才能为 true。
+    pub profiles: bool,
+    /// 记忆文件投影（CLAUDE.md / AGENTS.md / GEMINI.md 标记块渲染，E19）。
+    /// 文件名映射 + 渲染器实现且有测试回归才为 true。
+    pub prompts: bool,
 }
 
 /// 检测结果：是否安装、binary 在哪、版本、以及可供只读访问的数据路径。
@@ -129,6 +135,18 @@ pub trait HarnessAdapter: Send + Sync {
     /// 的可执行形态）全部在这一层解决。PTY 层只执行 [`LaunchSpec`]，
     /// **不得**自己拼 shell 命令字符串。
     fn build_launch_spec(&self, request: LaunchRequest) -> Result<LaunchSpec>;
+
+    /// 生成**恢复已有会话**的启动描述（ROADMAP B9）。
+    ///
+    /// 默认不支持：capability `resume` 为 false 的 harness 必须保持默认实现，
+    /// UI 也不会渲染恢复入口。覆写的适配器必须同步把 `capabilities.resume` 翻 true
+    /// 并给出证据（fixture 拼接 + 真机参数确认）。
+    fn build_resume_spec(&self, _request: ResumeRequest) -> Result<LaunchSpec> {
+        Err(Error::InvalidInput(format!(
+            "{} 尚未支持恢复会话（capability resume = false）",
+            self.display_name()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +159,8 @@ mod tests {
             launch: true,
             tool_calls: true,
             live_state: true,
+            profiles: true,
+            prompts: true,
             ..HarnessCapabilities::default()
         };
 
@@ -150,6 +170,8 @@ mod tests {
         assert_eq!(json["launch"], true);
         assert_eq!(json["toolCalls"], true, "IPC 契约是 camelCase");
         assert_eq!(json["liveState"], true);
+        assert_eq!(json["profiles"], true, "E15 投影能力位同样是 camelCase");
+        assert_eq!(json["prompts"], true, "E19 记忆文件投影能力位");
         assert!(
             json.get("tool_calls").is_none(),
             "不得输出 snake_case 键：前端读的是 toolCalls"
@@ -172,6 +194,8 @@ mod tests {
                 subagents: false,
                 live_state: false,
                 worktree: false,
+                profiles: false,
+                prompts: false,
             },
             "默认必须是「全不支持」，避免未实现就宣称能力"
         );

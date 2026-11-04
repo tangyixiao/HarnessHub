@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::clock;
 use crate::error::{Error, Result};
 use crate::harness::store::find_installation;
-use crate::session::store::{NewSession, SessionRecord, SessionStore, TerminationReason};
+use crate::session::store::{
+    LaunchMode, NewSession, SessionRecord, SessionStore, TerminationReason,
+};
 
 /// Session 表的编排入口。
 pub struct SessionService<'conn> {
@@ -44,6 +46,21 @@ impl<'conn> SessionService<'conn> {
         project_id: Option<&str>,
         cwd: Option<&str>,
     ) -> Result<SessionRecord> {
+        self.start_with_worktree(installation_id, project_id, cwd, None)
+    }
+
+    /// 同上，但显式记录 worktree 绑定（ROADMAP C10）。
+    ///
+    /// `worktree_path` 只应来自 Hub 自己的 `worktree add`/`worktree list`
+    /// 结果（cwd 已指向该路径时二者一致）；这里只落库，不做路径校验
+    /// （校验在 IPC 层与 git::worktree）。
+    pub fn start_with_worktree(
+        &self,
+        installation_id: &str,
+        project_id: Option<&str>,
+        cwd: Option<&str>,
+        worktree_path: Option<&str>,
+    ) -> Result<SessionRecord> {
         let installation = find_installation(self.conn, installation_id)?.ok_or_else(|| {
             Error::InvalidInput(format!(
                 "未知的安装：{installation_id}（先同步 Harness 清单）"
@@ -62,6 +79,46 @@ impl<'conn> SessionService<'conn> {
         session.installation_id = Some(installation.id);
         session.project_id = project_id.map(str::to_string);
         // 缺省 cwd 写 NULL，而不是空串：空串会让「未记录 cwd」和「cwd 是空目录」混淆。
+        session.cwd = cwd.map(str::to_string);
+        session.worktree_path = worktree_path.map(str::to_string);
+
+        self.store.insert(&session)?;
+
+        self.store
+            .get(&hub_session_id)?
+            .ok_or_else(|| Error::InvalidInput("刚写入的会话读不回来".to_string()))
+    }
+
+    /// 恢复一条外部会话（ROADMAP B9）：新 hub_session_id + 关联外部
+    /// `source_session_id` + `launch_mode = resume`。
+    ///
+    /// 同一 (harness, source_session_id) 重复恢复会被数据库唯一索引拒绝
+    /// —— 这是**幂等契约**而不是错误路径缺陷：该外部会话已在 Harness Hub
+    /// 有记录时应当续用既有记录，调用方把错误如实报给用户即可。
+    pub fn resume_from_installation(
+        &self,
+        installation_id: &str,
+        source_session_id: &str,
+        cwd: Option<&str>,
+    ) -> Result<SessionRecord> {
+        let installation = find_installation(self.conn, installation_id)?.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "未知的安装：{installation_id}（先同步 Harness 清单）"
+            ))
+        })?;
+
+        let hub_session_id = Uuid::new_v4().to_string();
+        let started_at = clock::now_rfc3339();
+
+        let mut session = NewSession::new(
+            hub_session_id.as_str(),
+            &installation.harness_id,
+            &installation.runtime_target_id,
+            started_at.as_str(),
+        )
+        .with_source_session_id(source_session_id)
+        .with_launch_mode(LaunchMode::Resume);
+        session.installation_id = Some(installation.id);
         session.cwd = cwd.map(str::to_string);
 
         self.store.insert(&session)?;
@@ -364,6 +421,29 @@ mod tests {
             .expect("登记");
 
         assert_eq!(record.project_id.as_deref(), Some("p1"));
+    }
+
+    /// C10：start_with_worktree 落 worktree_path；不传时保持 NULL。
+    #[test]
+    fn start_with_worktree_records_the_binding() {
+        let db = seeded_db();
+        let service = service_from(&db);
+
+        let bound = service
+            .start_with_worktree(
+                &installation(),
+                None,
+                Some("D:/wt/feature"),
+                Some("D:/wt/feature"),
+            )
+            .expect("绑定会话");
+        assert_eq!(bound.worktree_path.as_deref(), Some("D:/wt/feature"));
+        assert_eq!(bound.cwd.as_deref(), Some("D:/wt/feature"));
+
+        let plain = service
+            .start_with_worktree(&installation(), None, None, None)
+            .expect("普通会话");
+        assert_eq!(plain.worktree_path, None, "不传必须保持 NULL");
     }
 
     #[test]

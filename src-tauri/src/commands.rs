@@ -200,8 +200,595 @@ pub fn finish_session(
     exit_code: Option<i32>,
     reason: TerminationReason,
 ) -> Result<bool> {
+    let updated = {
+        let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+        SessionService::new(database.connection()).finish(&hub_session_id, exit_code, reason)
+    }?;
+
+    // 终态真的写入后才补拍 end 快照（best-effort，后台线程；git 子进程不进数据库锁）。
+    if updated {
+        crate::git::service::spawn_capture(
+            Arc::clone(&state.db),
+            &hub_session_id,
+            crate::git::SnapshotPhase::End,
+        );
+    }
+
+    Ok(updated)
+}
+
+/// 某个会话的 Git 快照（start / end）。**纯读**：只查 SQLite（ADR-0012）。
+///
+/// 没有行不代表「没有变化」：cwd 缺失 / 非 Git 仓库 / 拍摄失败都不落行
+/// （见 `git::service`）。UI 文案必须遵守 R5：快照只描述
+/// 「会话期间的变更」，不得声称代码由 AI 编写。
+#[tauri::command]
+pub fn session_git_snapshots(
+    state: State<'_, AppState>,
+    hub_session_id: String,
+) -> Result<Vec<crate::git::SessionGitSnapshot>> {
     let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
-    SessionService::new(database.connection()).finish(&hub_session_id, exit_code, reason)
+    crate::git::GitSnapshotStore::new(database.connection()).list_by_session(&hub_session_id)
+}
+
+/// 会话窗口 Git 摘要（ROADMAP A3）：start..end 的 commit 数与 ±行数。
+///
+/// 纯读 + 按需现算（不落库、不缓存）：短锁读快照输入，**锁外**跑至多两条
+/// 有界 git 命令（每条 3 秒上限）。`None` = 没有窗口（缺快照 / unborn HEAD /
+/// 仓库不可达 / 同 HEAD 之外形态不认识）—— UI 如实不显示，不猜。
+#[tauri::command]
+pub fn session_git_summary(
+    state: State<'_, AppState>,
+    hub_session_id: String,
+) -> Result<Option<crate::git::WindowSummary>> {
+    let inputs = {
+        let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+        crate::git::window::window_inputs(database.connection(), &hub_session_id)?
+    };
+
+    Ok(inputs.and_then(|inputs| {
+        crate::git::window::window_summary(
+            &inputs.worktree_root,
+            &inputs.start_head,
+            &inputs.end_head,
+        )
+    }))
+}
+
+/* ------------------------------------------------------------------ *
+ * 只读会话回放（ROADMAP B6）
+ *
+ * 能力门控：只对 `replay` capability 为 true 的 Harness 开放（当前只有
+ * Claude Code）。**IPC 不接受文件系统路径**：按 session_id 由后端从自己的
+ * 发现结果解析（路径白名单，防任意文件读取）。
+ * ------------------------------------------------------------------ */
+
+/// 回放数据根：来自 harness 检测的 data_paths（只读发现，ADR-0003）。
+fn replay_roots(state: &State<'_, AppState>, harness_id: &str) -> Result<Vec<std::path::PathBuf>> {
+    let summary = state
+        .harnesses
+        .summaries(runtime::local::LOCAL_TARGET_ID)
+        .into_iter()
+        .find(|summary| summary.id == harness_id)
+        .ok_or_else(|| Error::InvalidInput(format!("未注册的 Harness：{harness_id}")))?;
+
+    if !summary.capabilities.replay {
+        return Err(Error::InvalidInput(format!(
+            "{harness_id} 不支持回放（capability replay = false）"
+        )));
+    }
+
+    Ok(summary
+        .data_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect())
+}
+
+/// 某个 Harness 的可回放会话列表（只读发现 + 有界预读，不落库）。
+#[tauri::command]
+pub fn replay_list_sessions(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::replay::ReplaySessionSummary>> {
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        // 其它 harness 尚未实现回放解析：空列表（capability 层也拦着，这里双保险）。
+        return Ok(Vec::new());
+    }
+    Ok(crate::replay::claude::list_sessions(&replay_roots(
+        &state,
+        &harness_id,
+    )?))
+}
+
+/// 读取一条回放（按 session_id，路径由后端白名单解析）。
+///
+/// 没有命中发现结果 → `None`；转录超过大小上限 → 明确报错（不猜）。
+#[tauri::command]
+pub fn replay_read_session(
+    state: State<'_, AppState>,
+    harness_id: String,
+    session_id: String,
+) -> Result<Option<crate::replay::ReplaySession>> {
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        return Ok(None);
+    }
+    crate::replay::claude::read_session_by_id(&replay_roots(&state, &harness_id)?, &session_id)
+}
+
+/* ------------------------------------------------------------------ *
+ * 回放搜索（ROADMAP B7，migration 0011）
+ *
+ * 设置与搜索是纯 SQLite 操作；reindex 是显式用户动作（读外部转录、
+ * 写索引表），按 ADR-0012 的读写分离纪律不得在渲染路径自动触发。
+ * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Worktree（ROADMAP C10）
+ *
+ * list 纯读；add 是**显式用户动作**（写磁盘），repo_root 必须命中已登记
+ * 项目（防任意路径写），目标路径不允许位于仓库内部（git::worktree 红线）。
+ * ------------------------------------------------------------------ */
+
+/// 按传入 repoRoot 找已登记项目（兼容 repo_root 的两种存储形态）。
+fn require_registered_project(
+    state: &State<'_, AppState>,
+    repo_root: &str,
+) -> Result<crate::project::ProjectRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let store = crate::project::store::ProjectStore::new(database.connection());
+    store
+        .get_by_repo_root(repo_root)?
+        .or_else(|| {
+            // projects.repo_root 由 GitRootProbe 落库（canonicalize 形态）；
+            // 前端可能传同一路径的其它表示。
+            std::path::Path::new(repo_root)
+                .canonicalize()
+                .ok()
+                .and_then(|canonical| {
+                    store
+                        .get_by_repo_root(&canonical.to_string_lossy())
+                        .unwrap_or(None)
+                })
+        })
+        .ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "未登记的项目根：{repo_root}（先在 Projects 页登记）"
+            ))
+        })
+}
+
+/// 某个已登记项目的全部 worktree。**纯读**。
+#[tauri::command]
+pub fn worktree_list(
+    state: State<'_, AppState>,
+    repo_root: String,
+) -> Result<Vec<crate::git::WorktreeEntry>> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::list(std::path::Path::new(&repo_root))
+}
+
+/// 创建 worktree（显式用户动作；前端必须二次确认「将在磁盘创建目录」）。
+#[tauri::command]
+pub fn worktree_add(
+    state: State<'_, AppState>,
+    repo_root: String,
+    path: String,
+    branch: String,
+    create_branch: bool,
+) -> Result<crate::git::WorktreeEntry> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::add(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&path),
+        &branch,
+        create_branch,
+    )
+}
+
+/// 某 worktree 的未提交修改计数。**纯读**（ROADMAP C11）。
+#[tauri::command]
+pub fn worktree_status(
+    state: State<'_, AppState>,
+    repo_root: String,
+    worktree_path: String,
+) -> Result<crate::git::WorktreeStatusCounts> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::status_counts(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&worktree_path),
+    )
+}
+
+/// 删除一条**干净**的链接 worktree（显式用户动作；脏树/主树拒绝）。
+#[tauri::command]
+pub fn worktree_remove(
+    state: State<'_, AppState>,
+    repo_root: String,
+    worktree_path: String,
+) -> Result<()> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::remove(
+        std::path::Path::new(&repo_root),
+        std::path::Path::new(&worktree_path),
+    )
+}
+
+/// 把分支快进合并到主工作树（显式用户动作；主树脏/非 ff 拒绝）。
+#[tauri::command]
+pub fn worktree_merge(
+    state: State<'_, AppState>,
+    repo_root: String,
+    branch: String,
+) -> Result<crate::git::MergeOutcome> {
+    require_registered_project(&state, &repo_root)?;
+    crate::git::worktree::merge_ff_only(std::path::Path::new(&repo_root), &branch)
+}
+
+/// 回放搜索设置（默认关闭；关闭时后端已清空索引）。
+#[tauri::command]
+pub fn replay_search_settings_get(
+    state: State<'_, AppState>,
+) -> Result<crate::replay::index::SearchSettings> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::settings(database.connection())
+}
+
+/// 更新设置：关闭 = 清空索引；收紧排除名单 = 立即清掉对应索引行。
+#[tauri::command]
+pub fn replay_search_settings_set(
+    state: State<'_, AppState>,
+    settings: crate::replay::index::SearchSettings,
+) -> Result<()> {
+    let mut database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::set_settings(database.connection_mut(), &settings)
+}
+
+/// Provider 配置现状的只读发现（ROADMAP E14）。
+///
+/// **纯读**：解析现有配置文件，不写任何外部文件（投影是 E15）。
+/// secret 值在 Rust 层 redact（`<redacted>` / `set`/`unset`），契约测试锁定。
+#[tauri::command]
+pub fn profile_discover(
+    _state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Option<crate::profile::ProfileSummary>> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    match harness_id.as_str() {
+        crate::harness::adapters::claude_code::CLAUDE_ID => crate::profile::claude::discover(&home),
+        "codex" => crate::profile::codex::discover(&home),
+        "gemini" => crate::profile::gemini::discover(&home),
+        other => Err(Error::InvalidInput(format!(
+            "{other} 的配置发现尚未实现（当前支持 claude/codex/gemini）"
+        ))),
+    }
+}
+
+/// 配置体检（ROADMAP E17）。**纯读**：只诊断 + 建议，
+/// 不自动修复（修复走 E15 投影/恢复，显式动作）。
+///
+/// `credentials_reachable` 在命令层合并（需要 DB 连接；`diagnose` 保持纯函数）。
+#[tauri::command]
+pub fn config_doctor(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::profile::doctor::CheckItem>> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    let mut items = crate::profile::doctor::diagnose(&home, &harness_id)?;
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    items.push(crate::profile::doctor::credentials_check(
+        database.connection(),
+        &harness_id,
+    ));
+    Ok(items)
+}
+
+/* ------------------------------------------------------------------ *
+ * Profile Plane 接线收尾（E15 投影 / E16 凭据；spec 2026-10-30）
+ * ------------------------------------------------------------------ */
+
+/// 投影目标白名单：E15 的投影只对 claude 开放（`~/.claude/settings.json`）。
+///
+/// 返回目标文件路径；其余 harness 明确报错而不是猜测目标。
+fn projection_target(harness_id: &str) -> Result<std::path::PathBuf> {
+    use crate::harness::probe::HostProbe;
+    if harness_id != crate::harness::adapters::claude_code::CLAUDE_ID {
+        return Err(Error::InvalidInput(format!(
+            "{harness_id} 的配置投影尚未实现（当前仅 claude；各自格式差异大，逐个加）"
+        )));
+    }
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    Ok(home.join(".claude").join("settings.json"))
+}
+
+/// 把 `fields` 安全投影进 claude 的 `~/.claude/settings.json`（ROADMAP E15）。
+///
+/// **显式写动作**：走 read→parse→merge→backup→temp→verify→rename 完整管线；
+/// 坏结果绝不落盘，投影前自动备份。`fields` 的键允许 `env.X` 嵌套形式。
+#[tauri::command]
+pub fn profile_project(
+    _state: State<'_, AppState>,
+    harness_id: String,
+    fields: std::collections::BTreeMap<String, String>,
+) -> Result<crate::profile::projection::ProjectionReport> {
+    let target = projection_target(&harness_id)?;
+    let (rendered, _) = crate::profile::projection::plan(&target, &fields)?;
+    crate::profile::projection::apply(&target, &rendered, &harness_id)
+}
+
+/// 某个 harness 的投影备份列表（Hub 自己的备份目录，按时间倒序）。**纯读**。
+#[tauri::command]
+pub fn profile_backups(
+    _state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::profile::projection::BackupInfo>> {
+    projection_target(&harness_id)?; // 白名单校验（备份目录名不收外部任意串）。
+    crate::profile::projection::list_backups(&harness_id)
+}
+
+/// 恢复到某个备份（E15 恢复入口，显式动作）。
+///
+/// 恢复目标**永远来自后端自己的备份记录**：命令按 id 在备份目录里查找，
+/// 不接受前端传路径——防止伪造 `target_path` 任意覆盖文件。
+#[tauri::command]
+pub fn profile_restore(
+    _state: State<'_, AppState>,
+    harness_id: String,
+    backup_id: String,
+) -> Result<()> {
+    projection_target(&harness_id)?;
+    let backups = crate::profile::projection::list_backups(&harness_id)?;
+    let backup = backups
+        .iter()
+        .find(|item| item.id == backup_id)
+        .ok_or_else(|| Error::InvalidInput(format!("备份不存在：{backup_id}")))?;
+    crate::profile::projection::restore(backup)
+}
+
+/// 登记凭据：值进 Secret Store，句柄进 SQLite（E16）。
+///
+/// **值只进不出**：只在登记这一次跨 IPC，之后任何列表/查询都不再返回值。
+#[tauri::command]
+pub fn credential_register(
+    state: State<'_, AppState>,
+    harness_id: String,
+    label: String,
+    value: String,
+) -> Result<crate::credentials::CredentialRefRecord> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::register(database.connection(), &harness_id, &label, &value)
+}
+
+/// 凭据句柄列表（**无值**；值在 store，句柄只是引用）。**纯读**。
+#[tauri::command]
+pub fn credential_list(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<Vec<crate::credentials::CredentialRefRecord>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::list(database.connection(), &harness_id)
+}
+
+/// 删除凭据：先删 store 值（幂等），再删句柄行。显式动作，前端 confirm。
+#[tauri::command]
+pub fn credential_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::credentials::registry::remove(database.connection(), &id)
+}
+
+/* ------------------------------------------------------------------ *
+ * MCP Binding Registry（ROADMAP E18；spec 2026-10-31-mcp-binding-registry-design.md）
+ * ------------------------------------------------------------------ */
+
+/// 已登记的 MCP Server 列表（**无 secret**——envKeys 只是变量名）。**纯读**。
+#[tauri::command]
+pub fn mcp_server_list(state: State<'_, AppState>) -> Result<Vec<crate::mcp::McpServer>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::list_servers(database.connection())
+}
+
+/// 新增 / 更新 MCP Server（显式动作）。校验：stdio 必须有 command、http 必须有 url、
+/// name 限安全字符。
+#[tauri::command]
+pub fn mcp_server_upsert(
+    state: State<'_, AppState>,
+    input: crate::mcp::registry::McpServerInput,
+) -> Result<crate::mcp::McpServer> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::upsert_server(database.connection(), &input)
+}
+
+/// 删除 MCP Server（绑定级联）。显式动作，前端 confirm。
+#[tauri::command]
+pub fn mcp_server_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::remove_server(database.connection(), &id)
+}
+
+/// 全部绑定（含 server 名冗余）。**纯读**。
+#[tauri::command]
+pub fn mcp_binding_list(state: State<'_, AppState>) -> Result<Vec<crate::mcp::McpBinding>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::list_bindings(database.connection())
+}
+
+/// 添加绑定（global 或 harness）。绑定只是 Registry 内声明，**不写文件**。
+#[tauri::command]
+pub fn mcp_binding_add(
+    state: State<'_, AppState>,
+    server_id: String,
+    scope: String,
+    harness_id: Option<String>,
+) -> Result<crate::mcp::McpBinding> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::add_binding(
+        database.connection(),
+        &server_id,
+        &scope,
+        harness_id.as_deref(),
+    )
+}
+
+/// 删除绑定。
+#[tauri::command]
+pub fn mcp_binding_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::registry::remove_binding(database.connection(), &id)
+}
+
+/// 同步预览：desired vs 现有配置的 mcpServers 段差异。**纯读**；
+/// apply 前必须由用户 confirm（UI 文案含 targetPath）。
+#[tauri::command]
+pub fn mcp_sync_preview(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpSyncPreview> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::preview(database.connection(), &harness_id)
+}
+
+/// 执行同步（**显式写动作**）：调和 mcpServers 段 → E15 原子管线落盘
+/// （backup → temp → verify → rename；codex 走 toml_edit 保格式）。
+#[tauri::command]
+pub fn mcp_sync_apply(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpSyncReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::apply(database.connection(), &harness_id)
+}
+
+/// 从现有 harness 配置导入 MCP 条目（**显式动作**）。
+///
+/// 同名跳过（Registry 是 source-of-truth，以 Hub 为准）；env 只取变量名。
+#[tauri::command]
+pub fn mcp_import(
+    state: State<'_, AppState>,
+    harness_id: String,
+) -> Result<crate::mcp::sync::McpImportReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::mcp::sync::import(database.connection(), &harness_id)
+}
+
+/* ------------------------------------------------------------------ *
+ * Prompts Registry + Skills 只读发现（ROADMAP E19；spec 2026-10-31-skills-prompts-tray-design.md）
+ * ------------------------------------------------------------------ */
+
+/// prompt 列表。`project_id` 过滤：Some = 该项目绑定 + 全局；None = 全部。**纯读**。
+#[tauri::command]
+pub fn prompt_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<crate::prompts::PromptArtifact>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::list_prompts(database.connection(), project_id.as_deref())
+}
+
+/// 新增 / 更新 prompt（显式动作）。
+#[tauri::command]
+pub fn prompt_upsert(
+    state: State<'_, AppState>,
+    input: crate::prompts::registry::PromptInput,
+) -> Result<crate::prompts::PromptArtifact> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::upsert_prompt(database.connection(), &input)
+}
+
+/// 删除 prompt。显式动作，前端 confirm。
+#[tauri::command]
+pub fn prompt_remove(state: State<'_, AppState>, id: String) -> Result<bool> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::prompts::registry::remove_prompt(database.connection(), &id)
+}
+
+/// 记忆文件投影预览（**纯读**）：目标路径 + 将写全文 + 是否新建。
+///
+/// `project_id` 为 None 时只渲染全局 prompt（目标仍是某个项目根目录——
+/// 全局 prompt 进每个项目；apply 必须指定具体项目）。
+#[tauri::command]
+pub fn prompt_render_preview(
+    state: State<'_, AppState>,
+    project_id: String,
+    harness_id: String,
+) -> Result<crate::prompts::render::PromptRenderPreview> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let repo_root = project_repo_root(database.connection(), &project_id)?;
+    crate::prompts::render::render_preview(
+        database.connection(),
+        std::path::Path::new(&repo_root),
+        &harness_id,
+        Some(&project_id),
+    )
+}
+
+/// 执行记忆文件投影（**显式写动作**）：E15 文本管线落盘；前端 confirm
+/// 文案必须列出将修改的文件路径（preview 的 targetPath）。
+#[tauri::command]
+pub fn prompt_render_apply(
+    state: State<'_, AppState>,
+    project_id: String,
+    harness_id: String,
+) -> Result<crate::profile::projection::ProjectionReport> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let repo_root = project_repo_root(database.connection(), &project_id)?;
+    crate::prompts::render::render_apply(
+        database.connection(),
+        std::path::Path::new(&repo_root),
+        &harness_id,
+        Some(&project_id),
+    )
+}
+
+/// 已登记项目的 repo_root（不存在 = 明确错误）。
+fn project_repo_root(conn: &rusqlite::Connection, project_id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT repo_root FROM projects WHERE id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| Error::InvalidInput(format!("未登记的项目：{project_id}（{error}）")))
+}
+
+/// 只读发现 `~/.claude/skills/`（E19 缩范围：Hub 只发现展示，不复制投影）。**纯读**。
+#[tauri::command]
+pub fn skills_list(_state: State<'_, AppState>) -> Result<crate::skills::SkillsReport> {
+    use crate::harness::probe::HostProbe;
+    let probe = crate::harness::probe::SystemHostProbe::new();
+    let home = probe
+        .home_dir()
+        .ok_or_else(|| Error::InvalidInput("无法确定 home 目录".to_string()))?;
+    crate::skills::discover(&home)
+}
+
+/// 显式重建/增量更新索引（用户动作；未启用时报明确错误）。
+#[tauri::command]
+pub fn replay_search_reindex(
+    state: State<'_, AppState>,
+) -> Result<crate::replay::index::ReindexReport> {
+    let mut database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    let roots = replay_roots(&state, crate::harness::adapters::claude_code::CLAUDE_ID)?;
+    crate::replay::index::reindex(database.connection_mut(), &roots)
+}
+
+/// 搜索已索引的回放内容（纯读 SQLite；<3 字符报错——trigram 下限）。
+#[tauri::command]
+pub fn replay_search(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<crate::replay::index::SearchHit>> {
+    let database = state.db.lock().map_err(|_| Error::StateLockPoisoned)?;
+    crate::replay::index::search(database.connection(), &query)
 }
 
 /// 最近会话，按开始时间倒序。
@@ -303,10 +890,64 @@ pub fn start_terminal(
         .start(&installation_id, cwd.as_deref(), cols, rows, Some(emitter))
 }
 
+/// 启动并绑定 worktree 的终端会话（ROADMAP C10）。
+///
+/// `worktreePath` 必须是 `worktree_list(repoRoot)` 返回过的路径（前端从列表选）；
+/// 后端不重复校验路径合法性——校验发生在 `worktree_add` / `worktree_list`。
+#[tauri::command]
+pub fn start_terminal_in_worktree(
+    state: State<'_, AppState>,
+    installation_id: String,
+    cwd: Option<String>,
+    worktree_path: String,
+    cols: u16,
+    rows: u16,
+    output: Channel<PtyEvent>,
+) -> Result<SessionRecord> {
+    let emitter: Emitter = Arc::new(move |event| {
+        let _ = output.send(event);
+    });
+
+    state.terminal.start_with_worktree(
+        &installation_id,
+        cwd.as_deref(),
+        Some(&worktree_path),
+        cols,
+        rows,
+        Some(emitter),
+    )
+}
+
 /// 把用户输入（含终端协议响应，例如 xterm.js 对 DSR 的回答）写入 PTY。
 #[tauri::command]
 pub fn write_terminal(state: State<'_, AppState>, session_id: String, data: Vec<u8>) -> Result<()> {
     state.terminal.write(&session_id, &data)
+}
+
+/// 恢复一条外部会话（ROADMAP B9）：`--resume <source_session_id>`，
+/// capability `resume` 为 false 的 harness 在适配器层报明确错误。
+#[tauri::command]
+pub fn resume_terminal(
+    state: State<'_, AppState>,
+    installation_id: String,
+    source_session_id: String,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+    output: Channel<PtyEvent>,
+) -> Result<SessionRecord> {
+    let emitter: Emitter = Arc::new(move |event| {
+        let _ = output.send(event);
+    });
+
+    state.terminal.start_resume(
+        &installation_id,
+        &source_session_id,
+        cwd.as_deref(),
+        cols,
+        rows,
+        Some(emitter),
+    )
 }
 
 /// 调整 PTY 尺寸。
@@ -530,6 +1171,7 @@ mod tests {
     use super::*;
     use crate::usage::importer::Reconciliation;
     use crate::usage::{ImportStatus, RunnerKind, UsageImport};
+    use std::collections::BTreeMap;
     /// 跨 IPC 契约测试：`refresh_usage` 的返回形状。
     ///
     /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageRefreshReport` 依赖这些键，
@@ -576,6 +1218,329 @@ mod tests {
         assert_eq!(json["reconciliation"]["costMicrounitsDelta"], 4);
         assert_eq!(json["reconciliation"]["tokensIdentityHolds"], true);
         assert!(json.get("import").is_some() && json.get("reconciliation").is_some());
+    }
+
+    /// 跨 IPC 契约测试：`session_git_snapshots` 返回的快照形状（ROADMAP A1）。
+    ///
+    /// 前端 `normalizeSessionGitSnapshot`（src/lib/ipc.ts）按这些键取值：
+    /// 结构体 camelCase，phase 枚举值 snake_case（"start" / "end"）。
+    #[test]
+    fn session_git_snapshot_serializes_with_camel_case_keys() {
+        let snapshot = crate::git::SessionGitSnapshot {
+            hub_session_id: "hub-1".to_string(),
+            phase: crate::git::SnapshotPhase::Start,
+            captured_at: "2026-10-24T10:00:01Z".to_string(),
+            worktree_root: "D:/work/demo".to_string(),
+            head: Some("a".repeat(40)),
+            staged_files: 1,
+            unstaged_files: 2,
+            untracked_files: 3,
+            conflicted_files: 0,
+        };
+
+        let json = serde_json::to_value(&snapshot).expect("序列化");
+
+        assert_eq!(json["hubSessionId"], "hub-1");
+        assert_eq!(json["phase"], "start");
+        assert_eq!(json["capturedAt"], "2026-10-24T10:00:01Z");
+        assert_eq!(json["worktreeRoot"], "D:/work/demo");
+        assert_eq!(json["head"], "a".repeat(40));
+        assert_eq!(json["stagedFiles"], 1);
+        assert_eq!(json["unstagedFiles"], 2);
+        assert_eq!(json["untrackedFiles"], 3);
+        assert_eq!(json["conflictedFiles"], 0);
+        for snake in [
+            "hub_session_id",
+            "captured_at",
+            "worktree_root",
+            "staged_files",
+            "unstaged_files",
+            "untracked_files",
+            "conflicted_files",
+        ] {
+            assert!(
+                json.get(snake).is_none(),
+                "不得输出 snake_case 键 {snake}：{json}"
+            );
+        }
+
+        // unborn HEAD（空仓库）必须是 null，而不是缺失或空串。
+        let unborn = crate::git::SessionGitSnapshot {
+            phase: crate::git::SnapshotPhase::End,
+            head: None,
+            ..snapshot
+        };
+        let unborn_json = serde_json::to_value(&unborn).expect("序列化");
+        assert!(unborn_json["head"].is_null(), "实际：{unborn_json}");
+        assert_eq!(unborn_json["phase"], "end");
+    }
+
+    /// 跨 IPC 契约测试：回放 DTO（ROADMAP B6）的键名形状。
+    ///
+    /// 结构体 camelCase；role 枚举值 snake_case；skipped/unsupported 计数是
+    /// 字符串→数字的对象。前端 normalizeReplay*（src/lib/ipc.ts）按这些键取值。
+    /// B8 起含 toolCalls / subagentThreads 嵌套形状。
+    #[test]
+    fn replay_dtos_serialize_with_camel_case_keys() {
+        let message = crate::replay::ReplayMessage {
+            seq: 3,
+            role: crate::replay::ReplayRole::Assistant,
+            sidechain: true,
+            timestamp: Some("2026-10-25T10:00:05.000Z".to_string()),
+            text_parts: vec!["回答".to_string()],
+            thinking_parts: vec!["思考".to_string()],
+            model: Some("claude-sonnet-4-6".to_string()),
+            tool_calls: vec![crate::replay::ReplayToolCall {
+                id: "call_1".to_string(),
+                name: "Grep".to_string(),
+                input_json: "{\"pattern\":\"TODO\"}".to_string(),
+                result_json: Some("src/a.rs".to_string()),
+                result_truncated: false,
+                input_truncated: false,
+            }],
+            unsupported_content_kinds: BTreeMap::new(),
+        };
+        let json = serde_json::to_value(&message).expect("序列化消息");
+        assert_eq!(json["seq"], 3);
+        assert_eq!(json["role"], "assistant");
+        assert_eq!(json["sidechain"], true);
+        assert_eq!(json["textParts"], serde_json::json!(["回答"]));
+        assert_eq!(json["thinkingParts"], serde_json::json!(["思考"]));
+        assert_eq!(json["toolCalls"][0]["id"], "call_1");
+        assert_eq!(json["toolCalls"][0]["name"], "Grep");
+        assert_eq!(json["toolCalls"][0]["inputJson"], "{\"pattern\":\"TODO\"}");
+        assert_eq!(json["toolCalls"][0]["resultJson"], "src/a.rs");
+        assert_eq!(json["toolCalls"][0]["inputTruncated"], false);
+        for snake in [
+            "text_parts",
+            "thinking_parts",
+            "unsupported_content_kinds",
+            "tool_calls",
+        ] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
+        }
+
+        let session = crate::replay::ReplaySession {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            source_path: "D:/x.jsonl".to_string(),
+            messages: vec![message],
+            subagent_threads: vec![crate::replay::SubagentThread {
+                message_seqs: vec![3, 4],
+                started_at: Some("2026-10-25T10:00:05.000Z".to_string()),
+                last_at: Some("2026-10-25T10:00:09.000Z".to_string()),
+            }],
+            skipped_kind_counts: [("summary".to_string(), 1u64)].into_iter().collect(),
+            malformed_lines: 1,
+        };
+        let json = serde_json::to_value(&session).expect("序列化会话");
+        assert_eq!(json["harnessId"], "claude");
+        assert_eq!(json["skippedKindCounts"], serde_json::json!({"summary": 1}));
+        assert_eq!(json["malformedLines"], 1);
+        assert_eq!(json["messages"][0]["role"], "assistant");
+        assert_eq!(
+            json["subagentThreads"][0]["messageSeqs"],
+            serde_json::json!([3, 4])
+        );
+        assert_eq!(
+            json["subagentThreads"][0]["startedAt"],
+            "2026-10-25T10:00:05.000Z"
+        );
+        assert!(json.get("subagent_threads").is_none());
+
+        let summary = crate::replay::ReplaySessionSummary {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            project_dir: "D--work-demo".to_string(),
+            size_bytes: 1024,
+            modified_ms: 1_761_000_000_000,
+            first_user_preview: Some("预览".to_string()),
+            started_at: Some("2026-10-25T10:00:00.000Z".to_string()),
+            last_at: Some("2026-10-25T10:01:00.000Z".to_string()),
+        };
+        let json = serde_json::to_value(&summary).expect("序列化摘要");
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["projectDir"], "D--work-demo");
+        assert_eq!(json["sizeBytes"], 1024);
+        assert_eq!(json["modifiedMs"], 1_761_000_000_000i64);
+        assert_eq!(json["firstUserPreview"], "预览");
+        assert_eq!(json["startedAt"], "2026-10-25T10:00:00.000Z");
+    }
+
+    /// 跨 IPC 契约测试：WorktreeEntry（ROADMAP C10）的键名形状。
+    #[test]
+    fn worktree_entry_serializes_with_camel_case_keys() {
+        let entry = crate::git::WorktreeEntry {
+            path: "D:/wt/feature".to_string(),
+            head: Some("a".repeat(40)),
+            branch: Some("feature".to_string()),
+            main: false,
+            detached: false,
+            bare: false,
+        };
+
+        let json = serde_json::to_value(&entry).expect("序列化");
+        assert_eq!(json["path"], "D:/wt/feature");
+        assert_eq!(json["branch"], "feature");
+        assert_eq!(json["main"], false);
+        assert_eq!(json["detached"], false);
+        assert_eq!(json["bare"], false);
+        assert!(json["head"].is_string());
+
+        // detached：branch 为 null 而不是缺失。
+        let detached = crate::git::WorktreeEntry {
+            branch: None,
+            head: None,
+            detached: true,
+            ..entry
+        };
+        let json = serde_json::to_value(&detached).expect("序列化");
+        assert!(json["branch"].is_null());
+        assert!(json["head"].is_null());
+        assert_eq!(json["detached"], true);
+    }
+
+    /// 跨 IPC 契约测试：ProfileSummary（E14）—— camelCase、嵌套字段 map、
+    /// secret redact 已在 Rust 层完成（此测试锁定序列化不再引入明文）。
+    #[test]
+    fn profile_summary_serializes_with_camel_case_and_redaction() {
+        let summary = crate::profile::ProfileSummary {
+            harness_id: "claude".to_string(),
+            source_path: "C:/Users/dev/.claude/settings.json".to_string(),
+            fields: [
+                (
+                    "env.ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (
+                    "env.ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.example.com".to_string(),
+                ),
+                ("env.ANTHROPIC_MODEL".to_string(), "test-model".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            parsed_at: "2026-10-25T10:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_value(&summary).expect("序列化");
+        assert_eq!(json["harnessId"], "claude");
+        assert_eq!(json["sourcePath"], "C:/Users/dev/.claude/settings.json");
+        assert_eq!(json["parsedAt"], "2026-10-25T10:00:00Z");
+        assert_eq!(json["fields"]["env.ANTHROPIC_AUTH_TOKEN"], "<redacted>");
+        assert_eq!(
+            json["fields"]["env.ANTHROPIC_BASE_URL"],
+            "https://api.example.com"
+        );
+        for snake in ["harness_id", "source_path", "parsed_at"] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键 {snake}");
+        }
+    }
+
+    /// 跨 IPC 契约测试：C11 的 status/merge DTO 键名形状。
+    #[test]
+    fn worktree_c11_dtos_serialize_with_camel_case_keys() {
+        let counts = crate::git::WorktreeStatusCounts {
+            staged_files: 1,
+            unstaged_files: 2,
+            untracked_files: 3,
+            conflicted_files: 0,
+        };
+        let json = serde_json::to_value(counts).expect("序列化");
+        assert_eq!(json["stagedFiles"], 1);
+        assert_eq!(json["unstagedFiles"], 2);
+        assert_eq!(json["untrackedFiles"], 3);
+        assert_eq!(json["conflictedFiles"], 0);
+
+        let outcome = crate::git::MergeOutcome {
+            previous_head: Some("a".repeat(40)),
+            new_head: Some("b".repeat(40)),
+        };
+        let json = serde_json::to_value(&outcome).expect("序列化");
+        assert_eq!(json["previousHead"], "a".repeat(40));
+        assert_eq!(json["newHead"], "b".repeat(40));
+        for snake in [
+            "previous_head",
+            "new_head",
+            "staged_files",
+            "untracked_files",
+        ] {
+            assert!(
+                serde_json::to_value(counts).unwrap().get(snake).is_none()
+                    && json.get(snake).is_none(),
+                "不得输出 snake_case 键 {snake}"
+            );
+        }
+    }
+
+    /// 跨 IPC 契约测试：回放搜索 DTO（ROADMAP B7）的键名形状。
+    #[test]
+    fn replay_search_dtos_serialize_with_camel_case_keys() {
+        let settings = crate::replay::index::SearchSettings {
+            enabled: true,
+            excluded_dirs: vec!["D--work-beta".to_string()],
+        };
+        // 输入方向（TS → Rust）也要能按 camelCase 反序列化。
+        let roundtrip: crate::replay::index::SearchSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(roundtrip, settings);
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["excludedDirs"], serde_json::json!(["D--work-beta"]));
+
+        let report = crate::replay::index::ReindexReport {
+            scanned: 68,
+            indexed: 7,
+            unchanged: 60,
+            excluded: 1,
+            removed: 0,
+        };
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["scanned"], 68);
+        assert_eq!(json["indexed"], 7);
+        assert_eq!(json["unchanged"], 60);
+        assert_eq!(json["excluded"], 1);
+        assert_eq!(json["removed"], 0);
+
+        let hit = crate::replay::index::SearchHit {
+            harness_id: "claude".to_string(),
+            session_id: "s1".to_string(),
+            seq: 3,
+            role: "assistant".to_string(),
+            snippet: "…«迁移»逻辑…".to_string(),
+            first_user_preview: None,
+        };
+        let json = serde_json::to_value(&hit).unwrap();
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["role"], "assistant");
+        assert!(json["snippet"].as_str().unwrap().contains('«'));
+        assert!(json["firstUserPreview"].is_null());
+    }
+
+    /// 跨 IPC 契约测试：`session_git_summary` 的返回形状（ROADMAP A3）。
+    ///
+    /// `Some` 时三个 camelCase 计数；`None`（没有窗口）必须是 JSON `null`——
+    /// 前端据此区分「0 commits」与「没有摘要」。
+    #[test]
+    fn window_summary_serializes_with_camel_case_keys() {
+        let summary = crate::git::WindowSummary {
+            commits: 2,
+            insertions: 41,
+            deletions: 7,
+        };
+
+        let json = serde_json::to_value(summary).expect("序列化");
+        assert_eq!(json["commits"], 2);
+        assert_eq!(json["insertions"], 41);
+        assert_eq!(json["deletions"], 7);
+        for snake in ["commit_count", "insertions_total"] {
+            assert!(json.get(snake).is_none(), "不得输出 snake_case 键：{json}");
+        }
+
+        let none =
+            serde_json::to_value(Option::<crate::git::WindowSummary>::None).expect("序列化 None");
+        assert!(none.is_null(), "None 必须是 null：{none}");
     }
 
     /// 跨 IPC 契约测试：`register_project` / `list_projects` 的返回形状。

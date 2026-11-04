@@ -19,7 +19,9 @@ use serde::Serialize;
 
 use crate::db::Database;
 use crate::error::{Error, Result};
-use crate::harness::adapter::{HarnessId, LaunchRequest};
+use crate::git::service as git_service;
+use crate::git::store::SnapshotPhase;
+use crate::harness::adapter::{HarnessId, LaunchRequest, ResumeRequest};
 use crate::harness::registry::HarnessRegistry;
 use crate::harness::store::find_installation;
 use crate::pty::{ExitSink, OutputSink, PtyBackend, PtyManager};
@@ -104,22 +106,32 @@ impl TerminalRuntime {
                 .and_then(|mut map| map.remove(session))
                 .unwrap_or(TerminationReason::NaturalExit);
 
+            let mut finished = false;
             if let Ok(database) = exit_db.lock() {
                 let service = SessionService::new(database.connection());
                 // 终态写入失败不能静默：至少让事件里带上错误。
-                if let Err(error) = service.finish(session, exit_code, reason) {
-                    if let Some(emitter) = exit_emitters
-                        .lock()
-                        .ok()
-                        .and_then(|mut map| map.remove(session))
-                    {
-                        emitter(PtyEvent::Error {
-                            session_id: session.to_string(),
-                            message: format!("写入会话终态失败：{error}"),
-                        });
+                match service.finish(session, exit_code, reason) {
+                    Ok(updated) => finished = updated,
+                    Err(error) => {
+                        if let Some(emitter) = exit_emitters
+                            .lock()
+                            .ok()
+                            .and_then(|mut map| map.remove(session))
+                        {
+                            emitter(PtyEvent::Error {
+                                session_id: session.to_string(),
+                                message: format!("写入会话终态失败：{error}"),
+                            });
+                        }
+                        return;
                     }
-                    return;
                 }
+            }
+
+            // 终态真的写入后才补拍 end 快照（best-effort，后台线程，git 子进程在锁外跑）。
+            // finish 返回 false（早已终态）时不再拍：重复补拍没有意义。
+            if finished {
+                git_service::spawn_capture(Arc::clone(&exit_db), session, SnapshotPhase::End);
             }
 
             if let Some(emitter) = exit_emitters
@@ -185,11 +197,28 @@ impl TerminalRuntime {
         rows: u16,
         emitter: Option<Emitter>,
     ) -> Result<SessionRecord> {
+        self.start_with_worktree(installation_id, cwd, None, cols, rows, emitter)
+    }
+
+    /// 启动并绑定 worktree（ROADMAP C10）：cwd 与 worktree_path 一同落库。
+    ///
+    /// `worktree_path` 必须来自 Hub 自己的 worktree 列表（IPC 层校验）；
+    /// 这里只透传。
+    pub fn start_with_worktree(
+        &self,
+        installation_id: &str,
+        cwd: Option<&str>,
+        worktree_path: Option<&str>,
+        cols: u16,
+        rows: u16,
+        emitter: Option<Emitter>,
+    ) -> Result<SessionRecord> {
         let session = self.with_db(|database| {
-            SessionService::new(database.connection()).start_from_installation(
+            SessionService::new(database.connection()).start_with_worktree(
                 installation_id,
                 None,
                 cwd,
+                worktree_path,
             )
         })?;
         let session_id = session.hub_session_id.clone();
@@ -236,6 +265,10 @@ impl TerminalRuntime {
                 })?;
                 self.pty.start_reading(&session_id)?;
 
+                // start 快照（ROADMAP A1）：进程真正跑起来之后、在后台线程拍，
+                // 绝不让 git 子进程（每条 3 秒上限）拖住 start_terminal 的返回。
+                git_service::spawn_capture(Arc::clone(&self.db), &session_id, SnapshotPhase::Start);
+
                 self.emit(PtyEvent::Started {
                     session_id: session_id.clone(),
                     pid: handle.pid,
@@ -258,6 +291,87 @@ impl TerminalRuntime {
             message: error.to_string(),
         });
         Ok(())
+    }
+
+    /// 恢复一条外部会话（ROADMAP B9）：`--resume <source_session_id>`，
+    /// SessionRecord 关联 `source_session_id` 并标 `launch_mode = resume`。
+    ///
+    /// 生命周期与 [`Self::start`] 完全同一条链（created → running → 终态、
+    /// containment 先于 running、快照后台补拍），只是 spec 参数与记录字段不同。
+    pub fn start_resume(
+        &self,
+        installation_id: &str,
+        source_session_id: &str,
+        cwd: Option<&str>,
+        cols: u16,
+        rows: u16,
+        emitter: Option<Emitter>,
+    ) -> Result<SessionRecord> {
+        let prepared_session = self.with_db(|database| {
+            SessionService::new(database.connection()).resume_from_installation(
+                installation_id,
+                source_session_id,
+                cwd,
+            )
+        });
+        // 登记失败（唯一索引拒绝等）：不落 failed 行——会话根本没创建成功，
+        // 如实把错误（幂等冲突）报给调用方。
+        let session = prepared_session?;
+        let session_id = session.hub_session_id.clone();
+
+        if let Some(emitter) = emitter {
+            if let Ok(mut emitters) = self.emitters.lock() {
+                emitters.insert(session_id.clone(), emitter);
+            }
+        }
+
+        let prepared = self.with_db(|database| {
+            let installation = find_installation(database.connection(), installation_id)?
+                .ok_or_else(|| Error::InvalidInput(format!("未知的安装：{installation_id}")))?;
+            let adapter = self
+                .registry
+                .get(&HarnessId::from(installation.harness_id.as_str()))
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!("未注册的 Harness：{}", installation.harness_id))
+                })?;
+
+            adapter.build_resume_spec(ResumeRequest {
+                hub_session_id: session_id.clone(),
+                source_session_id: Some(source_session_id.to_string()),
+                cwd: cwd.unwrap_or_default().to_string(),
+                runtime_target_id: installation.runtime_target_id.clone(),
+            })
+        });
+
+        let spec = match prepared {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.fail_launch(&session_id, &error)?;
+                return Err(error);
+            }
+        };
+
+        match self.pty.spawn(&session_id, spec, cols, rows) {
+            Ok(handle) => {
+                self.with_db(|database| {
+                    SessionService::new(database.connection()).mark_running(&session_id, handle.pid)
+                })?;
+                self.pty.start_reading(&session_id)?;
+
+                git_service::spawn_capture(Arc::clone(&self.db), &session_id, SnapshotPhase::Start);
+
+                self.emit(PtyEvent::Started {
+                    session_id: session_id.clone(),
+                    pid: handle.pid,
+                });
+
+                self.reload(&session_id)
+            }
+            Err(error) => {
+                self.fail_launch(&session_id, &error)?;
+                Err(error)
+            }
+        }
     }
 
     fn reload(&self, session_id: &str) -> Result<SessionRecord> {
@@ -334,6 +448,8 @@ mod concurrency_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::store::{GitSnapshotStore, SnapshotPhase};
+    use crate::harness::adapter::HarnessAdapter;
     use crate::harness::adapters::codex::CodexAdapter;
     use crate::pty::manager::fake::FakePtyBackend;
     use crate::session::SessionStatus;
@@ -519,7 +635,9 @@ mod tests {
         // 只等终态就等于假设「终态可见 ⇒ 输出已全部送达」，那是拿测试的运气当契约。
         let expected = "codex-cli 0.152.1";
         let mut output = Vec::new();
-        for _ in 0..120 {
+        // 8 秒窗口：CI 负载下 REAP_INTERVAL + READER_DRAIN_GRACE 的串行耗时
+        // 可能超过 3 秒（真实抖动发生过），窗口只放宽等待，不改契约。
+        for _ in 0..320 {
             let recorded = events.lock().expect("events").clone();
             output = recorded
                 .iter()
@@ -560,6 +678,194 @@ mod tests {
             finished.exit_code,
             Some(137),
             "退出码必须来自 reaper 的真实观测，而不是猜的"
+        );
+    }
+
+    /// B9：resume 走同一条生命周期链，SessionRecord 带外部 id 与 resume 模式。
+    #[test]
+    fn resume_lifecycle_links_the_source_session_and_uses_resume_mode() {
+        let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
+        // 冷启动路径：空库 + 生产代码填充。
+        let db = crate::test_support::empty_db();
+        crate::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
+        // Claude 适配器提供 build_resume_spec。
+        let claude_adapter = crate::harness::adapters::claude_code::ClaudeCodeAdapter::new(
+            Arc::new(FakeHostProbe::new().with_binary(
+                "claude",
+                "D:/npm-global/claude.cmd",
+                "2.1.126 (Claude Code)",
+            )),
+        );
+        let summary = crate::harness::registry::HarnessSummary {
+            id: "claude".to_string(),
+            display_name: "Claude Code".to_string(),
+            installation_id: None,
+            installed: true,
+            binary_path: Some("D:/npm-global/claude.cmd".to_string()),
+            version: Some("2.1.126".to_string()),
+            capabilities: claude_adapter.capabilities(),
+            data_paths: vec![],
+        };
+        crate::harness::inventory::reconcile_harnesses(
+            db.connection(),
+            &[summary],
+            RUNTIME_TARGET_ID,
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("同步清单");
+
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(claude_adapter));
+        let installation = crate::harness::inventory::installation_id("claude", RUNTIME_TARGET_ID);
+
+        let db = Arc::new(Mutex::new(db));
+        let runtime = TerminalRuntime::new(
+            Arc::clone(&db),
+            Arc::new(registry),
+            backend as Arc<dyn PtyBackend>,
+        );
+
+        let session = runtime
+            .start_resume(
+                &installation,
+                "11111111-1111-4111-8111-111111111111",
+                Some("D:/work"),
+                80,
+                24,
+                None,
+            )
+            .expect("resume 启动");
+
+        assert_eq!(
+            session.source_session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(session.launch_mode, crate::session::LaunchMode::Resume);
+        assert_eq!(session.harness_id, "claude");
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
+        assert_eq!(finished.status, SessionStatus::Exited);
+    }
+
+    /// B9：同一外部会话重复 resume → 唯一索引拒绝，明确错误且不留半截行。
+    #[test]
+    fn resuming_the_same_source_session_twice_is_rejected_by_the_unique_index() {
+        let backend = Arc::new(FakePtyBackend::new());
+        let db = crate::test_support::empty_db();
+        crate::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
+        let claude_adapter = crate::harness::adapters::claude_code::ClaudeCodeAdapter::new(
+            Arc::new(FakeHostProbe::new().with_binary(
+                "claude",
+                "D:/npm-global/claude.cmd",
+                "2.1.126 (Claude Code)",
+            )),
+        );
+        let summary = crate::harness::registry::HarnessSummary {
+            id: "claude".to_string(),
+            display_name: "Claude Code".to_string(),
+            installation_id: None,
+            installed: true,
+            binary_path: Some("D:/npm-global/claude.cmd".to_string()),
+            version: Some("2.1.126".to_string()),
+            capabilities: claude_adapter.capabilities(),
+            data_paths: vec![],
+        };
+        crate::harness::inventory::reconcile_harnesses(
+            db.connection(),
+            &[summary],
+            RUNTIME_TARGET_ID,
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("同步清单");
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(claude_adapter));
+        let installation = crate::harness::inventory::installation_id("claude", RUNTIME_TARGET_ID);
+
+        let db = Arc::new(Mutex::new(db));
+        let runtime = TerminalRuntime::new(
+            Arc::clone(&db),
+            Arc::new(registry),
+            backend as Arc<dyn PtyBackend>,
+        );
+
+        let first = runtime
+            .start_resume(&installation, "source-1", Some("D:/work"), 80, 24, None)
+            .expect("首次 resume");
+        assert_eq!(first.launch_mode, crate::session::LaunchMode::Resume);
+
+        let error = runtime
+            .start_resume(&installation, "source-1", Some("D:/work"), 80, 24, None)
+            .expect_err("重复 resume 必须被唯一索引拒绝");
+        assert!(
+            error.to_string().contains("source_session_id") || error.to_string().contains("UNIQUE"),
+            "错误要能定位到幂等冲突：{error}"
+        );
+    }
+
+    /// 生命周期接线（ROADMAP A1）：mark_running 之后拍 start 快照，
+    /// 终态写入成功后拍 end 快照 —— 都在后台线程，best-effort。
+    #[test]
+    fn terminal_lifecycle_captures_git_snapshots() {
+        let repo = crate::git::test_support::Repo::new();
+        std::fs::write(repo.0.join("file"), b"data").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "initial"]);
+
+        let backend = Arc::new(FakePtyBackend::new().with_always_exited(Some(0)));
+        let db = crate::test_support::empty_db();
+        crate::runtime::local::ensure_local_target(db.connection()).expect("runtime target");
+        crate::harness::inventory::reconcile_harnesses(
+            db.connection(),
+            &[detected_codex_summary()],
+            RUNTIME_TARGET_ID,
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("同步清单");
+
+        let mut registry = HarnessRegistry::new();
+        registry.register(Box::new(CodexAdapter::new(Arc::new(installed_host()))));
+        let installation = crate::harness::inventory::installation_id("codex", RUNTIME_TARGET_ID);
+
+        let db = Arc::new(Mutex::new(db));
+        let runtime = TerminalRuntime::new(
+            Arc::clone(&db),
+            Arc::new(registry),
+            Arc::clone(&backend) as Arc<dyn PtyBackend>,
+        );
+
+        let session = runtime
+            .start(
+                &installation,
+                Some(repo.0.to_string_lossy().as_ref()),
+                80,
+                24,
+                None,
+            )
+            .expect("启动");
+        let finished = wait_for_terminal(&runtime, &session.hub_session_id);
+        assert_eq!(finished.status, SessionStatus::Exited);
+
+        // 快照在后台线程落行：有界等待，而不是假设已就绪。
+        let mut snapshots = Vec::new();
+        for _ in 0..160 {
+            snapshots = GitSnapshotStore::new(db.lock().expect("db").connection())
+                .list_by_session(&session.hub_session_id)
+                .expect("列出");
+            if snapshots.len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "start 与 end 快照都必须落行：{snapshots:?}"
+        );
+        assert_eq!(snapshots[0].phase, SnapshotPhase::Start);
+        assert_eq!(snapshots[1].phase, SnapshotPhase::End);
+        assert_eq!(snapshots[0].head, snapshots[1].head, "没有新 commit");
+        assert!(
+            snapshots[0].head.is_some(),
+            "有初始 commit 的仓库 HEAD 不应为空"
         );
     }
 

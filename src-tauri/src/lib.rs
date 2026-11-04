@@ -8,22 +8,29 @@
 pub mod activity;
 pub mod clock;
 pub mod commands;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod eval;
 pub mod git;
 pub mod harness;
 pub mod hhar;
+pub mod mcp;
 pub mod permissions;
 pub mod plugins;
 pub mod process;
+pub mod profile;
 pub mod project;
+pub mod prompts;
 pub mod pty;
+pub mod replay;
 pub mod runtime;
 pub mod session;
 pub mod sidecar;
+pub mod skills;
 pub mod terminal;
 pub mod trace;
+pub mod tray_menu;
 pub mod usage;
 pub mod watcher;
 
@@ -38,6 +45,7 @@ use crate::db::Database;
 use crate::harness::adapters::claude_code::ClaudeCodeAdapter;
 use crate::harness::adapters::codebuddy::CodeBuddyAdapter;
 use crate::harness::adapters::codex::CodexAdapter;
+use crate::harness::adapters::copilot::CopilotAdapter;
 use crate::harness::adapters::gemini_cli::GeminiCliAdapter;
 use crate::harness::adapters::opencode::{OpenCodeAdapter, OpenCodeXdgRoots};
 use crate::harness::inventory::reconcile_harnesses;
@@ -76,7 +84,7 @@ pub const DATABASE_FILE_NAME: &str = "harness-hub.sqlite3";
 /// 不依赖 HashMap 迭代顺序）。
 ///
 /// 只注册**已实现适配器**的 Harness：Codex 与 Claude Code 提供
-/// detect / launch / terminal / usage；Gemini CLI、CodeBuddy 与 OpenCode 仅检测，
+/// detect / launch / terminal / usage；Gemini CLI、CodeBuddy、OpenCode 与 GitHub Copilot CLI 仅检测，
 /// 能力矩阵为全 false。
 ///
 /// `pub` 是为了让集成测试用**生产组合**（而不是测试里重造一份注册表）验证
@@ -104,7 +112,87 @@ pub fn build_harness_registry() -> HarnessRegistry {
         Arc::new(SystemHostProbe::new()),
         OpenCodeXdgRoots::from_env(),
     )));
+    registry.register(Box::new(CopilotAdapter::new(Arc::new(
+        SystemHostProbe::new(),
+    ))));
     registry
+}
+
+/// 托盘 id（`tray_by_id` 用它做重聚焦时的菜单重建）。
+const TRAY_ID: &str = "main-tray";
+
+/// 菜单项 id 前缀约定：`tray-<action>`（与 [`tray_menu::TrayAction`] 对应）。
+const TRAY_OPEN_ID: &str = "tray-open-dashboard";
+const TRAY_QUIT_ID: &str = "tray-quit";
+
+/// running 会话计数（托盘「活动会话」只读项的数据源）。
+fn active_session_count(state: &AppState) -> u32 {
+    let Ok(database) = state.db.lock() else {
+        return 0;
+    };
+    database
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE status = 'running'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count as u32)
+        .unwrap_or(0)
+}
+
+/// 纯模型 → Tauri 菜单（薄接线；模型与文案在 tray_menu，可单测）。
+fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
+    manager: &M,
+    active_sessions: u32,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let mut builder = tauri::menu::MenuBuilder::new(manager);
+    for (index, item) in crate::tray_menu::build_menu(active_sessions)
+        .iter()
+        .enumerate()
+    {
+        let id = match item.action {
+            Some(crate::tray_menu::TrayAction::OpenDashboard) => TRAY_OPEN_ID,
+            Some(crate::tray_menu::TrayAction::Quit) => TRAY_QUIT_ID,
+            None => "tray-sessions",
+        };
+        builder = builder.item(&tauri::menu::MenuItem::with_id(
+            manager,
+            id,
+            &item.label,
+            !item.disabled,
+            None::<&str>,
+        )?);
+        if index + 1 < 3 {
+            builder = builder.item(&tauri::menu::PredefinedMenuItem::separator(manager)?);
+        }
+    }
+    builder.build()
+}
+
+/// 构建托盘。失败**不阻断主功能**（headless / 无系统托盘环境下降级为没有托盘）。
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let count = active_session_count(&app.state::<AppState>());
+    let menu = build_tray_menu(app.handle(), count)?;
+    let mut builder = tauri::tray::TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_OPEN_ID => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            TRAY_QUIT_ID => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder.build(app)?;
+    Ok(())
 }
 
 /// 启动桌面应用。
@@ -161,12 +249,39 @@ pub fn run() {
                 plugins_root,
             });
 
+            // System Tray（E19）：菜单模型在 tray_menu（纯模块，可单测），
+            // 这里只做 Tauri 接线。计数 = running 会话数；菜单在构建与主窗口
+            // 重新聚焦时重建（应用内既有事件，不做后台轮询）。
+            // 失败不阻断主功能（headless / 无系统托盘环境降级为没有托盘）。
+            if let Err(error) = setup_tray(app) {
+                eprintln!("托盘初始化失败（不影响主功能）：{error}");
+            }
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 主窗口重新聚焦 → 重建托盘菜单（活动会话计数可能已变化）。
+            let focused = matches!(event, tauri::WindowEvent::Focused(true));
+            if !(focused && window.label() == "main") {
+                return;
+            }
+            let Some(tray) = window.app_handle().tray_by_id(TRAY_ID) else {
+                return;
+            };
+            let count = active_session_count(&window.app_handle().state::<AppState>());
+            let menu = build_tray_menu(window.app_handle(), count);
+            if let Ok(menu) = menu {
+                let _ = tray.set_menu(Some(menu));
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::activity_timeline,
             commands::app_info,
+            commands::credential_list,
+            commands::credential_register,
+            commands::credential_remove,
             commands::db_health,
+            commands::config_doctor,
             commands::create_session,
             commands::finish_session,
             commands::get_project_sessions,
@@ -175,15 +290,49 @@ pub fn run() {
             commands::list_harnesses,
             commands::list_projects,
             commands::list_sessions,
+            commands::mcp_binding_add,
+            commands::mcp_binding_list,
+            commands::mcp_binding_remove,
+            commands::mcp_import,
+            commands::mcp_server_list,
+            commands::mcp_server_remove,
+            commands::mcp_server_upsert,
+            commands::mcp_sync_apply,
+            commands::mcp_sync_preview,
             commands::plugin_list,
             commands::plugin_refresh,
+            commands::profile_backups,
+            commands::profile_discover,
+            commands::profile_project,
+            commands::profile_restore,
+            commands::prompt_list,
+            commands::prompt_remove,
+            commands::prompt_render_apply,
+            commands::prompt_render_preview,
+            commands::prompt_upsert,
             commands::refresh_harnesses,
             commands::refresh_usage,
             commands::register_project,
+            commands::replay_list_sessions,
+            commands::replay_read_session,
+            commands::replay_search,
+            commands::replay_search_reindex,
+            commands::replay_search_settings_get,
+            commands::replay_search_settings_set,
             commands::remove_project,
             commands::resize_terminal,
+            commands::resume_terminal,
+            commands::session_git_snapshots,
+            commands::session_git_summary,
+            commands::skills_list,
             commands::start_terminal,
+            commands::start_terminal_in_worktree,
             commands::usage_summary,
+            commands::worktree_add,
+            commands::worktree_list,
+            commands::worktree_merge,
+            commands::worktree_remove,
+            commands::worktree_status,
             commands::write_terminal
         ])
         .build(tauri::generate_context!())

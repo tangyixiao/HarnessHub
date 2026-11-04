@@ -119,5 +119,88 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
   `plugin_list` / `plugin_refresh`（v0.1 不加 UI）；`plugins/sdk/` 有协议契约与 manifest
   schema，`plugins/examples/` 有 connect 型与 skill 型两个示例。权限边界完全 observe-only
   （决策恒为 `observed`，只记录不拦截，依据 ADR-0018）。
-  尚未实现：Gemini Usage、CodeBuddy 的生命周期、OpenCode Usage。
-- 实施计划见 `docs/plans/`。
+  Git Session Snapshot 已完成（ROADMAP A1，spec
+  docs/specs/2026-10-24-git-session-snapshot-design.md）：内部只读 `git::capture(&Path)`
+  返回工作树根、git/common 目录、完整 HEAD（SHA-1 / SHA-256，合法 unborn 为 None）与
+  staged / unstaged / untracked / conflicted 文件计数；支持 detached HEAD 和 linked
+  worktree。系统 Git 命令按每条 3 秒、每流 1 MiB 限制执行，禁用可选锁和 fsmonitor。
+  接线：migration 0010 `git_snapshots`（(hub_session_id, phase) 主键、phase ∈
+  {start,end}、FK 级联删除）；terminal 生命周期在 mark_running 后与终态写入成功后
+  各经**后台线程**补拍一次（短锁读 cwd → 无锁跑 git → 短锁落行，观测 best-effort、
+  失败不落行也不影响会话状态机）；IPC `session_git_snapshots` 纯读；Sessions 页
+  展示「Git · 会话期间的变更」（R5：不得声称 AI 贡献）。
+  会话窗口摘要已完成（ROADMAP A3）：`git::window` 用有界 `rev-list --count` +
+  `diff --shortstat` 现算 start..end 的 commits/±行数（**不落库**；同 HEAD 零摘要
+  不起进程；shortstat 形态不认识 → None）；IPC `session_git_summary` 短锁读输入、
+  锁外跑 git；Sessions 页在 Git 区块标题展示「N commits · +X / −Y」。
+  多命令观察不保证文件系统原子性，也不表示 AI 贡献；真实仓库集成测试见
+  `src-tauri/tests/git_snapshot.rs` 与 terminal 生命周期用例。
+  Usage 覆盖（ROADMAP A2）：解析层无 harness 白名单（ccusage session 行按 agent
+  原样落库）；opencode 已有真机 fixture 覆盖；gemini 行形状已从 ccusage v20.0.24
+  源码逐字段取证并以 **synthetic fixture** 锁定回归（thoughts 残差落
+  unattributed_tokens、不伪标 reasoning；本机暂无 gemini 使用数据，README 已如实
+  标注待真机回填）。注意 ccusage 的 focused 子命令（如 `gemini session`）是独立
+  schema，不进导入层，导入只用 unified session 报告。
+  Session Observability（ROADMAP B6-B9，v0.2.0）已完成，仅对 capability
+  `replay`/`resume` 为 true 的 harness 开放（当前只有 Claude Code；其余 harness
+  UI 不渲染入口，适配器走 trait 默认拒绝）：
+  - 只读回放：`src-tauri/src/replay/` 解析 `~/.claude/projects/**/*.jsonl`
+    （16 MiB 上限；未知类型/坏行计数不崩；sidechain/tool_use/tool_result 已展开，
+    tool JSON 摘要 ≤2 KiB 截断标注）；IPC **不接受文件系统路径**（sessionId 由
+    后端白名单解析）。**不落库**：回放按需现读。
+  - 全文搜索：migration 0011 `replay_messages`（FTS5 **trigram**，中英混合子串
+    可搜，<3 字符查询显式报错）+ 指纹增量索引 + 设置单行表（**默认关闭**；
+    关闭即清空；排除目录连指纹都不写）。索引/搜索只写读自己的表，源转录只读。
+  - 恢复外部会话：`HarnessAdapter::build_resume_spec`（trait 默认拒绝；claude 覆写
+    `claude --resume <id>`）+ `TerminalRuntime::start_resume`（与 start 同一条
+    生命周期链）；同一外部会话幂等去重（唯一索引）。claude `resume` capability
+    为 true（参数拼接 fixture 锁定；完整续聊验收随交互场景，readiness 维度）。
+    真机证据：`src-tauri/tests/claude_replay_smoke.rs`（68 会话发现、空转录属合法
+    数据、带工具会话深检、路径白名单）。
+    Worktree 编排（ROADMAP C10-C11，v0.3.0）：`src-tauri/src/git/worktree.rs` ——
+    list（porcelain v1 有界解析）/ add（路径安全红线：目标不允许位于 repo_root 内部，
+    absolute + canonicalize 双层检查）/ status_counts（未提交修改计数）/ remove
+    （**只删干净树**：脏树列计数拒绝、主树/bare 拒绝）/ merge_ff_only（主树脏拒绝、
+    非快进拒绝——绝不 rebase/force）。IPC `worktree_list/add/status/remove/merge`
+    （repo_root 必须命中已登记项目）；`start_terminal_in_worktree` 落 worktree_path。
+    前端 Projects 卡片 Worktrees 区（创建 confirm 含磁盘警示、合并/删除 confirm
+    含风险提示）。harness capability `worktree` 保持 false（Hub 自身能力 ≠
+    harness 可在 worktree 中跑，后者需真机 E2E）。
+    配置平面（ROADMAP E 轨道，v0.4.0）已完成：
+    - **只读发现（E14）**：`src-tauri/src/profile/{claude,codex,gemini}.rs` 解析三个
+      harness 的原生配置为 `ProfileSummary`；secret 值 Rust 层 redact
+      （`<redacted>` / set-unset），IPC 契约测试锁定。
+    - **安全投影（E15）**：`profile/projection.rs` —— read → parse → merge →
+      backup（`~/.harness-hub/backups/<harness>/`，最近 10 份轮换）→ temp →
+      verify → 原子 rename；merge 语义 = 同名覆盖 + 未知键保留 + `env` 深合并一层；
+      文本通用变体 `apply_text`（verify 逐字节比对；**允许新建**，`backupId` 空串）。
+      IPC `profile_project/backups/restore`——恢复目标只来自后端备份记录。
+      capability `profiles`：claude = true。
+    - **凭据（E16）**：`src-tauri/src/credentials/` —— 值进 Secret Store 抽象
+      （`FileSecretStore` 兜底，0600），SQLite 只存句柄（migration 0012
+      `credential_refs`）；值只在登记这一次跨 IPC。IPC `credential_register/list/remove`。
+    - **体检（E17）**：`profile/doctor.rs` `CheckItem`（config 可解析 / 凭据可达含
+      孤儿检测 / Provider 指向）；`diagnose` 无 DB 纯函数 + 命令层合并凭据检查；
+      只给建议不自动修复。IPC `config_doctor`。
+    - **MCP Binding Registry（E18）**：`src-tauri/src/mcp/` —— registry（server CRUD +
+      global/harness 绑定，migration 0013，`scope_key` 派生列 + `env_keys` 只存变量名）
+      - sync（desired → diff → preview → 原子同步；**条目级删除 + 管理键级更新**：
+        条目内用户手写 `env`/`headers` 逐字节保留，绝不写 `<redacted>`）。
+        形态取证：claude `~/.claude.json` `{type:"http",url}`；codex `config.toml`
+        `[mcp_servers.<name>] url`（**toml_edit 保格式**）；gemini `settings.json`
+        `{httpUrl}`。IPC `mcp_server_list/upsert/remove`、`mcp_binding_list/add/remove`、
+        `mcp_sync_preview`（纯读）/`mcp_sync_apply`（显式）/`mcp_import`。
+    - **Prompts + Skills + Tray（E19）**：`src-tauri/src/prompts/`（migration 0014
+      `prompt_artifacts`；标记块渲染器 `render.rs` 纯函数核心——`harness-hub:begin/end`
+      块外用户内容逐字节保留、幂等 round-trip、begin 未闭合拒绝落盘；多条按 name 升序）
+      投影 `<repo>/CLAUDE.md`/`AGENTS.md`/`GEMINI.md`，capability `prompts`：
+      claude/codex/gemini = true；`skills.rs` 只读发现 `~/.claude/skills`（坏文件计
+      skipped）；`tray_menu.rs` 菜单模型纯模块 + lib.rs 接线（Open Dashboard /
+      活动会话只读计数 / Quit；初始化失败不阻断主功能；**不做 Profile 切换**——
+      `ProfileAdapter.activate` 未实现）。IPC `prompt_list/upsert/remove/
+render_preview/render_apply`、`skills_list`。
+      尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
+      capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）；
+      配置投影的 codex/gemini 目标；MCP project scope 绑定与 Runtime 连接（F22）；
+      ProfileAdapter.activate（切换与托盘 Profile 切换的前置）。
+- 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。

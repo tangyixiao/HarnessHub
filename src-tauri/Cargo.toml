@@ -1,6 +1,6 @@
 [package]
 name = "harness-hub"
-version = "0.1.0-alpha.4"
+version = "0.4.0"
 description = "Harness Hub — local-first control plane for AI coding harnesses"
 authors = ["Harness Hub contributors"]
 license = "MIT"
@@ -26,12 +26,15 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 sha2 = "0.10.9"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 thiserror = "2.0.20"
 # 插件清单（plugins/manifest.rs）：之前只是 tauri-build 的传递依赖，不能直接 `use toml::`。
 # 刻意钉 0.8：0.9/1.x 换了 API（`toml::from_str` 的 Value 模型不同），跨大版本迁移
 # 会把「清单校验」这件事和一个不相关的解析器升级绑在一起。
 toml = "0.8"
+# MCP 同步（mcp/sync.rs）的 codex config.toml **保格式编辑**：toml crate 重序列化
+# 会丢注释与排版，toml_edit 只改动的键。版本与 toml 0.8 的内部依赖同源（0.22）。
+toml_edit = "0.22"
 uuid = { version = "1.20.0", features = ["v4"] }
 
 # Windows 进程包含（Task 8B）：Job Object 是唯一能覆盖 .cmd → node → descendants 的机制。
