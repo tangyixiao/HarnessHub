@@ -10,6 +10,6 @@
 Provider / MCP / Tokenizer 等能力在 Phase 8 逐个接入。
 """
 
-__version__ = "0.0.0"
+__version__ = "0.5.0"
 
 __all__ = ["__version__"]
