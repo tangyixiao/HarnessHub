@@ -54,6 +54,8 @@ use crate::harness::registry::HarnessRegistry;
 use crate::pty::PortablePtyBackend;
 use crate::runtime::local::{ensure_local_target, LOCAL_TARGET_ID};
 use crate::session::{service::SessionService, TerminationReason};
+use crate::sidecar::config::SidecarConfig;
+use crate::sidecar::manager::SidecarManager;
 use crate::terminal::TerminalRuntime;
 
 /// 应用级共享状态。
@@ -66,12 +68,15 @@ use crate::terminal::TerminalRuntime;
 ///   `project::git_root`）。
 /// - `plugins_root`：插件扫描根。在组合根解析一次（环境变量 `HARNESS_HUB_PLUGINS_DIR`
 ///   或 `<app_data_dir>/plugins`），命令层不再读环境——否则单测会依赖真实环境。
+/// - `sidecar`：Python runtime 的生命周期管理器（F20）。**懒启动**：构造时不拉起
+///   进程，Python 缺失也只让这一张状态卡片降级，PTY / Git / Session 不受影响。
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
     pub harnesses: Arc<HarnessRegistry>,
     pub terminal: TerminalRuntime,
     pub git_probe: Arc<dyn crate::project::git_root::GitRootProbe>,
     pub plugins_root: std::path::PathBuf,
+    pub sidecar: Arc<SidecarManager>,
 }
 
 /// 数据库文件名。放在 Tauri 的 app data 目录下，保持 local-first。
@@ -241,12 +246,18 @@ pub fn run() {
                 );
             }
 
+            // F20：只构造管理器，不主动 spawn Python（懒启动）。`from_env()` 读
+            // HARNESS_HUB_PYTHON / HARNESS_HUB_RUNTIME_ROOT，解析失败也不会 panic；
+            // Python 缺失时这里照样成功，第一次 start() 才收敛成 Degraded。
+            let sidecar = SidecarManager::new(SidecarConfig::from_env());
+
             app.manage(AppState {
                 db: Arc::clone(&db),
                 harnesses: Arc::clone(&harnesses),
                 terminal: TerminalRuntime::new(db, harnesses, Arc::new(PortablePtyBackend::new())),
                 git_probe: Arc::new(crate::project::git_root::SystemGitRootProbe),
                 plugins_root,
+                sidecar,
             });
 
             // System Tray（E19）：菜单模型在 tray_menu（纯模块，可单测），
@@ -324,6 +335,10 @@ pub fn run() {
             commands::resume_terminal,
             commands::session_git_snapshots,
             commands::session_git_summary,
+            commands::sidecar_restart,
+            commands::sidecar_start,
+            commands::sidecar_status,
+            commands::sidecar_stop,
             commands::skills_list,
             commands::start_terminal,
             commands::start_terminal_in_worktree,
@@ -342,6 +357,8 @@ pub fn run() {
             // 来不及落库（崩溃/强杀）的情形由下次启动的孤儿收敛兜底。
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
+                    // F20：显式回收 Python sidecar 进程树（Drop 是双保险，不是唯一路径）。
+                    state.sidecar.shutdown();
                     if let Ok(database) = state.db.lock() {
                         let _ = SessionService::new(database.connection())
                             .reconcile_orphans(TerminationReason::HostShutdown);
