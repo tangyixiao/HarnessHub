@@ -565,7 +565,7 @@ interface GatewayStatus { state, sidecarState, mode, providers, tokenization,
 | S1   | `f21/py-providers`          | `python/harness_hub_runtime/providers/**`, `python/tests/test_providers.py`                                                                       | providers 契约层          |
 | S2   | `f21/py-tokenization`       | `python/harness_hub_runtime/tokenization/**`, `python/tests/test_tokenization.py`                                                                 | tokenization 契约层       |
 | S3   | `f21/py-rpc`                | `python/harness_hub_runtime/rpc/server.py`, `python/tests/test_rpc_server.py`                                                                     | RPC 方法 + 能力协商       |
-| S4   | `f21/rust`                  | `src-tauri/src/sidecar/gateway.rs`, `.../mod.rs`, `.../config.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`                            | Rust DTO + decoder + 命令 |
+| S4   | `f21/rust`                  | `src-tauri/src/sidecar/gateway.rs`, `.../mod.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`（`config.rs` 显式**不改**，见 §6.4）        | Rust DTO + decoder + 命令 |
 | S5   | `f21/web`                   | `src/lib/ipc.ts`, `src/lib/ipc.test.ts`, `src/features/settings/ProviderGatewayCard.tsx`, `...test.tsx`, `src/features/settings/SettingsPage.tsx` | 前端 normalize + 卡片     |
 
 每个切片开独立 PR，base = `feat/f21-provider-gateway`，合并后进入集成分支；

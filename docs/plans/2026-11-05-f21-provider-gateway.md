@@ -41,15 +41,15 @@
 
 ## 提交 / PR 切分（写作用域两两互斥）
 
-| 切片 | 分支                        | 独占写作用域                                                                                                            | PR base                     |
-| ---- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| S0   | `feat/f21-provider-gateway` | `docs/specs/2026-11-05-f21-*`、`docs/plans/2026-11-05-f21-*`                                                            | —（直接提交到集成分支）     |
-| S1   | `f21/py-providers`          | `python/harness_hub_runtime/providers/**`、`python/tests/test_providers.py`                                             | `feat/f21-provider-gateway` |
-| S2   | `f21/py-tokenization`       | `python/harness_hub_runtime/tokenization/**`、`python/tests/test_tokenization.py`                                       | 同上                        |
-| S3   | `f21/py-rpc`                | `python/harness_hub_runtime/rpc/server.py`、`python/tests/test_rpc_server.py`                                           | 同上                        |
-| S4   | `f21/rust`                  | `src-tauri/src/sidecar/gateway.rs`、`mod.rs`、`config.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`          | 同上                        |
-| S5   | `f21/web`                   | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/ProviderGatewayCard.tsx(.test.tsx)`、`SettingsPage.tsx` | 同上                        |
-| S6   | `feat/f21-provider-gateway` | 质量门修复 + 本文件「完成门记录」+ 最终 PR → `main`                                                                     | —                           |
+| 切片 | 分支                        | 独占写作用域                                                                                                                  | PR base                     |
+| ---- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| S0   | `feat/f21-provider-gateway` | `docs/specs/2026-11-05-f21-*`、`docs/plans/2026-11-05-f21-*`                                                                  | —（直接提交到集成分支）     |
+| S1   | `f21/py-providers`          | `python/harness_hub_runtime/providers/**`、`python/tests/test_providers.py`                                                   | `feat/f21-provider-gateway` |
+| S2   | `f21/py-tokenization`       | `python/harness_hub_runtime/tokenization/**`、`python/tests/test_tokenization.py`                                             | 同上                        |
+| S3   | `f21/py-rpc`                | `python/harness_hub_runtime/rpc/server.py`、`python/tests/test_rpc_server.py`                                                 | 同上                        |
+| S4   | `f21/rust`                  | `src-tauri/src/sidecar/gateway.rs`、`mod.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`（`config.rs` 显式**不改**） | 同上                        |
+| S5   | `f21/web`                   | `src/lib/ipc.ts`、`src/lib/ipc.test.ts`、`src/features/settings/ProviderGatewayCard.tsx(.test.tsx)`、`SettingsPage.tsx`       | 同上                        |
+| S6   | `feat/f21-provider-gateway` | 质量门修复 + 本文件「完成门记录」+ 最终 PR → `main`                                                                           | —                           |
 
 > S1–S5 在各自 git worktree 中并行开发；每个切片自己 `git commit`（提交后 `git log -1` 复核），
 > **由 Lead 集中执行 push / `gh pr create` / `gh pr merge`**，避免并发 push 竞争 credential helper。
@@ -140,16 +140,21 @@ worktree D:\tmp\dsh-temp\f21-wt\s5           分支 f21/web
 
 ## 完成门记录（S6 填入真实输出，未执行前保持「待执行」）
 
-| 门         | 命令                                              | 结果   | 真实输出摘要 |
-| ---------- | ------------------------------------------------- | ------ | ------------ |
-| format     | `pnpm format:check && pnpm rust:fmt:check`        | 待执行 | 待执行       |
-| lint       | `pnpm lint`                                       | 待执行 | 待执行       |
-| typecheck  | `pnpm typecheck`                                  | 待执行 | 待执行       |
-| unit tests | `pnpm test && pnpm rust:test && pnpm python:test` | 待执行 | 待执行       |
-| build      | `pnpm build`                                      | 待执行 | 待执行       |
-| clippy     | `pnpm rust:clippy`                                | 待执行 | 待执行       |
+| 门         | 命令                                              | 结果 | 真实输出摘要                                                                                                                                                                                                                                                                                                                                                                |
+| ---------- | ------------------------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| format     | `pnpm format:check && pnpm rust:fmt:check`        | PASS | `Checking formatting... All matched files use Prettier code style!`（FMT_EXIT=0）；`$ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`（RUSTFMT_EXIT=0）                                                                                                                                                                                                    |
+| lint       | `pnpm lint`                                       | PASS | `$ eslint .` → `✖ 4 problems (0 errors, 4 warnings)`，均为既有 `react-refresh/only-export-components`（routes.tsx 24/29、DashboardPage.tsx 392/400），LINT_EXIT=0                                                                                                                                                                                                           |
+| typecheck  | `pnpm typecheck`                                  | PASS | `$ tsc --noEmit` 无输出，TC_EXIT=0                                                                                                                                                                                                                                                                                                                                          |
+| unit tests | `pnpm test && pnpm rust:test && pnpm python:test` | PASS | web：`Test Files 12 passed (12) / Tests 436 passed (436)`（TEST_EXIT=0）；rust：`pnpm rust:test` 首跑因共享 `CARGO_TARGET_DIR` rlib 缓存损坏报 `crate \`tokio\` required to be available in rlib format`（exit 101），按 §10 以 `CARGO_BUILD_JOBS=2`复跑 →`test result: ok` 全 target 通过，`RUSTTEST_GATE_EXIT=0`；python：`Ran 181 tests in 0.014s / OK`（PYTEST_EXIT=0） |
+| build      | `pnpm build`                                      | PASS | `✓ 1911 modules transformed` / `✓ built in 4.78s`，BUILD_EXIT=0                                                                                                                                                                                                                                                                                                             |
+| clippy     | `pnpm rust:clippy`                                | PASS | `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 15.23s`，无 warning，CLIPPY_EXIT=0                                                                                                                                                                                                                                                                         |
 
 > 报告时贴真实 stdout/stderr，不复述 AGENTS.md 的期望值；既有 flake / 警告需单独标注。
+>
+> 环境记录：全部 Rust 门在 `D:\HarnessHub` 主检出上执行（路径含 `HarnessHub`），
+> 故 S4 linked worktree 中 `project_registry.rs` 的硬编码路径断言失败不重现；
+> 共享 target 缓存的 rlib 损坏用 `CARGO_BUILD_JOBS=2` 复跑消除，非代码问题。
+> 5 个切片均按 TDD（RED→GREEN，真实失败输出）落地，跨切片桥接 bug 由 PR #63 修复。
 
 ---
 
