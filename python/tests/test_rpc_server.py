@@ -663,19 +663,23 @@ class F21NormalizeTests(unittest.TestCase):
         self.assertEqual(result["rawProvider"], "")
 
     def test_error_exact_keys_and_unknown_fallback(self) -> None:
-        marker = "UNIQUE_ERROR_MARKER_7b21"
+        # spec §4.3：message 允许保留 error.message 的首 120 字符（短摘要），
+        # 但绝不回显完整输入对象（stack 等键的原文不得出现）。
+        message_marker = "UNIQUE_ERROR_MARKER_7b21"
+        object_marker = "UNIQUE_ERROR_OBJECT_MARKER_5c19"
         result = rpc(
             "gateway.normalize.error",
-            {"provider": "anthropic", "error": {"message": marker, "stack": marker}},
+            {"provider": "anthropic", "error": {"message": message_marker, "stack": object_marker}},
         )["result"]
 
         self.assertEqual(set(result), {"kind", "retryable", "message", "provider", "httpStatus"})
         self.assertEqual(result["kind"], "unknown")
         self.assertFalse(result["retryable"])
-        self.assertEqual(result["message"], "")
+        self.assertEqual(result["message"], message_marker)
+        self.assertLessEqual(len(result["message"]), 120)
         self.assertEqual(result["provider"], "anthropic")
         self.assertIsNone(result["httpStatus"])
-        self.assertNotIn(marker, str(result))
+        self.assertNotIn(object_marker, str(result))
 
     def test_error_missing_provider_defaults_to_empty_string(self) -> None:
         result = rpc("gateway.normalize.error", {"error": {}})["result"]
@@ -868,6 +872,67 @@ class F21RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(responses, [])
+
+
+class F21BridgeTests(unittest.TestCase):
+    """跨切片桥接：S1/S2 合入后 RPC 必须调用真实实现且参数顺序正确（spec §10）。
+
+    这些用例在「S3 单独工作树」里会走自包含降级，但合并后必须走真实实现；
+    用于锁住三个桥接点的实参顺序，防止静默退回错误形状的降级分支。
+    """
+
+    def test_route_uses_real_impl_with_frozen_signature_order(self) -> None:
+        # spec §4.1: route(provider, requested_mode, capability)
+        native_only = rpc(
+            "gateway.route",
+            {"provider": "openai", "requestedMode": "unified", "capability": "anthropic.thinking"},
+        )["result"]
+        self.assertEqual(native_only["mode"], "native")
+        self.assertEqual(native_only["reason"], "native_only_capability")
+
+        explicit = rpc("gateway.route", {"provider": "openai", "requestedMode": "native"})["result"]
+        self.assertEqual(explicit["mode"], "native")
+        self.assertEqual(explicit["reason"], "explicit_native")
+
+    def test_stream_normalize_uses_real_impl_with_provider_first(self) -> None:
+        # spec §4.1: normalize_stream_event(provider, event)
+        result = rpc(
+            "gateway.normalize.stream",
+            {"provider": "openai", "event": {"type": "content_block_delta", "delta": {"text": "hello"}}},
+        )["result"]
+        self.assertEqual(result["rawProvider"], "openai")
+        self.assertEqual(result["type"], "delta")
+        self.assertEqual(result["textDelta"], "hello")
+
+    def test_error_normalize_uses_real_impl_with_provider_first(self) -> None:
+        # spec §4.1: normalize_error(provider, error) — 真实 kind 映射必须生效
+        result = rpc(
+            "gateway.normalize.error",
+            {"provider": "anthropic", "error": {"type": "rate_limit", "status": 429}},
+        )["result"]
+        self.assertEqual(result["provider"], "anthropic")
+        self.assertEqual(result["kind"], "rate_limit")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["httpStatus"], 429)
+
+    def test_provider_descriptors_use_real_probe_all(self) -> None:
+        # S1 probe_all 返回 ProviderDescriptor dataclass；桥接必须调用 .to_json()，
+        # 而不是对 dataclass 用 .get()（否则会静默退回 find_spec 降级）。
+        from unittest.mock import patch
+
+        from harness_hub_runtime.providers.dto import ProviderDescriptor
+
+        fake = [
+            ProviderDescriptor("litellm", "unified", False, "BRIDGE_MARKER_litellm"),
+            ProviderDescriptor("openai", "native", True, "BRIDGE_MARKER_openai"),
+            ProviderDescriptor("anthropic", "native", False, "BRIDGE_MARKER_anthropic"),
+            ProviderDescriptor("google", "native", False, "BRIDGE_MARKER_google"),
+        ]
+        with patch("harness_hub_runtime.providers.probe_all", return_value=fake):
+            descriptors = rpc("gateway.providers")["result"]
+        self.assertEqual(descriptors[0]["detail"], "BRIDGE_MARKER_litellm")
+        self.assertTrue(descriptors[1]["importable"])
+        self.assertEqual(descriptors[3]["id"], "google")
 
 
 if __name__ == "__main__":
