@@ -172,6 +172,7 @@ pnpm rust:clippy
    - CI 的 rust job 跑在 `ubuntu-latest`，而 `process_tree_ownership.rs` 是 `#![cfg(windows)]`，CI 根本不执行该测试。
    - `pnpm rust:test` 首次全绿（`2050c3d` 合并当次），复跑 4 次里第 4 次拿到干净全绿 `EXIT=0`；F20 自身 `src-tauri/tests/sidecar_lifecycle.rs` 真机冷启动 6 用例独立跑始终稳定 `ok`。结论：属既存环境敏感型 flake，不阻断 F20 交付，记录于此以便后续单独治理。
 2. `src-tauri/src/error.rs` F20 sidecar error-variant 块原先多一空行的 rustfmt 差异已在 `50637fc` 一并修复，最终 `rust:fmt:check` 全绿。
+3. **Linux CI 首轮失败，根因是测试探针而非生产代码**：最终 PR #59 的 `Rust Control Plane` job 在 `ubuntu-latest` 报 `crash_is_detected_as_degraded_and_restart_recovers ... FAILED`（`外部 kill 后进程 7390 仍存活`）。Linux 的 `kill -0 <pid>` 无法区分存活与僵尸：崩溃恢复用例从外部 `kill -9` sidecar 子进程，Rust 父进程 `SidecarProcess` 尚未 `try_wait()` 回收，子进程保持僵尸态，`kill -0` 一直成功，`wait_until_dead` 5s 超时。Windows 的 `tasklist` 无僵尸语义故本地必过。修复：`#[cfg(not(windows))] process_alive()` 先读 `/proc/<pid>/status`，把 `State: Z (zombie)` 判为已死亡；生产代码 `SidecarProcess::is_alive()` 用 `try_wait()` 本就正确，未改。等价片段经 `rustc --edition 2021` 编译验证，Windows 侧 `cargo test --test sidecar_lifecycle` 6/6 全绿 + clippy/fmt 全绿；最终以 CI ubuntu 全绿为权威证据。
 
 ## 已知风险
 

@@ -76,6 +76,20 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 fn process_alive(pid: u32) -> bool {
+    // Linux 上 `kill -0` 无法区分「存活」与「僵尸」：被 SIGKILL 的 sidecar
+    // 子进程在父进程 `wait()` 之前仍是僵尸，kill -0 依旧返回成功。崩溃恢复
+    // 用例是「外部 kill」，此时生产代码还没 try_wait()，所以必须把 /proc 里
+    // `State: Z (zombie)` 视为已死亡，否则 wait_until_dead 会假阴性（Windows
+    // 的 tasklist 没有僵尸语义，本地能过、Linux CI 会挂）。
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        let is_zombie = status
+            .lines()
+            .find_map(|line| line.strip_prefix("State:"))
+            .is_some_and(|value| value.trim_start().starts_with('Z'));
+        if is_zombie {
+            return false;
+        }
+    }
     Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
