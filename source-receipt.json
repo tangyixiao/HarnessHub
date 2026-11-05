@@ -2,10 +2,40 @@
   "repo": "tangyixiao/HarnessHub",
   "sourceBranch": "main",
   "sourceCommit": "6d6c32753916b56d23dbd020e6db2f428a84f324",
-  "media": [],
+  "designVersion": 3,
+  "direction": {
+    "visualConcept": "暖灰、铸铝与琥珀指示灯的桌面会话控制台：以纵向项目轨道连接横向终端抽屉，项目、会话和活动占据不同密度的分栏。首屏是有重量的工作台，标题嵌在左侧窄栏，主要空间给会话装置与文档路径。事实边界：本机 Harness 的登记与管理，不代替各 CLI，也不把发布记录当作所有平台能力的验收。",
+    "layout": "workbench",
+    "palette": {
+      "light": {
+        "bg": "#DED8CE",
+        "surface": "#F2ECE2",
+        "ink": "#302B24",
+        "muted": "#655c4f",
+        "accent": "#83501b"
+      },
+      "dark": {
+        "bg": "#201D18",
+        "surface": "#312A21",
+        "ink": "#F3EBDD",
+        "muted": "#b5a794",
+        "accent": "#e9af52"
+      }
+    },
+    "threeConcept": "Three.js 创建一组可抽出的铸铝终端托盘，分别标注项目目录、会话和活动记录，琥珀色为局部机械刻度。抽屉层级是管理关系插图，不是虚构实时后台。静态停驻，不循环扫描。",
+    "distinctiveInteraction": "点选项目/会话/活动三个轨道，仅展开对应的仓库文档入口和说明；拖动会话托盘可查看彼此关系，所有示例明确标为结构说明。"
+  },
+  "media": [
+    {
+      "src": "assets/media/product-1.webp",
+      "alt": "HarnessHub",
+      "url": "https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/src-tauri/icons/icon.png",
+      "path": "src-tauri/icons/icon.png"
+    }
+  ],
   "skills": [
     "baoyu-design",
     "design-taste-frontend"
   ],
-  "design": "content-first source/product/photography; no rejected template or faux 3D"
+  "flagshipModel": "WorkBuddy / deepseek-v4.1-flash"
 }

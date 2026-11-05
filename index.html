@@ -1,29 +1,85 @@
-<!doctype html><html lang="zh-CN" data-type="software" data-radius="sharp" data-buttons="solid" data-motion data-page-mode="short" data-project="HarnessHub"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="page-type" content="software"><meta name="site-kind" content="software"><title>Harness Hub · AI 编程工具的 本地桌面控制中心</title><meta name="description" content="Local-first 的 AI Coding Harness 桌面控制中心，关联项目、终端会话、活动与使用量记录。"><link rel="stylesheet" href="assets/system.css"><link rel="stylesheet" href="assets/ui/cards.css"><link rel="stylesheet" href="assets/motion/motion.css"><link rel="stylesheet" href="assets/layout/layout.css"><link rel="stylesheet" href="assets/fonts/fonts.css"><link rel="stylesheet" href="assets/page.css"><!-- <html lang="en" data-radius="sharp">; keep this <style> after the links: layout.css resets --ly-scale -->
-<style>
-:root {
-  --p-bg: #fafafa; --p-surface: #edf0f5; --p-ink: #16181e; --p-muted: #565d6d;
-  --p-accent: #405dcc; --p-accent-ink: #fafafa; --p-action: #405dcc; --p-action-ink: #fafafa;
-  --p-inv-bg: #16181e; --p-inv-surface: #23252b; --p-inv-ink: #fafafa; --p-inv-muted: #9a9b9e;
-  --p-inv-accent: #405dcc; --p-inv-accent-ink: #fafafa; --p-inv-action: #405dcc; --p-inv-action-ink: #fafafa;
-  --font-display: "Geist", system-ui, sans-serif;
-  --font-text: "Geist", system-ui, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  --display-weight: 500;
-  --display-tracking: -0.035em;
-  --display-tracking-xl: -0.045em;
-}
-</style><style>html[data-theme="light"]{--p-bg:#fafafa;--p-surface:#edf0f5;--p-ink:#16181e;--p-muted:#565d6d;--p-accent:#405dcc;--p-accent-ink:#ffffff;--p-action:#405dcc;--p-action-ink:#ffffff;color-scheme:light}html[data-theme="dark"]{--p-bg:#131517;--p-surface:#202427;--p-ink:#f0f1f2;--p-muted:#b5bbc1;--p-accent:#aebfff;--p-accent-ink:#131517;--p-action:#aebfff;--p-action-ink:#131517;color-scheme:dark}</style><script src="assets/theme.js"></script><link rel="icon" href="favicon.svg" type="image/svg+xml"></head><body><!-- source: tangyixiao/HarnessHub; hero: split; brand/material override of dealer recorded in plans. --><header class="nav"><div class="wrap nav__bar"><a class="skip-link" href="#top">跳到正文</a><a class="nav__logo" href="#top">Harness Hub</a><nav class="nav__links" aria-label="章节导航"><div class="nav__item"><a class="nav__link" href="#work">项目内容</a></div><div class="nav__item"><a class="nav__link" href="docs.html">使用文档</a></div></nav><div class="nav__actions"><a class="btn btn--primary" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a><button class="theme-toggle" type="button" data-theme-toggle aria-label="切换深浅色" aria-pressed="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></button></div><button class="nav__toggle" type="button" aria-expanded="false" aria-label="菜单"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 5h14M2 13h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div></header><main><section class="hero hero--split" id="top"><div class="wrap"><div class="hero-text grid hero__grid"><div class="hero__text span-5"><h1 id="hero-h">AI 编程工具的<br>本地桌面控制中心</h1><p class="hero__lead">Local-first 的 AI Coding Harness 桌面控制中心，关联项目、终端会话、活动与使用量记录。</p><div class="btn-row"><a class="btn btn--primary" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a></div><p class="project-fact">Windows 与 Linux · v0.1.0</p></div><div class="hero__media span-6 start-7 material-media"><div class="source-preview" data-visual><a class="source-path" href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/src/styles/globals.css#L10-L24">src/styles/globals.css · L10–24</a><pre><code>@theme {
-  /* 表面：近黑画布 → 悬浮面，亮度逐级抬升，色相统一 */
-  --color-surface-base: oklch(0.165 0.008 265);
-  --color-surface-raised: oklch(0.215 0.009 265);
-  --color-surface-overlay: oklch(0.265 0.01 265);
-  --color-border-subtle: oklch(0.295 0.01 265);
+<!doctype html><html lang="zh-CN" data-project="HarnessHub" data-family="flash"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Local-first 的 AI Coding Harness 桌面控制中心，关联项目、终端会话、活动与使用量记录。"><meta name="color-scheme" content="light dark"><title>Harness Hub · 本机 AI 工具的 桌面控制台。</title><link rel="stylesheet" href="assets/fonts/fonts.css"><link rel="stylesheet" href="assets/fonts/display.css"><link rel="stylesheet" href="assets/site.css"><link rel="stylesheet" href="assets/docs-v3.css"><link rel="stylesheet" href="assets/three/view3d.css"><link rel="stylesheet" href="assets/flagships.css"><link rel="stylesheet" href="assets/polish.css"><style>:root{--font-body:"Geist","PingFang SC","Microsoft YaHei",sans-serif;--font-text:var(--font-body);--model-accent:var(--accent);--font-display:"Barlow Condensed","Songti SC","SimSun",serif;--font-mono:"Geist Mono","SFMono-Regular",Consolas,monospace}html[data-theme="light"]{--bg:#DED8CE;--surface:#F2ECE2;--ink:#302B24;--muted:#655c4f;--accent:#83501b;--accent-ink:#FFFFFF;--line:color-mix(in srgb,#302B24 19%,transparent);color-scheme:light}html[data-theme="dark"]{--bg:#201D18;--surface:#312A21;--ink:#F3EBDD;--muted:#b5a794;--accent:#e9af52;--accent-ink:#000000;--line:color-mix(in srgb,#F3EBDD 19%,transparent);color-scheme:dark}</style><script src="assets/theme.js"></script><link rel="icon" type="image/svg+xml" href="favicon.svg"></head><body><header class="nav site-nav"><div class="wrap nav-inner"><a class="skip-link" href="#top">跳到正文</a><a class="site-brand" href="index.html">Harness Hub</a><nav class="site-links" aria-label="项目导航"><a href="docs.html">使用文档</a><a href="https://github.com/tangyixiao/HarnessHub">源代码</a></nav><div class="nav-controls"><a class="btn nav-cta" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a><button class="site-theme" type="button" data-theme-toggle aria-label="切换深浅色" aria-pressed="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></button><button class="site-menu-toggle" data-menu-toggle type="button" aria-label="菜单" aria-expanded="false" aria-controls="site-drawer"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 6h14M3 14h14"/></svg></button></div></div><nav class="site-drawer" id="site-drawer" hidden><a href="index.html">项目首页</a><a href="docs.html">使用文档</a><a href="https://github.com/tangyixiao/HarnessHub">查看源码</a><p class="drawer-note">Harness Hub</p></nav></header><main id="top"><section class="flash-harness" aria-labelledby="harness-title">
+  <div class="harness-desk">
 
-  /* 文字：主 &lt; 次 &lt; 弱，永不纯白 */
-  --color-content-primary: oklch(0.96 0.003 265);
-  --color-content-secondary: oklch(0.84 0.008 265);
-  --color-content-muted: oklch(0.66 0.012 265);
+    <aside class="harness-rail" aria-label="Workstation control rail">
+      <span class="harness-rail__id">CTL / 01 · Harness Hub</span>
+      <h1 class="harness-rail__title" id="harness-title">本机 AI 工具的<br>桌面控制台。</h1>
 
-  /* accent：唯一的彩色，只给 CTA / 激活态 / 链接 */
-  --color-accent: oklch(0.66 0.155 268);
-  --color-accent-strong: oklch(0.73 0.14 268);</code></pre></div></div></div></div></section><section class="section ground-surface" id="work"><div class="wrap"><div class="section-head"><h2>项目里的主要内容</h2></div><div class="work-grid"><ul class="feature-rows"><li><h3>本机 Harness 发现</h3><p>登记本机已有的 Codex、Claude Code、Gemini CLI 等 Harness。</p></li><li><h3>项目与终端会话管理</h3><p>以项目与会话为线索管理终端生命周期和历史。</p></li><li><h3>活动与使用量记录</h3><p>将活动、Git 记录与使用量关联，具体适配范围见文档。</p></li></ul><div class="work-material"><div class="usage-block"><p>使用入口</p><pre><code>git clone https://github.com/tangyixiao/HarnessHub.git</code></pre><a class="link" href="https://github.com/tangyixiao/HarnessHub/blob/main/README.md">阅读完整使用说明</a></div></div></div></div></section></main><footer class="footer closing footer--columns" id="use"><div class="wrap"><div class="closing-head"><h2>源码与使用说明</h2><p>README 记录 v0.1.0 Windows/Linux 发布；各平台与具体能力的验证范围以发布说明为准。</p><a class="btn btn--primary" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a></div><div class="closing-directory"><div class="footer__grid"><div><p class="footer-name">Harness Hub</p><p>tangyixiao/HarnessHub</p></div><div class="resource-links"><a class="link" href="https://github.com/tangyixiao/HarnessHub/blob/main/README.md">阅读使用文档</a><a class="link" href="https://github.com/tangyixiao/HarnessHub/issues">查看问题与反馈</a><a class="link" href="https://github.com/tangyixiao/HarnessHub/tree/main/docs">docs</a><a class="link" href="https://github.com/tangyixiao/HarnessHub/tree/main/evals">evals</a><a class="link" href="https://github.com/tangyixiao/HarnessHub/tree/main/fixtures">fixtures</a><a class="link" href="https://github.com/tangyixiao/HarnessHub/tree/main/plugins">plugins</a></div></div><div class="footer__legal"><span>© 2026 tangyixiao</span><a href="https://github.com/tangyixiao/HarnessHub">GitHub</a></div></div></div></footer><script type="module" src="assets/system.js"></script><script type="module" src="assets/motion/motion.js"></script><script type="module" src="assets/layout/layout.js"></script></body></html>
+      <dl class="harness-plate">
+        <div class="harness-plate__row">
+          <dt>模式</dt>
+          <dd>本机优先的桌面工具</dd>
+        </div>
+        <div class="harness-plate__row">
+          <dt>版本</dt>
+          <dd><b>v0.1.0</b></dd>
+        </div>
+        <div class="harness-plate__row">
+          <dt>平台</dt>
+          <dd>Windows x64 · Linux x64</dd>
+        </div>
+        <div class="harness-plate__row">
+          <dt>工具检测</dt>
+          <dd>Codex · Claude Code · Gemini CLI · OpenCode · CodeBuddy</dd>
+        </div>
+      </dl>
+
+      <a class="harness-rail__cta" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a>
+      <a class="harness-rail__back" href="https://github.com/tangyixiao/HarnessHub">源码仓库 →</a>
+    </aside>
+
+    <div class="harness-bench">
+      <p class="harness-intro">Local-first 的 AI Coding Harness 桌面控制中心，关联项目、终端会话、活动与使用量记录。</p>
+
+      <div class="harness-bench__body">
+        <figure class="harness-instrument" style="margin:0">
+          <span class="harness-instrument__label">本机工具 · 会话与连接</span>
+          <div class="project-3d" data-model="bridge" aria-label="Interactive 3D bridge and port control sculpture"></div>
+          <figcaption class="harness-instrument__note">拖动查看交互示意</figcaption>
+        </figure>
+
+        <ul class="harness-gauges">
+          <li class="harness-gauge"><h3>本机 Harness 发现</h3><p>登记本机已有的 Codex、Claude Code、Gemini CLI 等 Harness。</p></li><li class="harness-gauge"><h3>项目与终端会话管理</h3><p>以项目与会话为线索管理终端生命周期和历史。</p></li><li class="harness-gauge"><h3>活动与使用量记录</h3><p>将活动、Git 记录与使用量关联，具体适配范围见文档。</p></li>
+        </ul>
+      </div>
+
+      <div class="harness-tape">
+        <div>
+          <h2>一处管理，本机运行</h2>
+          <p>Harness Hub registers local Git projects (deduplicated by repository root), detects the Harness installations already on your machine, and starts and manages terminal sessions for them from a single desktop surface.</p>
+          <p>It does not replace Codex, Claude Code, Gemini CLI or OpenCode, and it does not ship any Harness program or credentials. Session snapshots record what changed during a session without attributing it to AI. Usage from the supported Harness clients is imported through ccusage.</p>
+          <p>Discovery, history and usage are read from local data — this page shows no live telemetry.</p>
+        </div>
+        <div>
+          <h2>从源码里看</h2>
+          <div class="harness-source"><div class="source-area" id="source-code"><a class="source-link" href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/src/styles/globals.css#L10-L31">src/styles/globals.css · L10–31</a><div class="docs-code" data-code-block><div class="docs-code-toolbar"><span class="docs-code-language">CSS</span><span class="docs-code-file">src/styles/globals.css</span><button class="docs-code-copy" type="button" data-copy-code aria-label="复制代码">复制</button><span class="docs-copy-status" role="status" aria-live="polite"></span></div><pre tabindex="0"><code class="highlight language-css" data-language="css"><span class="tok-p">@</span><span class="tok-k">theme</span><span class="tok-w"> </span><span class="tok-p">{</span>
+<span class="tok-w">  </span><span class="tok-c">/* 表面：近黑画布 → 悬浮面，亮度逐级抬升，色相统一 */</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-surface-base</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">165</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">008</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-surface-raised</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">215</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">009</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-surface-overlay</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">265</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">01</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-border-subtle</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">295</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">01</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+
+<span class="tok-w">  </span><span class="tok-c">/* 文字：主 &lt; 次 &lt; 弱，永不纯白 */</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-content-primary</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">96</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">003</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-content-secondary</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">84</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">008</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-content-muted</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">66</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">012</span><span class="tok-w"> </span><span class="tok-nt">265</span><span class="tok-o">);</span>
+
+<span class="tok-w">  </span><span class="tok-c">/* accent：唯一的彩色，只给 CTA / 激活态 / 链接 */</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-accent</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">66</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">155</span><span class="tok-w"> </span><span class="tok-nt">268</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-accent-strong</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">73</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">14</span><span class="tok-w"> </span><span class="tok-nt">268</span><span class="tok-o">);</span>
+
+<span class="tok-w">  </span><span class="tok-nt">--color-signal-ok</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">75</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">15</span><span class="tok-w"> </span><span class="tok-nt">155</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-signal-warn</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">8</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">15</span><span class="tok-w"> </span><span class="tok-nt">85</span><span class="tok-o">);</span>
+<span class="tok-w">  </span><span class="tok-nt">--color-signal-error</span><span class="tok-o">:</span><span class="tok-w"> </span><span class="tok-nt">oklch</span><span class="tok-o">(</span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">68</span><span class="tok-w"> </span><span class="tok-nt">0</span><span class="tok-p">.</span><span class="tok-nc">18</span><span class="tok-w"> </span><span class="tok-nt">25</span><span class="tok-o">);</span>
+<span class="tok-p">}</span>
+
+<span class="tok-p">@</span><span class="tok-k">layer</span><span class="tok-w"> </span><span class="tok-nt">base</span><span class="tok-w"> </span><span class="tok-p">{</span></code></pre></div></div></div>
+          <div class="harness-quickstart"><div class="docs-code" data-code-block><div class="docs-code-toolbar"><span class="docs-code-language">Bash</span><button class="docs-code-copy" type="button" data-copy-code aria-label="复制代码">复制</button><span class="docs-copy-status" role="status" aria-live="polite"></span></div><pre tabindex="0"><code class="highlight language-bash" data-language="bash">git<span class="tok-w"> </span>clone<span class="tok-w"> </span>https://github.com/tangyixiao/HarnessHub.git</code></pre></div></div>
+          <p class="harness-status">README 记录 v0.1.0 Windows/Linux 发布；各平台与具体能力的验证范围以发布说明为准。</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+</main><footer class="site-footer"><div class="wrap"><div class="footer-top"><span class="footer-name">Harness Hub</span><nav class="footer-links"><a href="docs.html">使用文档</a><a href="https://github.com/tangyixiao/HarnessHub">GITHUB</a><a href="https://github.com/tangyixiao/HarnessHub/issues">问题与反馈</a></nav></div><div class="footer-bottom"><span>© 2026 tangyixiao/HarnessHub</span><details><summary>素材来源</summary><ul><li><a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/src-tauri/icons/icon.png">src-tauri/icons/icon.png</a></li></ul></details></div></div></footer><script src="assets/site.js" defer></script><script src="assets/docs-v3.js" defer></script><script src="assets/flagships.js" defer></script><script type="module" src="assets/three/view3d.js"></script></body></html>
