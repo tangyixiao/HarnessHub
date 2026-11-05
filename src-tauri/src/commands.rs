@@ -1166,12 +1166,138 @@ fn parse_skills(raw: Option<&str>) -> Vec<PluginSkill> {
         .collect()
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// F20：Python sidecar 生命周期命令
+//
+// 这些命令刻意**薄**：全部 `Ok(state.sidecar.xxx())`。sidecar 的任何失败
+// （Python 缺失 / 握手失败 / 进程崩溃）都由 manager 收敛成
+// `SidecarStatus { state: Degraded, last_error: Some(..) }`，绝不升级成 IPC `Err`
+// ——否则「没有 Python」会连累 PTY / Git / Session 等主 Harness 功能（验收 #5，
+// ADR-0006）。状态卡片拿到 Degraded 自己展示降级文案即可。
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 读取 sidecar 状态（纯读；内部会用 `is_alive()` 检出进程崩溃 → Degraded）。
+#[tauri::command]
+pub fn sidecar_status(state: State<'_, AppState>) -> Result<crate::sidecar::dto::SidecarStatus> {
+    Ok(state.sidecar.status())
+}
+
+/// 启动 sidecar（幂等；懒启动入口）。失败收敛为 Degraded，不返回 Err。
+#[tauri::command]
+pub fn sidecar_start(state: State<'_, AppState>) -> Result<crate::sidecar::dto::SidecarStatus> {
+    Ok(state.sidecar.start())
+}
+
+/// 停止 sidecar（幂等；回收进程树）。
+#[tauri::command]
+pub fn sidecar_stop(state: State<'_, AppState>) -> Result<crate::sidecar::dto::SidecarStatus> {
+    Ok(state.sidecar.stop())
+}
+
+/// 显式重启 sidecar（崩溃恢复入口；`restart_count` 会自增）。
+#[tauri::command]
+pub fn sidecar_restart(state: State<'_, AppState>) -> Result<crate::sidecar::dto::SidecarStatus> {
+    Ok(state.sidecar.restart())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::usage::importer::Reconciliation;
     use crate::usage::{ImportStatus, RunnerKind, UsageImport};
     use std::collections::BTreeMap;
+
+    /// 跨 IPC 契约测试：四个 `sidecar_*` 命令的返回形状。
+    ///
+    /// 命令本身是薄包装（`Ok(state.sidecar.xxx())`），真正的边界是它们共同返回的
+    /// `SidecarStatus` 序列化形状 —— 前端 `normalizeSidecarStatus` 逐字段依赖这些
+    /// camelCase 键。这里从命令层的视角把形状**整体**锁死：尤其 `Degraded` 分支
+    /// （验收 #5：Python 不可用也必须返回一份完整、可被前端解析的状态，而不是 IPC Err）。
+    #[test]
+    fn sidecar_commands_return_status_with_locked_ipc_shape() {
+        use crate::sidecar::dto::{RuntimeInfo, SidecarState, SidecarStatus};
+        use serde_json::json;
+
+        // Ready 分支：完整嵌套形状，逐键对应前端 SidecarStatus / SidecarRuntimeInfo。
+        let ready = SidecarStatus {
+            state: SidecarState::Ready,
+            pid: Some(4242),
+            runtime: Some(RuntimeInfo {
+                name: "harness-hub-runtime".to_string(),
+                version: "0.5.0".to_string(),
+                transport: "stdio-jsonrpc".to_string(),
+                python: "3.14.3".to_string(),
+                protocol_version: "1.0".to_string(),
+                providers: vec![],
+                capabilities: vec!["ping".to_string()],
+                methods: vec!["ping".to_string()],
+            }),
+            negotiated_capabilities: vec!["ping".to_string(), "shutdown".to_string()],
+            protocol_version: Some("1.0".to_string()),
+            last_error: None,
+            restart_count: 0,
+        };
+        let value = serde_json::to_value(&ready).expect("序列化 SidecarStatus");
+        assert_eq!(
+            value,
+            json!({
+                "state": "ready",
+                "pid": 4242,
+                "runtime": {
+                    "name": "harness-hub-runtime",
+                    "version": "0.5.0",
+                    "transport": "stdio-jsonrpc",
+                    "python": "3.14.3",
+                    "protocolVersion": "1.0",
+                    "providers": [],
+                    "capabilities": ["ping"],
+                    "methods": ["ping"]
+                },
+                "negotiatedCapabilities": ["ping", "shutdown"],
+                "protocolVersion": "1.0",
+                "lastError": null,
+                "restartCount": 0
+            })
+        );
+        // 顶层不能漏出任何 snake_case。
+        let object = value.as_object().expect("SidecarStatus 必须是对象");
+        for leaked in [
+            "negotiated_capabilities",
+            "protocol_version",
+            "last_error",
+            "restart_count",
+        ] {
+            assert!(
+                !object.contains_key(leaked),
+                "顶层泄漏 snake_case：{leaked}"
+            );
+        }
+
+        // Degraded 分支：失败路径也必须是一份完整、前端可解析的状态。
+        let degraded = SidecarStatus {
+            state: SidecarState::Degraded,
+            pid: None,
+            runtime: None,
+            negotiated_capabilities: vec![],
+            protocol_version: None,
+            last_error: Some("Python sidecar 启动失败：python 不存在".to_string()),
+            restart_count: 1,
+        };
+        let degraded = serde_json::to_value(&degraded).expect("序列化 SidecarStatus");
+        assert_eq!(
+            degraded,
+            json!({
+                "state": "degraded",
+                "pid": null,
+                "runtime": null,
+                "negotiatedCapabilities": [],
+                "protocolVersion": null,
+                "lastError": "Python sidecar 启动失败：python 不存在",
+                "restartCount": 1
+            })
+        );
+    }
+
     /// 跨 IPC 契约测试：`refresh_usage` 的返回形状。
     ///
     /// 前端 `src/lib/ipc.ts` 的 `normalizeUsageRefreshReport` 依赖这些键，
