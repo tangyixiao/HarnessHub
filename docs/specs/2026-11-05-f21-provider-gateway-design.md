@@ -30,17 +30,17 @@ IPC 验证的契约层**：
 
 ### 1.2 验收标准
 
-| # | 验收 | 证据 |
-|---|------|------|
-| 1 | F20 的 25 个 Python 测试、握手 / shutdown 语义、Rust `SidecarStatus` 形状全部不回归 | `pnpm python:test`、`pnpm rust:test`、`pnpm test` |
-| 2 | 新增 Python 契约层全部 TDD（先 RED 后 GREEN），无第三方 import | `python/tests/test_providers.py`、`test_tokenization.py`、`test_rpc_server.py` |
-| 3 | 新增 Rust DTO 有 JSON serialization contract test，锁定 camelCase 与嵌套形状 | `src-tauri/src/sidecar/gateway.rs` 内联 `#[cfg(test)]` |
-| 4 | 新增 TS normalize 有同形状 payload fixture test + 坏输入安全默认值 | `src/lib/ipc.test.ts` |
-| 5 | `src/features/*` 组件不直接 `invoke()`，渲染路径零 IPC | `ProviderGatewayCard.test.tsx` |
-| 6 | Python 缺失 / sidecar 未启动 / JSON 坏掉时，`gateway_status` 仍返回完整可解析状态，不升级成 IPC `Err` | Rust 命令测试 + 前端 fixture |
-| 7 | 全质量门通过并贴真实输出 | 计划文档「完成门记录」 |
-| 8 | 零新增第三方依赖 | `python/pyproject.toml` `dependencies = []` 不变；`package.json` / `Cargo.toml` 不变 |
-| 9 | 不把 Prompt / Response / Session 原文发到网络 | 所有新增 RPC 方法不接收 `prompt` / `messages` / `response` 字段；`gateway.route` 只读路由元数据 |
+| #   | 验收                                                                                                  | 证据                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 1   | F20 的 25 个 Python 测试、握手 / shutdown 语义、Rust `SidecarStatus` 形状全部不回归                   | `pnpm python:test`、`pnpm rust:test`、`pnpm test`                                               |
+| 2   | 新增 Python 契约层全部 TDD（先 RED 后 GREEN），无第三方 import                                        | `python/tests/test_providers.py`、`test_tokenization.py`、`test_rpc_server.py`                  |
+| 3   | 新增 Rust DTO 有 JSON serialization contract test，锁定 camelCase 与嵌套形状                          | `src-tauri/src/sidecar/gateway.rs` 内联 `#[cfg(test)]`                                          |
+| 4   | 新增 TS normalize 有同形状 payload fixture test + 坏输入安全默认值                                    | `src/lib/ipc.test.ts`                                                                           |
+| 5   | `src/features/*` 组件不直接 `invoke()`，渲染路径零 IPC                                                | `ProviderGatewayCard.test.tsx`                                                                  |
+| 6   | Python 缺失 / sidecar 未启动 / JSON 坏掉时，`gateway_status` 仍返回完整可解析状态，不升级成 IPC `Err` | Rust 命令测试 + 前端 fixture                                                                    |
+| 7   | 全质量门通过并贴真实输出                                                                              | 计划文档「完成门记录」                                                                          |
+| 8   | 零新增第三方依赖                                                                                      | `python/pyproject.toml` `dependencies = []` 不变；`package.json` / `Cargo.toml` 不变            |
+| 9   | 不把 Prompt / Response / Session 原文发到网络                                                         | 所有新增 RPC 方法不接收 `prompt` / `messages` / `response` 字段；`gateway.route` 只读路由元数据 |
 
 ### 1.3 非目标（明确不做）
 
@@ -114,9 +114,16 @@ Python sidecar (python/harness_hub_runtime)
 
 ```json
 [
-  "ping", "runtime.info", "shutdown",
-  "gateway.status", "gateway.routing", "gateway.streaming", "gateway.errors",
-  "tokenization.precedence", "tokenization.estimate", "tokenization.revision"
+  "ping",
+  "runtime.info",
+  "shutdown",
+  "gateway.status",
+  "gateway.routing",
+  "gateway.streaming",
+  "gateway.errors",
+  "tokenization.precedence",
+  "tokenization.estimate",
+  "tokenization.revision"
 ]
 ```
 
@@ -124,10 +131,18 @@ Python sidecar (python/harness_hub_runtime)
 
 ```json
 [
-  "ping", "runtime.info", "initialize", "shutdown",
-  "gateway.status", "gateway.providers", "gateway.route",
-  "gateway.normalize.stream", "gateway.normalize.error",
-  "tokenization.estimate", "tokenization.precedence", "tokenization.revision"
+  "ping",
+  "runtime.info",
+  "initialize",
+  "shutdown",
+  "gateway.status",
+  "gateway.providers",
+  "gateway.route",
+  "gateway.normalize.stream",
+  "gateway.normalize.error",
+  "tokenization.estimate",
+  "tokenization.precedence",
+  "tokenization.revision"
 ]
 ```
 
@@ -147,10 +162,30 @@ Python sidecar (python/harness_hub_runtime)
   "mode": "unified",
   "protocolVersion": "1.0",
   "providers": [
-    {"id": "litellm",  "mode": "unified", "importable": false, "detail": "optional SDK not installed"},
-    {"id": "openai",   "mode": "native",  "importable": false, "detail": "optional SDK not installed"},
-    {"id": "anthropic","mode": "native",  "importable": false, "detail": "optional SDK not installed"},
-    {"id": "google",   "mode": "native",  "importable": false, "detail": "optional SDK not installed"}
+    {
+      "id": "litellm",
+      "mode": "unified",
+      "importable": false,
+      "detail": "optional SDK not installed"
+    },
+    {
+      "id": "openai",
+      "mode": "native",
+      "importable": false,
+      "detail": "optional SDK not installed"
+    },
+    {
+      "id": "anthropic",
+      "mode": "native",
+      "importable": false,
+      "detail": "optional SDK not installed"
+    },
+    {
+      "id": "google",
+      "mode": "native",
+      "importable": false,
+      "detail": "optional SDK not installed"
+    }
   ],
   "tokenization": {
     "precedence": ["provider_reported", "provider_count_api", "local_exact", "estimated"],
@@ -180,16 +215,22 @@ Python sidecar (python/harness_hub_runtime)
 请求 `params`（**白名单字段**，多余字段忽略）：
 
 ```json
-{"provider": "openai", "requestedMode": "unified", "capability": "responses.streaming"}
+{ "provider": "openai", "requestedMode": "unified", "capability": "responses.streaming" }
 ```
 
 响应 `result`：
 
 ```json
-{"mode": "native", "provider": "openai", "reason": "native_only_capability", "fallback": "litellm"}
+{
+  "mode": "native",
+  "provider": "openai",
+  "reason": "native_only_capability",
+  "fallback": "litellm"
+}
 ```
 
 路由规则（冻结，按序首个命中者胜）：
+
 1. `capability` 属于 `NATIVE_ONLY_CAPABILITIES` → `mode="native"`, `reason="native_only_capability"`。
 2. `requestedMode == "native"` → `mode="native"`, `reason="explicit_native"`。
 3. `provider` 不在 `PROVIDER_IDS`（`["litellm","openai","anthropic","google"]`）→
@@ -211,14 +252,20 @@ Python sidecar (python/harness_hub_runtime)
 `gateway.normalize.stream` 入参 `{"provider":"openai","event":{...}}`，出参统一 `ModelEvent`：
 
 ```json
-{"type":"delta","textDelta":"hi","finishReason":null,"usage":null,"rawProvider":"openai"}
+{ "type": "delta", "textDelta": "hi", "finishReason": null, "usage": null, "rawProvider": "openai" }
 ```
 
 `type` 枚举（冻结）：`"start" | "delta" | "usage" | "done" | "error" | "unknown"`。
 `gateway.normalize.error` 入参 `{"provider":"openai","error":{...}}`，出参统一 `ProviderError`：
 
 ```json
-{"kind":"rate_limit","retryable":true,"message":"rate limited","provider":"openai","httpStatus":429}
+{
+  "kind": "rate_limit",
+  "retryable": true,
+  "message": "rate limited",
+  "provider": "openai",
+  "httpStatus": 429
+}
 ```
 
 `kind` 枚举（冻结）：
@@ -242,13 +289,13 @@ Python sidecar (python/harness_hub_runtime)
 
 模块与导出（冻结 API，`__init__.py` 必须 re-export）：
 
-| 模块 | 导出 | 说明 |
-|------|------|------|
-| `dto.py` | `PROVIDER_IDS`, `MODES`, `MODEL_EVENT_TYPES`, `ERROR_KINDS`, `NATIVE_ONLY_CAPABILITIES`, `ProviderDescriptor`, `ModelEvent`, `ProviderError`, `RouteDecision` | 纯数据类（`dataclass(frozen=True)`）+ `to_json()`；全部零依赖 |
-| `streaming.py` | `normalize_stream_event(provider: str, event: dict) -> ModelEvent` | 见 §4.2 |
-| `errors.py` | `normalize_error(provider: str, error: dict) -> ProviderError` | 见 §4.3 |
-| `routing.py` | `route(provider: str, requested_mode: str, capability: str \| None) -> RouteDecision` | 见 §3.5 |
-| `lazy_import.py` | `probe(module: str) -> bool`, `probe_all() -> list[ProviderDescriptor]` | `importlib.util.find_spec`，捕获所有异常返回 `False` |
+| 模块             | 导出                                                                                                                                                          | 说明                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `dto.py`         | `PROVIDER_IDS`, `MODES`, `MODEL_EVENT_TYPES`, `ERROR_KINDS`, `NATIVE_ONLY_CAPABILITIES`, `ProviderDescriptor`, `ModelEvent`, `ProviderError`, `RouteDecision` | 纯数据类（`dataclass(frozen=True)`）+ `to_json()`；全部零依赖 |
+| `streaming.py`   | `normalize_stream_event(provider: str, event: dict) -> ModelEvent`                                                                                            | 见 §4.2                                                       |
+| `errors.py`      | `normalize_error(provider: str, error: dict) -> ProviderError`                                                                                                | 见 §4.3                                                       |
+| `routing.py`     | `route(provider: str, requested_mode: str, capability: str \| None) -> RouteDecision`                                                                         | 见 §3.5                                                       |
+| `lazy_import.py` | `probe(module: str) -> bool`, `probe_all() -> list[ProviderDescriptor]`                                                                                       | `importlib.util.find_spec`，捕获所有异常返回 `False`          |
 
 `ProviderDescriptor.to_json()` 冻结键序：`{"id","mode","importable","detail"}`。
 `ModelEvent.to_json()` 冻结键：`{"type","textDelta","finishReason","usage","rawProvider"}`。
@@ -261,44 +308,44 @@ Python sidecar (python/harness_hub_runtime)
 
 ### 4.2 streaming event 归一化映射（冻结）
 
-| provider | 输入特征 | `type` | 备注 |
-|----------|----------|--------|------|
-| any | `{"type":"..."}` 中含 `message_start` / `start` | `start` | |
-| openai | `choices[0].delta.content` 存在 | `delta` | `textDelta` 取该值 |
-| anthropic | `{"type":"content_block_delta","delta":{"text":...}}` | `delta` | |
-| google | `candidates[0].content.parts[0].text` | `delta` | |
-| any | `usage` / `usageMetadata` 存在 | `usage` | `usage` 字段只保留 `inputTokens` / `outputTokens` 整数 |
-| openai | `choices[0].finish_reason` 非空 | `done` | `finishReason` 原样短字符串 |
-| anthropic | `{"type":"message_stop"}` | `done` | |
-| any | `error` 键存在 | `error` | |
-| 其他 | — | `unknown` | 所有字段取安全默认 |
+| provider  | 输入特征                                              | `type`    | 备注                                                   |
+| --------- | ----------------------------------------------------- | --------- | ------------------------------------------------------ |
+| any       | `{"type":"..."}` 中含 `message_start` / `start`       | `start`   |                                                        |
+| openai    | `choices[0].delta.content` 存在                       | `delta`   | `textDelta` 取该值                                     |
+| anthropic | `{"type":"content_block_delta","delta":{"text":...}}` | `delta`   |                                                        |
+| google    | `candidates[0].content.parts[0].text`                 | `delta`   |                                                        |
+| any       | `usage` / `usageMetadata` 存在                        | `usage`   | `usage` 字段只保留 `inputTokens` / `outputTokens` 整数 |
+| openai    | `choices[0].finish_reason` 非空                       | `done`    | `finishReason` 原样短字符串                            |
+| anthropic | `{"type":"message_stop"}`                             | `done`    |                                                        |
+| any       | `error` 键存在                                        | `error`   |                                                        |
+| 其他      | —                                                     | `unknown` | 所有字段取安全默认                                     |
 
 `textDelta` 必须做 `MAX_TEXT_DELTA = 256` 截断；`finishReason` 限 `MAX_SHORT = 64`。
 `usage` 只允许整数，缺失/非法 → `null`。
 
 ### 4.3 provider error 归一化映射（冻结）
 
-| 输入特征 | `kind` | `retryable` |
-|----------|--------|-------------|
-| httpStatus / status ∈ {401,403} 或 `type` 含 `authentication` | `auth` | `false` |
-| 429 或含 `rate_limit` | `rate_limit` | `true` |
-| 400 / `invalid_request` | `invalid_request` | `false` |
-| 含 `context_length` / `max_tokens` / `too_long` | `context_length` | `false` |
-| `timeout` / `timed_out` | `timeout` | `true` |
-| `network` / `connection` / `ECONN` | `network` | `true` |
-| 5xx 或 `server` / `overloaded` | `server` | `true` |
-| 其他 | `unknown` | `false` |
+| 输入特征                                                      | `kind`            | `retryable` |
+| ------------------------------------------------------------- | ----------------- | ----------- |
+| httpStatus / status ∈ {401,403} 或 `type` 含 `authentication` | `auth`            | `false`     |
+| 429 或含 `rate_limit`                                         | `rate_limit`      | `true`      |
+| 400 / `invalid_request`                                       | `invalid_request` | `false`     |
+| 含 `context_length` / `max_tokens` / `too_long`               | `context_length`  | `false`     |
+| `timeout` / `timed_out`                                       | `timeout`         | `true`      |
+| `network` / `connection` / `ECONN`                            | `network`         | `true`      |
+| 5xx 或 `server` / `overloaded`                                | `server`          | `true`      |
+| 其他                                                          | `unknown`         | `false`     |
 
 优先级从上到下。`message` 只取 `error.message` / `error.error.message` 的首 120 字符，
 并移除换行；**绝不回显完整输入对象**。`httpStatus` 只接受 `int` 且 100..599，否则 `null`。
 
 ### 4.4 `tokenization` 包（`python/harness_hub_runtime/tokenization/`）
 
-| 模块 | 导出 | 说明 |
-|------|------|------|
-| `truth.py` | `TRUTH_PRECEDENCE`, `LOCAL_LEVELS`, `truth_rank(level) -> int`, `select_truth(candidates: dict) -> tuple[str, int \| None]` | 见 §5.1 |
-| `estimate.py` | `estimate(text_length: int, model: str) -> TokenEstimate` | **heuristic**，见 §5.2 |
-| `revision.py` | `TOKENIZER_REVISIONS`, `bind_revision(model, tokenizer_model=None) -> RevisionBinding` | 见 §5.3 |
+| 模块          | 导出                                                                                                                        | 说明                   |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `truth.py`    | `TRUTH_PRECEDENCE`, `LOCAL_LEVELS`, `truth_rank(level) -> int`, `select_truth(candidates: dict) -> tuple[str, int \| None]` | 见 §5.1                |
+| `estimate.py` | `estimate(text_length: int, model: str) -> TokenEstimate`                                                                   | **heuristic**，见 §5.2 |
+| `revision.py` | `TOKENIZER_REVISIONS`, `bind_revision(model, tokenizer_model=None) -> RevisionBinding`                                      | 见 §5.3                |
 
 `TokenEstimate.to_json()` 冻结键：
 `{"inputTokens","outputTokens","totalTokens","truthLevel","tokenizerModel","revision","estimated"}`。
@@ -331,13 +378,15 @@ Python sidecar (python/harness_hub_runtime)
 ### 5.2 `estimate`（heuristic，明确标注 estimated）
 
 `estimate(text_length, model)`：
+
 - `text_length` 必须是 `int >= 0`，否则抛 `ValueError`。
 - 估算公式冻结：`max(1, ceil(text_length / 4))`（4 字符/token 的粗估）。
 - 返回 `TokenEstimate(inputTokens=<n>, outputTokens=0, totalTokens=<n>,
-  truthLevel="estimated", tokenizerModel=<bind_revision(model).tokenizerModel>,
-  revision=<bind_revision(model).revision>, estimated=True)`。
+truthLevel="estimated", tokenizerModel=<bind_revision(model).tokenizerModel>,
+revision=<bind_revision(model).revision>, estimated=True)`。
 
 `tokenization.estimate` RPC 方法按下列优先级组合（**体现四级 precedence**）：
+
 1. 若 `reportedUsage` 是 `{"inputTokens":int,"outputTokens":int}` → `truthLevel="provider_reported"`。
 2. 否则若 `countApiUsage` 同上 → `truthLevel="provider_count_api"`。
 3. 否则若 `model` 在 `LOCAL_LEVELS` 可精确匹配（F21 恒为 false，因零依赖）→ `local_exact`。
@@ -351,16 +400,17 @@ Python sidecar (python/harness_hub_runtime)
 
 `TOKENIZER_REVISIONS`（冻结表）：
 
-| model 前缀 | tokenizerModel | revision |
-|------------|----------------|----------|
+| model 前缀                     | tokenizerModel               | revision                    |
+| ------------------------------ | ---------------------------- | --------------------------- |
 | `gpt-4o` / `gpt-4` / `gpt-3.5` | `o200k_base` / `cl100k_base` | `2024-05-13` / `2023-06-13` |
-| `claude-` | `anthropic-claude` | `2024-06-20` |
-| `gemini-` | `sentencepiece-gemini` | `2024-09-24` |
-| 其他 | `unknown` | `unknown` |
+| `claude-`                      | `anthropic-claude`           | `2024-06-20`                |
+| `gemini-`                      | `sentencepiece-gemini`       | `2024-09-24`                |
+| 其他                           | `unknown`                    | `unknown`                   |
 
 `bind_revision(model, tokenizer_model=None)`：
+
 - 命中已知前缀 → `{"model":model, "tokenizerModel":..., "revision":...,
-  "bound":true, "reason":"known_model"}`。
+"bound":true, "reason":"known_model"}`。
 - 未命中且显式给了 `tokenizer_model` → `bound=false, reason="explicit_unverified"`，
   `revision="unknown"`（**不假装绑定成功**）。
 - 未命中且未给 → `bound=false, reason="unknown_model"`, `revision="unknown"`。
@@ -404,6 +454,7 @@ struct GatewayStatus {
 ### 6.2 decoder（安全默认值）
 
 `pub fn decode_gateway_status(value: &Value, sidecar_state: SidecarState) -> GatewayStatus`：
+
 - `value` 非对象 / `state` 非已知枚举 → `GatewayStatus::degraded(sidecar_state, "gateway.status 应答形状非法")`。
 - 每个字段用 `as_str` / `as_bool` / `as_array` + 逐项类型检查；坏类型取安全默认，不 panic。
 - 字符串字段统一 `MAX_FIELD_LEN = 256` 截断；数组最多 `MAX_ITEMS = 64` 项。
@@ -420,9 +471,10 @@ struct GatewayStatus {
 ```
 
 行为（冻结，验收 #6）：
+
 1. `let sidecar = state.sidecar.status();`（纯读，不触发冷启动，渲染路径零副作用）
 2. 若 `sidecar.state != SidecarState::Ready` → `Ok(GatewayStatus::unavailable(sidecar.state,
-   "Python sidecar 未就绪，Provider Gateway 状态不可用"))`
+"Python sidecar 未就绪，Provider Gateway 状态不可用"))`
 3. 否则 `state.sidecar.call("gateway.status", &json!({}))`：
    - `Ok(value)` → `Ok(decode_gateway_status(&value, sidecar.state))`
    - `Err(msg)` → `Ok(GatewayStatus::degraded(SidecarState::Degraded, msg))`
@@ -453,6 +505,7 @@ interface GatewayStatus { state, sidecarState, mode, providers, tokenization,
 ```
 
 `export function normalizeGatewayStatus(raw: unknown): GatewayStatus`：
+
 - 非对象 / `state` 非三枚举之一 → `unavailableGatewayStatus()`（fail-closed），
   其中 `sidecarState='stopped'`，`capabilities=F21_CAPABILITIES`（静态常量），
   `providers=[]`，`tokenization` 用 §5 冻结默认值，`protocolVersion=null`，
@@ -466,6 +519,7 @@ interface GatewayStatus { state, sidecarState, mode, providers, tokenization,
 ### 7.2 fixture test（`src/lib/ipc.test.ts`）
 
 必须包含：
+
 1. **同形状 payload**：完整 `GatewayStatus` JSON（键名与 §6.1 一致）→ 逐字段断言。
 2. **坏输入安全默认值**：`null` / `[]` / `{state:'weird'}` / 字段类型全错 → 断言 fail-closed。
 3. **命令名断言**：`gatewayStatus()` → `invokeSpy.mock.calls[0]?.[0] === 'gateway_status'`
@@ -505,14 +559,14 @@ interface GatewayStatus { state, sidecarState, mode, providers, tokenization,
 
 ## 9. 提交 / PR 切分（写作用域互斥）
 
-| 切片 | 分支 | 写作用域（独占） | 产出 |
-|------|------|------------------|------|
-| S0 | `feat/f21-provider-gateway` | `docs/specs/2026-11-05-f21-*`, `docs/plans/2026-11-05-f21-*` | 冻结契约（本文件 + 计划） |
-| S1 | `f21/py-providers` | `python/harness_hub_runtime/providers/**`, `python/tests/test_providers.py` | providers 契约层 |
-| S2 | `f21/py-tokenization` | `python/harness_hub_runtime/tokenization/**`, `python/tests/test_tokenization.py` | tokenization 契约层 |
-| S3 | `f21/py-rpc` | `python/harness_hub_runtime/rpc/server.py`, `python/tests/test_rpc_server.py` | RPC 方法 + 能力协商 |
-| S4 | `f21/rust` | `src-tauri/src/sidecar/gateway.rs`, `.../mod.rs`, `.../config.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs` | Rust DTO + decoder + 命令 |
-| S5 | `f21/web` | `src/lib/ipc.ts`, `src/lib/ipc.test.ts`, `src/features/settings/ProviderGatewayCard.tsx`, `...test.tsx`, `src/features/settings/SettingsPage.tsx` | 前端 normalize + 卡片 |
+| 切片 | 分支                        | 写作用域（独占）                                                                                                                                  | 产出                      |
+| ---- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| S0   | `feat/f21-provider-gateway` | `docs/specs/2026-11-05-f21-*`, `docs/plans/2026-11-05-f21-*`                                                                                      | 冻结契约（本文件 + 计划） |
+| S1   | `f21/py-providers`          | `python/harness_hub_runtime/providers/**`, `python/tests/test_providers.py`                                                                       | providers 契约层          |
+| S2   | `f21/py-tokenization`       | `python/harness_hub_runtime/tokenization/**`, `python/tests/test_tokenization.py`                                                                 | tokenization 契约层       |
+| S3   | `f21/py-rpc`                | `python/harness_hub_runtime/rpc/server.py`, `python/tests/test_rpc_server.py`                                                                     | RPC 方法 + 能力协商       |
+| S4   | `f21/rust`                  | `src-tauri/src/sidecar/gateway.rs`, `.../mod.rs`, `.../config.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`                            | Rust DTO + decoder + 命令 |
+| S5   | `f21/web`                   | `src/lib/ipc.ts`, `src/lib/ipc.test.ts`, `src/features/settings/ProviderGatewayCard.tsx`, `...test.tsx`, `src/features/settings/SettingsPage.tsx` | 前端 normalize + 卡片     |
 
 每个切片开独立 PR，base = `feat/f21-provider-gateway`，合并后进入集成分支；
 S1–S5 作用域两两不交，可并行。S6（质量门 + 最终 PR → `main`）由 Lead 串行执行。
@@ -521,12 +575,12 @@ S1–S5 作用域两两不交，可并行。S6（质量门 + 最终 PR → `main
 
 ## 10. 已知风险与对策
 
-| 风险 | 对策 |
-|------|------|
-| SSH git 通道被 `198.18.0.125:443` 拦截 | 一律用 `gh` + HTTPS；`gh auth setup-git` 已配置 credential helper |
-| commit 被「吞掉」 | 每次 commit 后 `git log -1 --oneline` 复核 |
-| 本地 `main` 标签落后真实 `origin/main` 83 个提交 | **以 `6d6c327`（真实远端 main / 当前 HEAD）为基线**，不拿本地 `main` 做 diff 基线 |
+| 风险                                                 | 对策                                                                                                                                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SSH git 通道被 `198.18.0.125:443` 拦截               | 一律用 `gh` + HTTPS；`gh auth setup-git` 已配置 credential helper                                                                                                    |
+| commit 被「吞掉」                                    | 每次 commit 后 `git log -1 --oneline` 复核                                                                                                                           |
+| 本地 `main` 标签落后真实 `origin/main` 83 个提交     | **以 `6d6c327`（真实远端 main / 当前 HEAD）为基线**，不拿本地 `main` 做 diff 基线                                                                                    |
 | 各 worktree 缺少 `node_modules` / `target` / `.venv` | Python 用 `python -m unittest discover -s python/tests -t python -v` 直接跑；web worktree 建 `node_modules` junction；rust worktree 设 `CARGO_TARGET_DIR` 指向主检出 |
-| S1/S2 尚未合入时 S3 的 lazy-import 探测拿不到适配器 | §2.1 ADR-0005：静态声明与动态就绪度分离；`gateway.status` 的核心模块探测只看自身，可选 SDK 缺失是预期状态，S3 测试断言形状 + 降级路径而非「必须 importable」 |
-| Windows CI 上 PTY/进程树测试偶发 flake | F20 已记录为既有 flake；若复现，单独标注并复跑，不算 F21 回归 |
-| `build-release-040/` 未跟踪产物 | **绝不提交**（既有遗留） |
+| S1/S2 尚未合入时 S3 的 lazy-import 探测拿不到适配器  | §2.1 ADR-0005：静态声明与动态就绪度分离；`gateway.status` 的核心模块探测只看自身，可选 SDK 缺失是预期状态，S3 测试断言形状 + 降级路径而非「必须 importable」         |
+| Windows CI 上 PTY/进程树测试偶发 flake               | F20 已记录为既有 flake；若复现，单独标注并复跑，不算 F21 回归                                                                                                        |
+| `build-release-040/` 未跟踪产物                      | **绝不提交**（既有遗留）                                                                                                                                             |
