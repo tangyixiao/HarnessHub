@@ -46,6 +46,7 @@ import {
   type SidecarStatus,
   type SkillsReport,
 } from '@/lib/ipc';
+import { ProviderGatewayCard } from '@/features/settings/ProviderGatewayCard';
 
 /**
  * 可发现配置现状的 Harness 清单。id 与 Rust 侧 `profile_discover` 的 match
@@ -82,6 +83,7 @@ export function SettingsPage() {
       <McpCard />
       <SkillsCard />
       <SidecarCard />
+      <ProviderGatewayCard />
       <PlaceholderCard
         title="尚未接入"
         icon={Settings}
