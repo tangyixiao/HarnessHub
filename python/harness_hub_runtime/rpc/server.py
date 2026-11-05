@@ -171,10 +171,11 @@ def _reject_raw_content(params: Json, message: str) -> None:
 
 
 def _lazy(modname: str, attrname: str) -> Any | None:
-    """尝试从 S1/S2 兄弟包拿一个实现；缺模块/缺属性/任何异常都返回 None。
+    """尝试从 providers/tokenization 兄弟包拿一个实现；缺模块/缺属性/任何异常都返回 None。
 
-    本 worktree 尚未合入 S1(providers)/S2(tokenization)，因此这里通常返回 None，
-    走各自的自包含降级路径；Lead 合并后同一份 server.py 会自动升级到真实实现（spec §10）。
+    每个切片独立合入时（S3 先于 S1/S2），这里通常返回 None，走各自的自包含降级路径；
+    全部切片合并后，同一份 server.py 会自动升级到真实实现（spec §10）。
+    调用方必须按冻结签名传参，并正确处理 ProviderDescriptor 等 dataclass 返回值。
     """
     try:
         import importlib
@@ -216,15 +217,24 @@ def _provider_descriptors() -> list[Json]:
     if probe_all is not None:
         try:
             raw = probe_all()
-            return [
-                {
-                    "id": item.get("id"),
-                    "mode": item.get("mode"),
-                    "importable": bool(item.get("importable")),
-                    "detail": item.get("detail"),
-                }
-                for item in raw
-            ]
+            descriptors: list[Json] = []
+            for item in raw:
+                # S1 的 probe_all 返回 ProviderDescriptor dataclass（有 .to_json()）；
+                # 也兼容直接返回 dict 的轻量实现。对 dataclass 用 .get() 会抛
+                # AttributeError，从而静默退回 find_spec 降级，必须显式转换。
+                data = item.to_json() if hasattr(item, "to_json") else item
+                if not isinstance(data, dict):
+                    continue
+                descriptors.append(
+                    {
+                        "id": data.get("id"),
+                        "mode": data.get("mode"),
+                        "importable": bool(data.get("importable")),
+                        "detail": data.get("detail"),
+                    }
+                )
+            if descriptors:
+                return descriptors
         except BaseException:  # noqa: BLE001 - 真实实现异常也退回探测
             pass
 
@@ -335,6 +345,8 @@ def gateway_route(params: Json) -> Json:
         provider = ""
     capability = params.get("capability")
     requested_mode = params.get("requestedMode")
+    if not isinstance(requested_mode, str):
+        requested_mode = ""
 
     route = _lazy_any(
         (
@@ -345,7 +357,9 @@ def gateway_route(params: Json) -> Json:
     )
     if route is not None:
         try:
-            decision = route(provider, capability, requested_mode)
+            # 冻结签名（spec §4.1）：route(provider, requested_mode, capability)。
+            # 实参顺序不可调换，否则 native_only/explicit_native 规则会被静默绕过。
+            decision = route(provider, requested_mode, capability)
             result = decision.to_json() if hasattr(decision, "to_json") else decision
             return {
                 "mode": result.get("mode", "unified"),
@@ -377,7 +391,8 @@ def gateway_normalize_stream(params: Json) -> Json:
     )
     if normalize is not None:
         try:
-            result = normalize(event, provider).to_json()
+            # 冻结签名（spec §4.1）：normalize_stream_event(provider, event)。
+            result = normalize(provider, event).to_json()
             return {
                 "type": result.get("type", "unknown"),
                 "textDelta": result.get("textDelta"),
@@ -414,7 +429,8 @@ def gateway_normalize_error(params: Json) -> Json:
     )
     if normalize is not None:
         try:
-            result = normalize(error, provider).to_json()
+            # 冻结签名（spec §4.1）：normalize_error(provider, error)。
+            result = normalize(provider, error).to_json()
             return {
                 "kind": result.get("kind", "unknown"),
                 "retryable": bool(result.get("retryable", False)),
