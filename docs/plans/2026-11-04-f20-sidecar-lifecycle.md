@@ -148,16 +148,26 @@ pnpm rust:clippy
 
 ## 完成门记录
 
-| 门            | 命令                                       | 结果 | 输出 |
-| ------------- | ------------------------------------------ | ---- | ---- |
-| format        | `pnpm format:check && pnpm rust:fmt:check` | 待跑 | 待填 |
-| lint          | `pnpm lint`                                | 待跑 | 待填 |
-| typecheck     | `pnpm typecheck`                           | 待跑 | 待填 |
-| unit (web)    | `pnpm test`                                | 待跑 | 待填 |
-| unit (rust)   | `pnpm rust:test`                           | 待跑 | 待填 |
-| unit (python) | `pnpm python:test`                         | 待跑 | 待填 |
-| build         | `pnpm build`                               | 待跑 | 待填 |
-| clippy        | `pnpm rust:clippy`                         | 待跑 | 待填 |
+> 以下为 mid-integration 阶段在集成分支上**已实测**的真实输出（截至 `4abc99b`）；S2 Rust 核心与 S5 接线仍在集成，最终完成门须在全部合并后重跑。
+
+| 门            | 命令                  | 结果  | 输出                                                                      |
+| ------------- | --------------------- | ----- | ------------------------------------------------------------------------- |
+| format        | `pnpm format:check`   | PASS  | `All matched files use Prettier code style!`                              |
+| rust:fmt      | `pnpm rust:fmt:check` | PASS* | 在 `aa2f7f8`（Rust 核心模块加入前）通过；全量集成后须重跑，见「环境插曲」 |
+| lint          | `pnpm lint`           | PASS  | `✖ 4 problems (0 errors, 4 warnings)`（见下注，仅警告）                   |
+| typecheck     | `pnpm typecheck`      | PASS  | `EXIT=0`                                                                  |
+| unit (web)    | `pnpm test`           | PASS  | `Test Files 11 passed (11)` / `Tests 419 passed (419)`，7.27s             |
+| unit (rust)   | `pnpm rust:test`      | 待跑  | 待填（Rust 核心尚未集成）                                                 |
+| unit (python) | `pnpm python:test`    | PASS  | `Ran 25 tests in 0.001s` / `OK`                                           |
+| build         | `pnpm build`          | 待跑  | 待填                                                                      |
+| clippy        | `pnpm rust:clippy`    | 待跑  | 待填                                                                      |
+
+注：`PASS*` 仅指 `aa2f7f8` 当时通过（`cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`），非最终完成门结论，重跑前不计最终 PASS。`pnpm lint` 的 4 条为**既存** react-refresh/only-export-components 警告（`src/app/routes.tsx:24`、`:29`，`src/features/dashboard/DashboardPage.tsx:392`、`:400`），0 errors，属 PASS；`pnpm python:test` 命令为 `uv run --project python python -m unittest discover -s python/tests -t python -v`。
+
+### 环境插曲 / 已知风险（mid-integration）
+
+1. `src-tauri/src/error.rs:98` 存在既存 rustfmt 差异：F20 sidecar error-variant 块中 `//` 注释与 `///` 文档注释间多一空行，rustfmt 要求删除；本次不改（超出写作用域），列为待处理风险。
+2. S2 Rust 核心（config/process/manager）与 S5 接线仍在集成 → `rust:test` / `build` / `rust:clippy` 为 待跑，`rust:fmt:check` 须在完全合并后的分支上重跑方可记为最终 PASS。
 
 ## 已知风险
 
