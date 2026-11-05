@@ -3527,3 +3527,210 @@ describe('sidecar IPC wrappers', () => {
     await expect(sidecarStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });
+
+// --- F21 Provider Gateway：跨 IPC decoder 的 fixture 契约测试（spec §6.1 / §7.2）---
+import {
+  gatewayStatus,
+  normalizeGatewayStatus,
+  unavailableGatewayStatus,
+  type GatewayStatus,
+} from '@/lib/ipc';
+
+const F21_CAPABILITIES_FIXTURE = [
+  'ping',
+  'runtime.info',
+  'shutdown',
+  'gateway.status',
+  'gateway.routing',
+  'gateway.streaming',
+  'gateway.errors',
+  'tokenization.precedence',
+  'tokenization.estimate',
+  'tokenization.revision',
+];
+
+const GATEWAY_READY_PAYLOAD = {
+  state: 'ready',
+  sidecarState: 'ready',
+  mode: 'unified',
+  providers: [
+    { id: 'litellm', mode: 'unified', importable: false, detail: 'optional SDK not installed' },
+    { id: 'openai', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+    { id: 'anthropic', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+    { id: 'google', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+  ],
+  tokenization: {
+    precedence: ['provider_reported', 'provider_count_api', 'local_exact', 'estimated'],
+    levels: ['local_exact', 'estimated'],
+    revisionBinding: true,
+  },
+  capabilities: F21_CAPABILITIES_FIXTURE,
+  protocolVersion: '1.0',
+  lastError: null,
+};
+
+const GATEWAY_EXPECTED: GatewayStatus = {
+  state: 'ready',
+  sidecarState: 'ready',
+  mode: 'unified',
+  providers: [
+    { id: 'litellm', mode: 'unified', importable: false, detail: 'optional SDK not installed' },
+    { id: 'openai', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+    { id: 'anthropic', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+    { id: 'google', mode: 'native', importable: false, detail: 'optional SDK not installed' },
+  ],
+  tokenization: {
+    precedence: ['provider_reported', 'provider_count_api', 'local_exact', 'estimated'],
+    levels: ['local_exact', 'estimated'],
+    revisionBinding: true,
+  },
+  capabilities: F21_CAPABILITIES_FIXTURE,
+  protocolVersion: '1.0',
+  lastError: null,
+};
+
+const GATEWAY_UNAVAILABLE_DEFAULTS: GatewayStatus = {
+  state: 'unavailable',
+  sidecarState: 'stopped',
+  mode: 'unified',
+  providers: [],
+  tokenization: {
+    precedence: ['provider_reported', 'provider_count_api', 'local_exact', 'estimated'],
+    levels: ['local_exact', 'estimated'],
+    revisionBinding: true,
+  },
+  capabilities: F21_CAPABILITIES_FIXTURE,
+  protocolVersion: null,
+  lastError: '网关状态不可用',
+};
+
+describe('normalizeGatewayStatus（F21 §6.1 DTO fixture）', () => {
+  it('把 Rust gateway_status DTO 逐字段归一化成 GatewayStatus', () => {
+    expect(normalizeGatewayStatus(GATEWAY_READY_PAYLOAD)).toEqual(GATEWAY_EXPECTED);
+  });
+
+  it('unavailableGatewayStatus() 返回冻结默认，且每次全新对象不共享数组引用', () => {
+    const first = unavailableGatewayStatus();
+    const second = unavailableGatewayStatus();
+    expect(first).toEqual(GATEWAY_UNAVAILABLE_DEFAULTS);
+    expect(second).toEqual(GATEWAY_UNAVAILABLE_DEFAULTS);
+    expect(first).not.toBe(second);
+    expect(first.capabilities).not.toBe(second.capabilities);
+    expect(first.tokenization).not.toBe(second.tokenization);
+    expect(first.providers).not.toBe(second.providers);
+  });
+
+  it('非对象 / 数组 / 未知 state 一律 fail-closed 成 unavailable 安全默认', () => {
+    for (const raw of [null, [], 'str', 42, true, undefined, {}, { state: 'weird' }]) {
+      expect(normalizeGatewayStatus(raw)).toEqual(GATEWAY_UNAVAILABLE_DEFAULTS);
+    }
+  });
+
+  it('已知 state 但字段类型全错时逐字段安全默认，不泄漏坏数据', () => {
+    const result = normalizeGatewayStatus({
+      state: 'ready',
+      sidecarState: 'bogus',
+      mode: 42,
+      providers: 'bad',
+      tokenization: 42,
+      capabilities: [1, {}],
+      protocolVersion: 7,
+      lastError: 9,
+      importable: 'yes',
+    });
+
+    expect(result.state).toBe('ready');
+    expect(result.sidecarState).toBe('stopped');
+    expect(result.mode).toBe('');
+    expect(result.providers).toEqual([]);
+    expect(result.tokenization).toEqual(GATEWAY_UNAVAILABLE_DEFAULTS.tokenization);
+    expect(result.capabilities).toEqual([]);
+    expect(result.protocolVersion).toBeNull();
+    expect(result.lastError).toBeNull();
+  });
+
+  it('providers / tokenization / capabilities 只保留合法项并逐字段守卫', () => {
+    const result = normalizeGatewayStatus({
+      ...GATEWAY_READY_PAYLOAD,
+      providers: [
+        null,
+        'bad',
+        42,
+        { id: 7, mode: 9, importable: 'yes', detail: null },
+        { id: 'openai', mode: 'native', importable: true, detail: 'ok' },
+      ],
+      tokenization: {
+        precedence: ['provider_reported', 1, null, 'estimated'],
+        levels: [true, 'local_exact'],
+        revisionBinding: 'yes',
+      },
+      capabilities: ['ping', 1, {}, null, 'shutdown'],
+    });
+
+    expect(result.providers).toEqual([
+      { id: '', mode: '', importable: false, detail: '' },
+      { id: 'openai', mode: 'native', importable: true, detail: 'ok' },
+    ]);
+    expect(result.tokenization).toEqual({
+      precedence: ['provider_reported', 'estimated'],
+      levels: ['local_exact'],
+      revisionBinding: false,
+    });
+    expect(result.capabilities).toEqual(['ping', 'shutdown']);
+  });
+
+  it('合法 state / sidecarState 与未知 mode 字符串原样保留', () => {
+    const result = normalizeGatewayStatus({
+      ...GATEWAY_READY_PAYLOAD,
+      state: 'degraded',
+      sidecarState: 'stopped',
+      mode: 'vendor.custom.mode',
+    });
+    expect(result.state).toBe('degraded');
+    expect(result.sidecarState).toBe('stopped');
+    expect(result.mode).toBe('vendor.custom.mode');
+  });
+
+  it('protocolVersion / lastError 只拒绝错类型，空字符串仍按字符串保留', () => {
+    const result = normalizeGatewayStatus({
+      ...GATEWAY_READY_PAYLOAD,
+      protocolVersion: '',
+      lastError: '',
+    });
+    expect(result.protocolVersion).toBe('');
+    expect(result.lastError).toBe('');
+  });
+});
+
+describe('gatewayStatus IPC wrapper（F21 §7.1）', () => {
+  it('使用 gateway_status 命令名，返回归一化后的 IpcResult<GatewayStatus>', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => GATEWAY_READY_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await gatewayStatus();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    // invoke 收 3 个参数（command / args / options），只断言命令名，别断言参数个数。
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('gateway_status');
+    expect(result).toEqual({ ok: true, data: GATEWAY_EXPECTED });
+  });
+
+  it('命令返回坏形状时 fail-closed 成 unavailable 安全默认，不假装 ready', async () => {
+    stubTauri(async () => ({ state: 'weird' }));
+    await expect(gatewayStatus()).resolves.toEqual({
+      ok: true,
+      data: GATEWAY_UNAVAILABLE_DEFAULTS,
+    });
+  });
+
+  it('后端错误原样传出为 ok:false，不透传坏数据', async () => {
+    stubTauri(async () => {
+      throw new Error('gateway IPC 炸了');
+    });
+    await expect(gatewayStatus()).resolves.toEqual({ ok: false, error: 'gateway IPC 炸了' });
+  });
+
+  it('浏览器模式（无 Tauri runtime）返回 ok:false 且不发调用', async () => {
+    await expect(gatewayStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+  });
+});
