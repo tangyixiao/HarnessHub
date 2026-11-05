@@ -297,6 +297,7 @@ pub fn run() {
             commands::finish_session,
             commands::get_project_sessions,
             commands::get_usage_sources,
+            commands::gateway_status,
             commands::kill_terminal,
             commands::list_harnesses,
             commands::list_projects,

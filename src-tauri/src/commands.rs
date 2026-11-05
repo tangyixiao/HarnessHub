@@ -1200,6 +1200,40 @@ pub fn sidecar_restart(state: State<'_, AppState>) -> Result<crate::sidecar::dto
     Ok(state.sidecar.restart())
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// F21：Provider Gateway 状态命令（spec §6.3）
+//
+// 沿用 F20 的「薄命令」纪律：状态读取是纯读，sidecar 未就绪 / RPC 失败 / 应答
+// 形状非法全部收敛成一份完整的 `GatewayStatus` 降级对象，**永不返回 IPC Err**
+// （ADR-0006：不让 Python 侧的问题连累主 Harness 功能）。
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 读取 Provider Gateway 状态；失败一律降级，永不返回 Err。
+#[tauri::command]
+pub fn gateway_status(
+    state: State<'_, AppState>,
+) -> Result<crate::sidecar::gateway::GatewayStatus> {
+    use crate::sidecar::dto::SidecarState;
+
+    let sidecar = state.sidecar.status();
+    if sidecar.state != SidecarState::Ready {
+        return Ok(crate::sidecar::gateway::GatewayStatus::unavailable(
+            sidecar.state,
+            "Python sidecar 未就绪，Provider Gateway 状态不可用",
+        ));
+    }
+    match state.sidecar.call("gateway.status", &serde_json::json!({})) {
+        Ok(value) => Ok(crate::sidecar::gateway::decode_gateway_status(
+            &value,
+            sidecar.state,
+        )),
+        Err(msg) => Ok(crate::sidecar::gateway::GatewayStatus::degraded(
+            SidecarState::Degraded,
+            &msg,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1918,7 +1952,10 @@ mod tests {
             "revision_binding",
             "precedence",
         ] {
-            assert!(!object.contains_key(leaked), "顶层泄漏 snake_case：{leaked}");
+            assert!(
+                !object.contains_key(leaked),
+                "顶层泄漏 snake_case：{leaked}"
+            );
         }
         let tokenization = value["tokenization"]
             .as_object()
