@@ -3291,3 +3291,157 @@ export function sidecarStop(): Promise<IpcResult<SidecarStatus>> {
 export function sidecarRestart(): Promise<IpcResult<SidecarStatus>> {
   return invokeSidecar('sidecar_restart');
 }
+
+// --- F21 Provider Gateway：跨 IPC decoder（spec §6.1 / §7.1）---
+
+export type GatewayState = 'ready' | 'degraded' | 'unavailable';
+export type GatewaySidecarState = 'stopped' | 'ready' | 'degraded';
+
+export interface GatewayProvider {
+  id: string;
+  mode: string;
+  importable: boolean;
+  detail: string;
+}
+
+export interface GatewayTokenization {
+  precedence: string[];
+  levels: string[];
+  revisionBinding: boolean;
+}
+
+export interface GatewayStatus {
+  state: GatewayState;
+  sidecarState: GatewaySidecarState;
+  mode: string;
+  providers: GatewayProvider[];
+  tokenization: GatewayTokenization;
+  capabilities: string[];
+  protocolVersion: string | null;
+  lastError: string | null;
+}
+
+/** spec §3.2 冻结的 10 项 gateway 能力；fail-closed 默认复用，绝不猜测后端能力。 */
+const F21_CAPABILITIES: string[] = [
+  'ping',
+  'runtime.info',
+  'shutdown',
+  'gateway.status',
+  'gateway.routing',
+  'gateway.streaming',
+  'gateway.errors',
+  'tokenization.precedence',
+  'tokenization.estimate',
+  'tokenization.revision',
+];
+
+/** spec §5.1 冻结的 tokenization 默认值。 */
+function defaultGatewayTokenization(): GatewayTokenization {
+  return {
+    precedence: ['provider_reported', 'provider_count_api', 'local_exact', 'estimated'],
+    levels: ['local_exact', 'estimated'],
+    revisionBinding: true,
+  };
+}
+
+/**
+ * 网关状态不可用时的 fail-closed 安全默认。
+ * 每次返回全新对象/数组，避免多处共用同一个数组引用。
+ */
+export function unavailableGatewayStatus(): GatewayStatus {
+  return {
+    state: 'unavailable',
+    sidecarState: 'stopped',
+    mode: 'unified',
+    providers: [],
+    tokenization: defaultGatewayTokenization(),
+    capabilities: [...F21_CAPABILITIES],
+    protocolVersion: null,
+    lastError: '网关状态不可用',
+  };
+}
+
+function isGatewayState(value: unknown): value is GatewayState {
+  return value === 'ready' || value === 'degraded' || value === 'unavailable';
+}
+
+function isGatewaySidecarState(value: unknown): value is GatewaySidecarState {
+  return value === 'stopped' || value === 'ready' || value === 'degraded';
+}
+
+function asGatewayString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function asGatewayStringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function normalizeGatewayProvider(raw: unknown): GatewayProvider {
+  const source = raw as Record<string, unknown>;
+  return {
+    id: asGatewayString(source.id),
+    mode: asGatewayString(source.mode),
+    importable: typeof source.importable === 'boolean' ? source.importable : false,
+    detail: asGatewayString(source.detail),
+  };
+}
+
+function normalizeGatewayTokenization(raw: unknown): GatewayTokenization {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return defaultGatewayTokenization();
+  }
+  const source = raw as Record<string, unknown>;
+  return {
+    precedence: asStringArray(source.precedence),
+    levels: asStringArray(source.levels),
+    revisionBinding: typeof source.revisionBinding === 'boolean' ? source.revisionBinding : false,
+  };
+}
+
+/**
+ * 把 Rust gateway_status DTO（spec §6.1）归一化成 GatewayStatus。
+ * 非对象 / 数组 / state 非三枚举一律 fail-closed；逐字段 typeof 守卫，坏数据不泄漏。
+ */
+export function normalizeGatewayStatus(raw: unknown): GatewayStatus {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return unavailableGatewayStatus();
+  }
+  const source = raw as Record<string, unknown>;
+  if (!isGatewayState(source.state)) {
+    return unavailableGatewayStatus();
+  }
+
+  const providers = Array.isArray(source.providers)
+    ? source.providers
+        .filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === 'object' && item !== null && !Array.isArray(item),
+        )
+        .map(normalizeGatewayProvider)
+    : [];
+
+  return {
+    state: source.state,
+    sidecarState: isGatewaySidecarState(source.sidecarState) ? source.sidecarState : 'stopped',
+    mode: asGatewayString(source.mode),
+    providers,
+    tokenization: normalizeGatewayTokenization(source.tokenization),
+    capabilities: asStringArray(source.capabilities),
+    protocolVersion: asGatewayStringOrNull(source.protocolVersion),
+    lastError: asGatewayStringOrNull(source.lastError),
+  };
+}
+
+/** 与 sidecarStatus() 同构：只走 invokeCommand，命令名固定 gateway_status。 */
+async function invokeGateway(command: string): Promise<IpcResult<GatewayStatus>> {
+  const result = await invokeCommand<unknown>(command);
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalizeGatewayStatus(result.data) };
+}
+
+export function gatewayStatus(): Promise<IpcResult<GatewayStatus>> {
+  return invokeGateway('gateway_status');
+}
