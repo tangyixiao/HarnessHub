@@ -15,5 +15,6 @@
 
 pub mod config;
 pub mod dto;
+pub mod gateway;
 pub mod manager;
 pub mod process;
