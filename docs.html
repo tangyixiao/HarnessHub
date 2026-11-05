@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN" data-project="HarnessHub" data-docs="true"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HarnessHub · 使用文档</title><link rel="stylesheet" href="assets/system.css"><link rel="stylesheet" href="assets/ui/cards.css"><link rel="stylesheet" href="assets/motion/motion.css"><link rel="stylesheet" href="assets/layout/layout.css"><link rel="stylesheet" href="assets/page.css"><!-- <html lang="en" data-radius="sharp">; keep this <style> after the links: layout.css resets --ly-scale -->
+<style>
+:root {
+  --p-bg: #fafafa; --p-surface: #edf0f5; --p-ink: #16181e; --p-muted: #565d6d;
+  --p-accent: #405dcc; --p-accent-ink: #fafafa; --p-action: #405dcc; --p-action-ink: #fafafa;
+  --p-inv-bg: #16181e; --p-inv-surface: #23252b; --p-inv-ink: #fafafa; --p-inv-muted: #9a9b9e;
+  --p-inv-accent: #405dcc; --p-inv-accent-ink: #fafafa; --p-inv-action: #405dcc; --p-inv-action-ink: #fafafa;
+  --font-display: "Geist", system-ui, sans-serif;
+  --font-text: "Geist", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --display-weight: 500;
+  --display-tracking: -0.035em;
+  --display-tracking-xl: -0.045em;
+}
+</style><style>html[data-theme="light"]{--p-bg:#fafafa;--p-surface:#edf0f5;--p-ink:#16181e;--p-muted:#565d6d;--p-accent:#405dcc;--p-accent-ink:#ffffff;--p-action:#405dcc;--p-action-ink:#ffffff;color-scheme:light}html[data-theme="dark"]{--p-bg:#131517;--p-surface:#202427;--p-ink:#f0f1f2;--p-muted:#b5bbc1;--p-accent:#aebfff;--p-accent-ink:#131517;--p-action:#aebfff;--p-action-ink:#131517;color-scheme:dark}</style><script src="assets/theme.js"></script><link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/docs.css"></head><body class="docs-page">
+<header class="nav"><div class="wrap nav__bar"><a class="skip-link" href="#docs-content">跳到正文</a><a class="nav__logo" href="index.html#top">Harness Hub</a><nav class="nav__links" aria-label="章节导航"><div class="nav__item"><a class="nav__link" href="index.html#work">项目内容</a></div><div class="nav__item"><a class="nav__link" href="docs.html">使用文档</a></div></nav><div class="nav__actions"><a class="btn btn--primary" href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">下载应用</a><button class="theme-toggle" type="button" data-theme-toggle aria-label="切换深浅色" aria-pressed="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></button></div><button class="nav__toggle" type="button" aria-expanded="false" aria-label="菜单"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 5h14M2 13h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div></header>
+<main class="docs-shell wrap" id="top">
+<aside class="docs-sidebar" aria-label="文档导航">
+<a class="docs-home" href="index.html">← 返回项目首页</a>
+<details class="docs-toc" open><summary>README 目录</summary><nav aria-label="README 目录"><ol><li class="docs-level-1"><a href="#harness-hub">Harness Hub</a></li><li class="docs-level-2"><a href="#当前版本">当前版本</a></li><li class="docs-level-2"><a href="#下载与运行">下载与运行</a></li><li class="docs-level-3"><a href="#10-分钟上手">10 分钟上手</a></li><li class="docs-level-2"><a href="#从源码运行">从源码运行</a></li><li class="docs-level-2"><a href="#已知限制">已知限制</a></li><li class="docs-level-2"><a href="#license">License</a></li></ol></nav></details>
+<div class="docs-resources"><p>源仓库资料</p><ul><li><a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/README.md">原始 README</a></li><li><a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/LICENSE">LICENSE</a></li><li><a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/NOTICE">NOTICE</a></li><li><a href="https://github.com/tangyixiao/HarnessHub/tree/6d6c32753916b56d23dbd020e6db2f428a84f324/docs">docs/</a></li><li><a href="https://github.com/tangyixiao/HarnessHub/releases">发布记录 · GitHub Releases</a></li></ul></div>
+</aside>
+<div class="docs-main"><header class="docs-heading"><p class="docs-eyebrow">项目文档 · tangyixiao/HarnessHub</p>
+<h1>HarnessHub 使用文档</h1><p>以下正文来自源仓库 README。图片以原图链接保留。</p>
+<div class="docs-source"><a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/README.md">在 GitHub 阅读原文</a><span>来源版本：<code>6d6c32753916</code></span></div></header>
+<article class="docs-markdown" id="docs-content" tabindex="-1"><h1 id="harness-hub">Harness Hub</h1>
+<p>Harness Hub 是一个 <strong>local-first 的 AI Coding Harness 桌面控制中心</strong>，用于登记项目、发现本机 Harness、管理终端会话，并查看活动与使用量记录。它不会替代 Codex、Claude Code、Gemini CLI 或 OpenCode。</p>
+<ul>
+<li>项目规格：<a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/HARNESS_HUB_PROJECT_PLAN.md">HARNESS_HUB_PROJECT_PLAN.md</a></li>
+<li>稳定事实：<a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/docs/CONTEXT.md">docs/CONTEXT.md</a></li>
+<li>代码地图：<a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/docs/CONTEXT-MAP.md">docs/CONTEXT-MAP.md</a></li>
+<li>架构决策：<a href="https://github.com/tangyixiao/HarnessHub/tree/6d6c32753916b56d23dbd020e6db2f428a84f324/docs/adr">docs/adr/</a></li>
+<li>实施计划：<a href="https://github.com/tangyixiao/HarnessHub/tree/6d6c32753916b56d23dbd020e6db2f428a84f324/docs/plans">docs/plans/</a></li>
+</ul>
+<h2 id="当前版本">当前版本</h2>
+<p><strong>v0.1.0 — 首个正式版本（Windows x64 + Linux x64）</strong>。相对 alpha 系列，补齐了
+Git Session Snapshot（会话 start/end 快照 + 窗口摘要）、Gemini usage 解析回归、
+Linux deb/AppImage 自动打包与发布流水线。下载入口：
+<a href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">v0.1.0 Release</a>；
+验证范围见<a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/docs/releases/v0.1.0.md">发布说明</a>。</p>
+<p>当前实现包含：</p>
+<ul>
+<li>登记 Git 项目，并按仓库根目录去重；</li>
+<li>检测 Codex、Claude Code、Gemini CLI、OpenCode 与 CodeBuddy，并按各自实现情况提供能力；</li>
+<li>通过内置终端启动并管理支持的 Harness 会话；</li>
+<li>会话生命周期的 Git 快照与窗口摘要（「会话期间的变更」，不做 AI 归因）；</li>
+<li>汇总使用量与会话活动，查看 Activity Timeline（Codex / Claude Code / OpenCode /
+Gemini 的 usage 经 ccusage 统一导入）；</li>
+<li>插件宿主 v0.1 后端与 IPC：仅提供 <code>plugin_list</code> / <code>plugin_refresh</code>。Rust service 负责调用插件的 <code>usage/import</code>；skill 在 refresh 时拉取并缓存，随后随插件列表返回。暂未提供插件管理 UI。</li>
+</ul>
+<p>能力矩阵表示适配器实现的功能，不保证每台机器上的 Harness 当前都可用。认证、安装和 GUI 环境会影响实际 readiness。详见 <a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/tests/e2e/README.md">E2E 与验收记录</a>。</p>
+<h2 id="下载与运行">下载与运行</h2>
+<p>从 <a href="https://github.com/tangyixiao/HarnessHub/releases/tag/v0.1.0">v0.1.0 Release 条目</a> 下载对应平台安装包与 <code>SHA256SUMS</code>（校验后再安装）：</p>
+<ul>
+<li><strong>Windows x64</strong>：<code>Harness-Hub_0.1.0_x64-setup.exe</code>（未签名 NSIS；SmartScreen 可能提示发布者未知）。需要 WebView2 Runtime（Windows 11 通常已包含）。</li>
+<li><strong>Linux x64</strong>：<code>Harness-Hub_0.1.0_amd64.deb</code>（<code>sudo apt install ./Harness-Hub_0.1.0_amd64.deb</code>，依赖由包声明）或 <code>Harness-Hub_0.1.0_amd64.AppImage</code>（免安装，宿主仍需 WebKitGTK 4.1 运行库）。Linux 打包基线为 ubuntu-22.04（glibc 2.35）。</li>
+</ul>
+<h3 id="10-分钟上手">10 分钟上手</h3>
+<ol>
+<li>安装并启动 Harness Hub（见上）。</li>
+<li>准备至少一个 Harness（如 Codex CLI：<code>npm i -g @openai/codex</code> 后 <code>codex</code> 完成登录）。Harness Hub 不附带 Harness 程序或凭据。</li>
+<li>打开 <strong>Harnesses</strong> 页确认检测到的安装与能力矩阵；未安装的会如实标 Missing。</li>
+<li>在 <strong>Projects</strong> 页登记一个本地 Git 仓库目录（自动识别 repo root）。</li>
+<li>从内置终端启动一次会话：选择 Harness → 启动 → 在终端里对话；结束后 <strong>Sessions</strong> 页会出现该会话及其「Git · 会话期间的变更」。</li>
+<li>在 <strong>Dashboard</strong> 点导入 Usage（需要 Node.js/npm：runner 依次尝试 PATH 上的 <code>ccusage</code>、用户配置命令、或 <code>npx --yes ccusage@20.0.24</code> 固定版本 fallback），随后查看 Token / 成本下界 / Harness 分布与 <strong>Activity</strong> 时间线。</li>
+</ol>
+<p>Python sidecar 功能另需 Python 3.10+ 与 uv 0.5+；不装也不影响上述主流程。</p>
+<h2 id="从源码运行">从源码运行</h2>
+<p>开发环境需要 Node.js 22 LTS（22.12+）或 Node.js 24 LTS、pnpm 11、Rust stable（含 rustfmt 和 clippy）、Windows MSVC Build Tools 与 WebView2 Runtime。Python sidecar 使用时另需 Python 3.10+ 和 uv 0.5+。</p>
+<pre><code class="language-powershell">git clone https://github.com/tangyixiao/HarnessHub.git
+cd HarnessHub
+pnpm install
+pnpm tauri dev
+</code></pre>
+<p>常用验证命令见仓库 <a href="https://github.com/tangyixiao/HarnessHub/blob/6d6c32753916b56d23dbd020e6db2f428a84f324/AGENTS.md">AGENTS.md</a>。</p>
+<h2 id="已知限制">已知限制</h2>
+<ul>
+<li>Gemini CLI 的认证与 GUI 终端渲染仍受本机环境限制；已有 headless lifecycle 证据不能替代认证恢复后的 chat 级 GUI 验收。Gemini usage 解析已有回归覆盖，但本机尚无真实 Gemini 使用数据可导入。</li>
+<li>OpenCode 的 headless lifecycle 已取证；当前记录中的 GUI TUI 渲染受环境阻塞，OpenCode 认证 readiness 也需由本机配置决定。</li>
+<li>CodeBuddy 当前为 detection-only，尚不支持启动、终端或 usage 导入。</li>
+<li>Git 快照与窗口摘要只描述「会话期间的变更」，不能证明代码由 AI 编写；没有快照也不代表没有变化（best-effort 观测）。</li>
+<li>插件 v0.1 仅暴露后端 IPC，没有 UI；权限决策为 observe-only 记录，不构成安全沙箱或访问隔离。Linux 上插件宿主需要 <code>python</code> 命令（Debian/Ubuntu 默认只有 <code>python3</code>，装 <code>python-is-python3</code> 可解）。</li>
+<li>安装包未签名；本版本的构建、质量门与冷启动验证证据见 Release 说明。实际 Harness readiness 仍依赖本机安装、认证和 GUI 环境。</li>
+</ul>
+<h2 id="license">License</h2>
+<p>MIT</p>
+</article>
+</div></main><footer class="docs-footer wrap"><a href="index.html">返回首页</a><a href="https://github.com/tangyixiao/HarnessHub">GitHub 源仓库</a></footer>
+<script type="module" src="assets/system.js"></script></body></html>
