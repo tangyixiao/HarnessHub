@@ -98,7 +98,6 @@ pub enum Error {
 
     // ---- F20 Python sidecar（spec §4.5，只新增不改既有）----
     // `impl Serialize` 统一用 `to_string()`，跨 IPC 仍是字符串，无需改 Serialize。
-
     /// 启动 Python sidecar 子进程失败（解释器不存在、权限不足、命令行非法）。
     #[error("Python sidecar 启动失败：{0}")]
     SidecarSpawn(String),
