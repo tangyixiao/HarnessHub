@@ -22,3 +22,9 @@ html[data-project="OJ-NEXUS"] .source-preview,html[data-project="OJ-NEXUS"] .usa
 @media(max-width:639px){.work-material{height:236px;min-height:236px}.feature-rows h3{font-size:19px}.feature-rows li{padding:14px 0}.feature-rows p{line-height:1.65}}
 @media(min-width:1024px){.work-material{height:min(500px,calc(100svh - 300px));min-height:0}.hero--product h1{font-size:clamp(40px,4.16vw,60px)}}
 .work-material>.source-preview{height:100%}.source-preview pre{flex:1}.usage-block{justify-content:space-between}.supporting-pictures:has(>:only-child){grid-template-rows:1fr}
+/* Real quoted source can contain arrays, Markdown brackets and the word placeholder.
+   Keep kit diagnostics intact, but do not outline authentic source as unfinished page copy. */
+.source-preview code[data-placeholder],.usage-block code[data-placeholder],.docs-markdown [data-placeholder]{outline:none}
+.hero--product .hero__stage.material-stage{background:none}
+.nav:not(.is-open) .nav__actions>.theme-toggle{display:grid}
+@media(max-width:639px){.nav__logo{white-space:normal;max-width:40%;font-size:13px;line-height:1.35;min-width:0}.nav__bar{gap:8px}.nav__actions{gap:8px}.nav .nav__actions>.theme-toggle{margin-left:0}}
