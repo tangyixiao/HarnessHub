@@ -148,26 +148,30 @@ pnpm rust:clippy
 
 ## 完成门记录
 
-> 以下为 mid-integration 阶段在集成分支上**已实测**的真实输出（截至 `4abc99b`）；S2 Rust 核心与 S5 接线仍在集成，最终完成门须在全部合并后重跑。
+> 以下为**最终集成态**（集成分支 `feat/f20-sidecar-lifecycle`，HEAD `2050c3d` = S0+S1+S2+S3+S4+S5+S6 全部合并后）在 `D:\HarnessHub` 上**已实测**的真实输出。远古 mid-integration 记录（`4abc99b`）已被本节取代。
 
-| 门            | 命令                  | 结果  | 输出                                                                      |
-| ------------- | --------------------- | ----- | ------------------------------------------------------------------------- |
-| format        | `pnpm format:check`   | PASS  | `All matched files use Prettier code style!`                              |
-| rust:fmt      | `pnpm rust:fmt:check` | PASS* | 在 `aa2f7f8`（Rust 核心模块加入前）通过；全量集成后须重跑，见「环境插曲」 |
-| lint          | `pnpm lint`           | PASS  | `✖ 4 problems (0 errors, 4 warnings)`（见下注，仅警告）                   |
-| typecheck     | `pnpm typecheck`      | PASS  | `EXIT=0`                                                                  |
-| unit (web)    | `pnpm test`           | PASS  | `Test Files 11 passed (11)` / `Tests 419 passed (419)`，7.27s             |
-| unit (rust)   | `pnpm rust:test`      | 待跑  | 待填（Rust 核心尚未集成）                                                 |
-| unit (python) | `pnpm python:test`    | PASS  | `Ran 25 tests in 0.001s` / `OK`                                           |
-| build         | `pnpm build`          | 待跑  | 待填                                                                      |
-| clippy        | `pnpm rust:clippy`    | 待跑  | 待填                                                                      |
+| 门            | 命令                  | 结果 | 输出                                                                                               |
+| ------------- | --------------------- | ---- | -------------------------------------------------------------------------------------------------- |
+| format        | `pnpm format:check`   | PASS | `All matched files use Prettier code style!`                                                       |
+| rust:fmt      | `pnpm rust:fmt:check` | PASS | `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` 无输出，`EXIT=0`                 |
+| lint          | `pnpm lint`           | PASS | `✖ 4 problems (0 errors, 4 warnings)`（见下注，仅既存警告）                                        |
+| typecheck     | `pnpm typecheck`      | PASS | `$ tsc --noEmit` 无输出，`EXIT=0`                                                                  |
+| unit (web)    | `pnpm test`           | PASS | `Test Files 11 passed (11)` / `Tests 419 passed (419)`，Duration 38.67s                            |
+| unit (rust)   | `pnpm rust:test`      | PASS | 全绿运行 `test result: ok. 605 passed; 0 failed; 2 ignored`（lib）+ 全部集成测试/Doc-tests 均 `ok` |
+| unit (python) | `pnpm python:test`    | PASS | `Ran 25 tests in 0.001s` / `OK`                                                                    |
+| build         | `pnpm build`          | PASS | `✓ built in 7.15s`（`dist/assets/index-D-wZPhtv.js 482.68 kB`）                                    |
+| clippy        | `pnpm rust:clippy`    | PASS | `Finished dev profile ... in 8.27s`                                                                |
 
-注：`PASS*` 仅指 `aa2f7f8` 当时通过（`cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`），非最终完成门结论，重跑前不计最终 PASS。`pnpm lint` 的 4 条为**既存** react-refresh/only-export-components 警告（`src/app/routes.tsx:24`、`:29`，`src/features/dashboard/DashboardPage.tsx:392`、`:400`），0 errors，属 PASS；`pnpm python:test` 命令为 `uv run --project python python -m unittest discover -s python/tests -t python -v`。
+注：`pnpm lint` 的 4 条为**既存** react-refresh/only-export-components 警告（`src/app/routes.tsx:24`、`:29`，`src/features/dashboard/DashboardPage.tsx:392`、`:400`），0 errors，属 PASS；`pnpm python:test` 命令为 `uv run --project python python -m unittest discover -s python/tests -t python -v`。
 
-### 环境插曲 / 已知风险（mid-integration）
+### 环境插曲 / 已知风险（最终）
 
-1. `src-tauri/src/error.rs:98` 存在既存 rustfmt 差异：F20 sidecar error-variant 块中 `//` 注释与 `///` 文档注释间多一空行，rustfmt 要求删除；本次不改（超出写作用域），列为待处理风险。
-2. S2 Rust 核心（config/process/manager）与 S5 接线仍在集成 → `rust:test` / `build` / `rust:clippy` 为 待跑，`rust:fmt:check` 须在完全合并后的分支上重跑方可记为最终 PASS。
+1. **预置 Windows 进程树测试间歇性 flake，与 F20 无关**：`src-tauri/tests/process_tree_ownership.rs` 的 `terminate_tree_scopes_to_one_owned_tree_without_any_release` / `killing_one_session_tree_never_touches_another`，以及 `src-tauri/src/pty/input_tests.rs` 的 `worker_failure_closes_input_and_keeps_control_paths_alive` / `terminal::tests::natural_exit_finishes_the_session_and_emits_exit_code`，在 Windows 真机重负载下会间歇性失败。决定性证据：
+   - `git diff 3ebcb2e HEAD -- src-tauri/src/pty/ src-tauri/tests/process_tree_ownership.rs` 为**空**，F20 从未改动这些文件、pty 模块或 `src-tauri/Cargo.toml`/`Cargo.lock`；
+   - 同一时刻交替 A/B 对照：`BASELINE(3ebcb2e，无 F20 代码)` 单独跑 `--test process_tree_ownership` 也 `FAILED. 7 passed; 1 failed` 一次，`HEAD(2050c3d)` 两次全过 → 失败不依赖 F20 代码；
+   - CI 的 rust job 跑在 `ubuntu-latest`，而 `process_tree_ownership.rs` 是 `#![cfg(windows)]`，CI 根本不执行该测试。
+   - `pnpm rust:test` 首次全绿（`2050c3d` 合并当次），复跑 4 次里第 4 次拿到干净全绿 `EXIT=0`；F20 自身 `src-tauri/tests/sidecar_lifecycle.rs` 真机冷启动 6 用例独立跑始终稳定 `ok`。结论：属既存环境敏感型 flake，不阻断 F20 交付，记录于此以便后续单独治理。
+2. `src-tauri/src/error.rs` F20 sidecar error-variant 块原先多一空行的 rustfmt 差异已在 `50637fc` 一并修复，最终 `rust:fmt:check` 全绿。
 
 ## 已知风险
 
