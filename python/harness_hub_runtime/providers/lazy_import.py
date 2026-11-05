@@ -1,14 +1,12 @@
 """F21 S1 — 可选 SDK 探测（spec §4.1，冻结）。
 
-只用 `importlib.util.find_spec()` 检查第三方 SDK 是否可导入，**绝不**在模块顶层
-import 它们，也绝不执行它们。任何异常都收敛成 `False`。
-零依赖：只用 importlib.util / dataclasses / __future__。
+只用 `importlib.util.find_spec()` 检查第三方 SDK 是否可导入，模块顶层绝不导入或执行它们；
+任何异常都收敛成 `False`。零依赖：只用 importlib.util / __future__ / typing。
 """
 
 from __future__ import annotations
 
 import importlib.util
-from typing import Any
 
 from .dto import ProviderDescriptor
 
