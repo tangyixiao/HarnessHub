@@ -1856,4 +1856,73 @@ mod tests {
             assert!(skill.get(leaked).is_none(), "skills 泄漏：{leaked}");
         }
     }
+
+    /// 跨 IPC 契约测试：`gateway_status` 命令冷启动降级路径（spec §6.3 / §8）。
+    ///
+    /// §8 纪律：从**真正空**的 manager 起，只调用生产代码拿到 `Stopped` 状态，
+    /// 再走 `GatewayStatus::unavailable`，不允许用夹具替生产代码注入 Ready/Degraded。
+    /// `gateway_status(State<AppState>)` 无法在纯单测里直接构造 Tauri State，因此这里
+    /// 锁定命令第一条分支使用的那条真路径的 **DTO 序列化形状**（前端逐字段依赖这些键）。
+    #[test]
+    fn gateway_status_cold_start_degrades_with_locked_ipc_shape() {
+        use crate::sidecar::config::SidecarConfig;
+        use crate::sidecar::gateway::GatewayStatus;
+        use crate::sidecar::manager::SidecarManager;
+        use std::path::PathBuf;
+
+        // 真·冷启动：解释器不存在也无所谓 —— new() 是懒的，不 spawn。
+        let config = SidecarConfig {
+            python: PathBuf::from("no-such-python-interpreter-9f3b.exe"),
+            runtime_root: PathBuf::from("python"),
+            host_version: "0.5.0".to_string(),
+        };
+        let manager = SidecarManager::new(config);
+        let sidecar = manager.status();
+        assert_eq!(sidecar.state, crate::sidecar::dto::SidecarState::Stopped);
+
+        // 命令第一条分支：sidecar 未就绪 → unavailable(实参 state, 固定文案)。
+        let status = GatewayStatus::unavailable(
+            sidecar.state,
+            "Python sidecar 未就绪，Provider Gateway 状态不可用",
+        );
+        let value = serde_json::to_value(&status).expect("序列化 GatewayStatus");
+
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["sidecarState"], "stopped");
+        assert_eq!(value["mode"], "unified");
+        assert_eq!(value["protocolVersion"], serde_json::Value::Null);
+        assert_eq!(
+            value["lastError"],
+            "Python sidecar 未就绪，Provider Gateway 状态不可用"
+        );
+        assert_eq!(
+            value["providers"].as_array().expect("providers 数组").len(),
+            4,
+            "降级对象必须是完整 4 个 provider 描述符，而非空数组"
+        );
+        assert_eq!(
+            value["capabilities"]
+                .as_array()
+                .expect("capabilities 数组")
+                .len(),
+            10
+        );
+
+        // 顶层恰好 8 键，且不得泄漏任何 snake_case / 嵌套键。
+        let object = value.as_object().expect("GatewayStatus 必须是对象");
+        assert_eq!(object.len(), 8);
+        for leaked in [
+            "sidecar_state",
+            "protocol_version",
+            "last_error",
+            "revision_binding",
+            "precedence",
+        ] {
+            assert!(!object.contains_key(leaked), "顶层泄漏 snake_case：{leaked}");
+        }
+        let tokenization = value["tokenization"]
+            .as_object()
+            .expect("tokenization 对象");
+        assert!(!tokenization.contains_key("revision_binding"));
+    }
 }
