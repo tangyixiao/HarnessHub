@@ -1,0 +1,1 @@
+"""F20 握手负路径 fixture：故意自报不兼容的 protocolVersion。"""

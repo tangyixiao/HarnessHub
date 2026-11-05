@@ -62,6 +62,7 @@ import {
   normalizeReplaySession,
   normalizeReplaySessionSummary,
   normalizeSessionGitSnapshot,
+  normalizeSidecarStatus,
   normalizeSessionGitSummary,
   normalizeSessionRecord,
   normalizeUsageCapabilities,
@@ -92,10 +93,14 @@ import {
   runConfigDoctor,
   searchReplay,
   setReplaySearchSettings,
+  sidecarRestart,
+  sidecarStart,
+  sidecarStatus,
+  sidecarStop,
   upsertMcpServer,
   upsertPrompt,
 } from '@/lib/ipc';
-import type { McpServerInput, PromptInput } from '@/lib/ipc';
+import type { McpServerInput, PromptInput, SidecarStatus } from '@/lib/ipc';
 
 type Internals = { __TAURI_INTERNALS__?: unknown };
 
@@ -3335,5 +3340,190 @@ describe('Skills 只读发现 IPC（ROADMAP E19 缩范围）', () => {
       ok: true,
       data: { skills: [SKILLS_REPORT_PAYLOAD.skills[0]], skipped: ['empty-dir'] },
     });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * F20 Python Sidecar 生命周期（Task 5）
+ *
+ * 手工复刻 Rust `SidecarStatus`（serde rename_all = "camelCase"）的 JSON 形状，
+ * 锁住前端解析行为；与 spec §4.1 的 contract test 同一 payload。
+ * ------------------------------------------------------------------ */
+
+const SIDECAR_STATUS_PAYLOAD = {
+  state: 'ready',
+  pid: 1234,
+  runtime: {
+    name: 'harness-hub-runtime',
+    version: '0.5.0',
+    transport: 'stdio-jsonrpc',
+    python: '3.14.3',
+    protocolVersion: '1.0',
+    providers: [],
+    capabilities: ['ping'],
+    methods: ['ping'],
+  },
+  negotiatedCapabilities: ['ping', 'runtime.info', 'shutdown'],
+  protocolVersion: '1.0',
+  lastError: null,
+  restartCount: 0,
+};
+
+const SIDECAR_EXPECTED: SidecarStatus = {
+  state: 'ready',
+  pid: 1234,
+  runtime: {
+    name: 'harness-hub-runtime',
+    version: '0.5.0',
+    transport: 'stdio-jsonrpc',
+    python: '3.14.3',
+    protocolVersion: '1.0',
+    providers: [],
+    capabilities: ['ping'],
+    methods: ['ping'],
+  },
+  negotiatedCapabilities: ['ping', 'runtime.info', 'shutdown'],
+  protocolVersion: '1.0',
+  lastError: null,
+  restartCount: 0,
+};
+
+const DEGRADED_DEFAULTS: SidecarStatus = {
+  state: 'degraded',
+  pid: null,
+  runtime: null,
+  negotiatedCapabilities: [],
+  protocolVersion: null,
+  lastError: null,
+  restartCount: 0,
+};
+
+describe('normalizeSidecarStatus', () => {
+  it('解析 Rust 侧的真实 camelCase 形状，字段逐一相等', () => {
+    expect(normalizeSidecarStatus(SIDECAR_STATUS_PAYLOAD)).toEqual(SIDECAR_EXPECTED);
+  });
+
+  it('识别 stopped / ready / degraded 三种合法状态', () => {
+    for (const state of ['stopped', 'ready', 'degraded'] as const) {
+      expect(normalizeSidecarStatus({ ...SIDECAR_STATUS_PAYLOAD, state }).state).toBe(state);
+    }
+  });
+
+  it('坏输入与未知 state 一律 fail-closed 收敛为 degraded 安全默认', () => {
+    for (const raw of [null, 42, {}, 'ready', [], true, undefined]) {
+      expect(normalizeSidecarStatus(raw)).toEqual(DEGRADED_DEFAULTS);
+    }
+    for (const state of ['running', 'READY', '', null, 3, undefined]) {
+      expect(normalizeSidecarStatus({ ...SIDECAR_STATUS_PAYLOAD, state })).toEqual(
+        DEGRADED_DEFAULTS,
+      );
+    }
+  });
+
+  it('顶层字段类型错误 / 缺失时逐字段收敛，不抛异常', () => {
+    expect(
+      normalizeSidecarStatus({
+        ...SIDECAR_STATUS_PAYLOAD,
+        pid: '1234',
+        negotiatedCapabilities: 'ping',
+        protocolVersion: 42,
+        restartCount: '3',
+      }),
+    ).toEqual({
+      ...SIDECAR_EXPECTED,
+      pid: null,
+      negotiatedCapabilities: [],
+      protocolVersion: null,
+      restartCount: 0,
+    });
+    expect(normalizeSidecarStatus({ state: 'ready' })).toEqual({
+      ...DEGRADED_DEFAULTS,
+      state: 'ready',
+    });
+  });
+
+  it('嵌套 runtime 缺失 / 类型错误时不抛，收敛为 null', () => {
+    for (const runtime of [null, 'nope', [], 42, undefined]) {
+      expect(normalizeSidecarStatus({ ...SIDECAR_STATUS_PAYLOAD, runtime }).runtime).toBeNull();
+    }
+  });
+
+  it('嵌套 runtime 字段缺失 / 类型错误时逐字段收敛，不抛异常', () => {
+    const result = normalizeSidecarStatus({
+      ...SIDECAR_STATUS_PAYLOAD,
+      runtime: { name: 42, capabilities: 'ping', providers: [1, 'a', null] },
+    });
+
+    expect(result.runtime).toEqual({
+      name: '',
+      version: '',
+      transport: '',
+      python: '',
+      protocolVersion: '',
+      providers: ['a'],
+      capabilities: [],
+      methods: [],
+    });
+  });
+
+  it('lastError 只接受字符串，restartCount 只接受有限数字', () => {
+    expect(
+      normalizeSidecarStatus({ state: 'degraded', lastError: 'boom', restartCount: 5 }).lastError,
+    ).toBe('boom');
+    expect(
+      normalizeSidecarStatus({ state: 'degraded', lastError: 42, restartCount: 5 }).lastError,
+    ).toBeNull();
+    expect(
+      normalizeSidecarStatus({ state: 'degraded', lastError: null, restartCount: 'x' })
+        .restartCount,
+    ).toBe(0);
+    expect(
+      normalizeSidecarStatus({ state: 'degraded', lastError: null, restartCount: Number.NaN })
+        .restartCount,
+    ).toBe(0);
+  });
+});
+
+describe('sidecar IPC wrappers', () => {
+  const cases = [
+    ['sidecarStatus', sidecarStatus, 'sidecar_status'],
+    ['sidecarStart', sidecarStart, 'sidecar_start'],
+    ['sidecarStop', sidecarStop, 'sidecar_stop'],
+    ['sidecarRestart', sidecarRestart, 'sidecar_restart'],
+  ] as const;
+
+  for (const [name, wrapper, command] of cases) {
+    it(`${name} 使用 ${command} 命令名，返回 IpcResult<SidecarStatus> 的 ok/data 形状`, async () => {
+      const invokeSpy = vi.fn(async (..._args: unknown[]) => SIDECAR_STATUS_PAYLOAD);
+      stubTauri(invokeSpy);
+
+      const result = await wrapper();
+
+      expect(invokeSpy).toHaveBeenCalledTimes(1);
+      // invoke 收 3 个参数（command / args / options），只断言命令名，别断言参数个数。
+      expect(invokeSpy.mock.calls[0]?.[0]).toBe(command);
+      expect(result).toEqual({ ok: true, data: SIDECAR_EXPECTED });
+    });
+  }
+
+  it('命令返回坏形状时 normalize 成 degraded 安全默认，不假装 ready', async () => {
+    stubTauri(async () => ({ state: 'weird' }));
+
+    await expect(sidecarStatus()).resolves.toEqual({ ok: true, data: DEGRADED_DEFAULTS });
+  });
+
+  it('后端错误原样传出为 ok:false', async () => {
+    stubTauri(async () => {
+      throw new Error('sidecar IPC 炸了');
+    });
+
+    await expect(sidecarRestart()).resolves.toEqual({
+      ok: false,
+      error: 'sidecar IPC 炸了',
+    });
+  });
+
+  it('浏览器模式（无 Tauri runtime）返回 ok:false 且不发调用', async () => {
+    await expect(sidecarStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

@@ -190,6 +190,18 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
         `[mcp_servers.<name>] url`（**toml_edit 保格式**）；gemini `settings.json`
         `{httpUrl}`。IPC `mcp_server_list/upsert/remove`、`mcp_binding_list/add/remove`、
         `mcp_sync_preview`（纯读）/`mcp_sync_apply`（显式）/`mcp_import`。
+        Python Sidecar 生命周期（F20）已完成：`src-tauri/src/sidecar/` 四个模块
+        （`dto.rs` / `config.rs` / `process.rs` / `manager.rs`）与
+        `python/harness_hub_runtime/rpc/server.py`。Rust 侧 `SidecarProcess::spawn/shutdown`
+        负责启停；行分隔 stdio JSON-RPC `initialize` 握手做 protocolVersion 主版本与
+        `requiredCapabilities` 协商、`RuntimeInfo` 交集校验，不兼容即降级；
+        `SidecarManager` 状态机 `Stopped → Ready → Degraded → Ready` 检出崩溃并经
+        `sidecar_restart` 恢复；IPC 命令 `sidecar_status` / `sidecar_start` /
+        `sidecar_stop` / `sidecar_restart`，设置页 `SidecarCard` 展示状态。所有失败
+        收敛为 `SidecarStatus`（不向上传播为 IPC 错误），`AppState` 构造不依赖
+        Python 存在 —— 无 Python 时 PTY / Git / Session / 插件宿主等主功能不受影响。
+        规格 `docs/specs/2026-11-04-f20-sidecar-lifecycle-design.md`、
+        计划 `docs/plans/2026-11-04-f20-sidecar-lifecycle.md`。
     - **Prompts + Skills + Tray（E19）**：`src-tauri/src/prompts/`（migration 0014
       `prompt_artifacts`；标记块渲染器 `render.rs` 纯函数核心——`harness-hub:begin/end`
       块外用户内容逐字节保留、幂等 round-trip、begin 未闭合拒绝落盘；多条按 name 升序）
@@ -202,5 +214,7 @@ render_preview/render_apply`、`skills_list`。
       尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
       capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）；
       配置投影的 codex/gemini 目标；MCP project scope 绑定与 Runtime 连接（F22）；
+      打包态 Python 运行时资源定位与 PYTHONPATH 注入（F20 仅保证 dev +
+      `HARNESS_HUB_PYTHON` / `HARNESS_HUB_RUNTIME_ROOT` 覆盖，留待 F23）；
       ProfileAdapter.activate（切换与托盘 Profile 切换的前置）。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。

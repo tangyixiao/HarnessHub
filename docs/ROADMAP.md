@@ -143,7 +143,7 @@ Linux 打包、v0.1 Release Gate 其余各项。
 
 ### 阶段 20（F20）Python Sidecar 生命周期
 
-- 启停/握手/能力协商/崩溃恢复；无 Python 功能时主功能不受影响。
+- 启停/握手/能力协商/崩溃恢复；无 Python 功能时主功能不受影响。已完成。
 
 ### 阶段 21（F21）Provider Gateway + Tokenizer
 
