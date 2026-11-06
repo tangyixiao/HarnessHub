@@ -12,7 +12,7 @@
 
 ## 现状基线（2026-10-24）
 
-已完成：Phase 0 研究（ADR-0001~0013、0018）、Walking Skeleton、
+已完成：Phase 0 研究（ADR-0001~0013、0018）、Walking Skeleton、F20/F21（Unified AI Runtime 契约层）、
 Codex / Claude Code / Gemini CLI / OpenCode 的 detect+launch+terminal、
 ccusage 导入（幂等+对账）、Dashboard 只读投影、Project Registry、
 Activity Timeline、插件宿主 v0.1（+加固）、内部只读 `git::capture`、
@@ -149,6 +149,13 @@ Linux 打包、v0.1 Release Gate 其余各项。
 
 - LiteLLM 统一通道 + OpenAI/Anthropic/Google 原生逃生舱；token 来源四级
   可信度标记（provider_reported>count_api>local_exact>estimated）。
+- 已完成（2026-11-05，PR #60-#66）。本阶段交付的是**契约层**：providers DTO /
+  streaming event 归一化 / provider error 归一化 / unified·native 路由决策 /
+  lazy-import 优雅降级，tokenization 四级 precedence / estimated 估算 /
+  tokenizer-model revision 绑定，RPC 方法表与能力协商扩展，Rust `GatewayStatus`
+  DTO + 安全 decoder + 薄命令，前端 normalize + `ProviderGatewayCard`。
+  真实 LiteLLM / OpenAI / Anthropic / Google SDK 接入与网络调用**不在本阶段**
+  （零新增依赖），见 spec §1.3 非目标。
 
 ### 阶段 22（F22）MCP Client/Server
 
