@@ -202,6 +202,42 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
         Python 存在 —— 无 Python 时 PTY / Git / Session / 插件宿主等主功能不受影响。
         规格 `docs/specs/2026-11-04-f20-sidecar-lifecycle-design.md`、
         计划 `docs/plans/2026-11-04-f20-sidecar-lifecycle.md`。
+        Provider Gateway + Tokenizer（F21）已完成，交付的是**跨语言契约层**
+        （零新增第三方依赖，不发起网络请求、不读 API Key、不实现真实 generate/stream）：
+        - **providers 契约层** `python/harness_hub_runtime/providers/`：
+          `dto.py` 冻结 `PROVIDER_IDS` / `MODES` / `MODEL_EVENT_TYPES` / `ERROR_KINDS` /
+          `NATIVE_ONLY_CAPABILITIES` 与四个 frozen dataclass（`to_json()` 键序冻结）；
+          `streaming.py` 把 openai / anthropic / google 的流式 chunk 归一成 `ModelEvent`
+          （`textDelta` 截断 256、`finishReason` 64、`usage` 只留整数）；
+          `errors.py` 归一成 8 类 `ProviderError`（优先级 auth → rate_limit →
+          invalid_request → context_length → timeout → network → server → unknown；
+          message 只取首 120 字符且去换行，**不回显原始对象**）；
+          `routing.py` 冻结四条按序命中规则（native_only_capability / explicit_native /
+          unknown_provider / litellm_first），`fallback` 恒为 `"litellm"`；
+          `lazy_import.py` 只用 `importlib.util.find_spec` 探测四个可选 SDK，**顶层绝不 import**。
+        - **tokenization 契约层** `python/harness_hub_runtime/tokenization/`：
+          `truth.py` 四级 precedence（provider_reported > provider_count_api >
+          local_exact > estimated），`select_truth` 取首个非负 int，全无 → `("estimated", None)`；
+          `estimate.py` 公式冻结 `max(1, ceil(text_length/4))` 且恒标 `estimated=True`；
+          `revision.py` 冻结 tokenizer-model 前缀表，绑定不上明确 `bound=false` +
+          `revision="unknown"`，不假装成功。
+        - **RPC 扩展** `rpc/server.py`：`SUPPORTED_CAPABILITIES` 扩到 10 项、
+          `DEFAULT_METHODS` 扩到 12 项（顺序冻结）；新增 `gateway.status`（自包含，可选 SDK
+          缺失不算 degraded）、`gateway.providers` / `gateway.route` /
+          `gateway.normalize.stream` / `gateway.normalize.error` 与 `tokenization.*` 三方法；
+          所有方法经 `_reject_raw_content` 拒绝 `prompt`/`messages`/`response`/`content` 原文。
+          **F20 握手零改动**：`config.rs::REQUIRED_CAPABILITIES` 仍是三项，新清单是其超集。
+        - **Rust 契约** `src-tauri/src/sidecar/gateway.rs`：`GatewayStatus` 8 键
+          `#[serde(rename_all = "camelCase")]` DTO（`state`/`sidecarState`/`mode`/`providers`/
+          `tokenization`/`capabilities`/`protocolVersion`/`lastError`）、
+          `decode_gateway_status` 安全 decoder（坏形状 fail-closed、字符串截断 256、
+          数组上限 64、`protocolVersion` 只来自 payload）；`commands.rs::gateway_status`
+          薄命令**永不返回 IPC Err**，`lib.rs` generate_handler 按字母序注册。
+        - **前端** `src/lib/ipc.ts` 的 `normalizeGatewayStatus`（fail-closed 到
+          `unavailableGatewayStatus()`）+ `gatewayStatus()`；设置页 `ProviderGatewayCard`
+          只 import `@/lib/ipc`，渲染路径零 IPC。
+          规格 `docs/specs/2026-11-05-f21-provider-gateway-design.md`（跨语言契约唯一事实来源）、
+          计划 `docs/plans/2026-11-05-f21-provider-gateway.md`。
     - **Prompts + Skills + Tray（E19）**：`src-tauri/src/prompts/`（migration 0014
       `prompt_artifacts`；标记块渲染器 `render.rs` 纯函数核心——`harness-hub:begin/end`
       块外用户内容逐字节保留、幂等 round-trip、begin 未闭合拒绝落盘；多条按 name 升序）
