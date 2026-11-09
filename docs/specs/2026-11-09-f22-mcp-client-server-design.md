@@ -45,9 +45,11 @@
 
 ## 2. 安全红线（实现前先读）
 
-1. **env 值单次传递**：stdio server 启动需要真实环境变量值。值的流动路径固定为
-   `credentials store（句柄解引用）→ Rust 内存 → mcp.connect 单次 RPC → Python spawn`。
-   不落 SQLite、不写日志、不出现在任何状态快照回显里（快照只回 `envKeys` 名单）。
+1. **env 值单次传递**：stdio server 启动需要真实环境变量值。v1 的值来源 =
+   **sidecar 子进程继承宿主进程环境**（`Popen` 默认行为），Rust 不在 IPC 里传任何
+   env 值。E16 凭据是 harness 维度、与 MCP server 无链接（迁移 0012 无此 FK），
+   「MCP env 键 → 凭据句柄」机制留 Open Questions（§8）。快照只回 `envKeys` /
+   `envMissingKeys` 名单，绝不回值；任何 env 值不落 SQLite、不写日志。
 2. **命令不经 shell**：Python spawn 用参数数组直 exec（`subprocess.Popen(list)`），
    与 `sidecar/process.rs` 同纪律。
 3. **策略唯一判定点在 Rust**：`mcp.tools.call` 只有 Rust 策略返回 allow 才转发；
@@ -220,9 +222,10 @@ mcp_runtime_status / mcp_runtime_connect / mcp_runtime_disconnect
 mcp_runtime_tools_list / mcp_runtime_tool_call
 ```
 
-- `mcp_runtime_connect` 输入来自前端（serverId），Rust 从 `mcp_servers` 表读定义，
-  env 值从 `credentials` 解引用（键名 = `env_keys` 逐个查句柄；无句柄的键传空值并
-  在返回里带 `envMissingKeys` 提示）。**任何 env 值绝不进入日志/快照/错误文本。**
+- `mcp_runtime_connect` 输入来自前端（serverId），Rust 从 `mcp_servers` 表读定义。
+  env 值不在 IPC 传递（Python 侧子进程继承宿主环境）；返回里带
+  `envMissingKeys`（= registry `env_keys` 名单，信息性：提示用户宿主环境需有这些
+  变量）。**任何 env 值绝不进入日志/快照/错误文本/IPC。**
 - `mcp_runtime_tool_call` 先 `policy.evaluate_tool_call`，deny 时返回结构化
   `{ allowed: false, reason }`（HTTP 200 语义，前端渲染原因），不转发 Python。
 
@@ -328,3 +331,4 @@ pnpm lint && pnpm typecheck && pnpm test   # S4
 2. tool call 审计落库（新迁移 + allow/deny CHECK 语义）。
 3. Resources / Prompts 发现与 UI 消费。
 4. OAuth 授权的 http transport（当前 headers 由用户显式登记）。
+5. MCP env 键 → E16 凭据句柄的链接机制（v1 继承宿主环境）。
