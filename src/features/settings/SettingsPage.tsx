@@ -46,6 +46,7 @@ import {
   type SidecarStatus,
   type SkillsReport,
 } from '@/lib/ipc';
+import { McpRuntimeCard } from '@/features/settings/McpRuntimeCard';
 import { ProviderGatewayCard } from '@/features/settings/ProviderGatewayCard';
 
 /**
@@ -81,6 +82,7 @@ export function SettingsPage() {
       <CredentialsCard />
       <ConfigDoctorCard />
       <McpCard />
+      <McpRuntimeCard />
       <SkillsCard />
       <SidecarCard />
       <ProviderGatewayCard />
