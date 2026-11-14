@@ -5,10 +5,10 @@
 ## 切片
 
 1. **S1 `feat/f23/py-model-assets`**：`models/` 模块（status/info/cache/download）
-   + `rpc/server.py` 方法表扩展 + `python/tests/test_models_*.py`。
-   前置：F22 S1 已合入（server.py 冲突面）。
+   - `rpc/server.py` 方法表扩展 + `python/tests/test_models_*.py`。
+     前置：F22 S1 已合入（server.py 冲突面）。
 2. **S2 `feat/f23/rust`**：`sidecar/models.rs` DTO + fail-closed decoder + 6 个薄命令
-   + serde 契约测试 + `sidecar/config.rs` 打包态资源定位（S4 并入）+ 单测。
+   - serde 契约测试 + `sidecar/config.rs` 打包态资源定位（S4 并入）+ 单测。
 3. **S3 `feat/f23/web`**：`ipc.ts` normalize + `ModelAssetsCard` + fixture tests。
 
 合并顺序 S1 → S2 → S3。PR 附证据表。
