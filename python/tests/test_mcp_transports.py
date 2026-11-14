@@ -152,7 +152,8 @@ class SseParsingTest(unittest.TestCase):
         self.assertEqual(parse_sse_messages(raw), [{"b": 2}])
 
     def test_non_json_data_lines_skipped(self) -> None:
-        raw = b"data: not-json\ndata: {\"c\":3}\n\n"
+        # 非 JSON 的事件（心跳等）跳过，同流内后续 JSON 事件照常解析。
+        raw = b"data: not-json\n\ndata: {\"c\":3}\n\n"
         self.assertEqual(parse_sse_messages(raw), [{"c": 3}])
 
     def test_data_without_space_after_colon(self) -> None:
@@ -276,7 +277,10 @@ class HttpTransportTest(unittest.TestCase):
         success = FakeResponse(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode())
 
         responses = [
-            FakeResponse(b"", headers={"Mcp-Session-Id": "old"}),  # 第一次建立 session
+            FakeResponse(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}).encode(),
+                headers={"Mcp-Session-Id": "old"},
+            ),  # 第一次建立 session
         ]
 
         def fake_urlopen(request, **kwargs):
