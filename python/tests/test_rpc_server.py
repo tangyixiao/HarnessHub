@@ -30,6 +30,8 @@ PROTOCOL_VERSION = "1.0"
 # Rust 握手的 requiredCapabilities 仍固定为 F20 三项（spec §3.1），不随 F21 能力集扩展。
 F20_REQUIRED_CAPABILITIES = ["ping", "runtime.info", "shutdown"]
 # F21 冻结清单（docs/specs/2026-11-05-f21-provider-gateway-design.md §3.2），顺序有意义。
+# F22 末尾追加 "mcp.client"（docs/specs/2026-11-09-f22-mcp-client-server-design.md §3.1：
+# 追加不重排既有项；F20 握手三项仍是子集）。
 CAPABILITIES = [
     "ping",
     "runtime.info",
@@ -41,8 +43,10 @@ CAPABILITIES = [
     "tokenization.precedence",
     "tokenization.estimate",
     "tokenization.revision",
+    "mcp.client",
 ]
-METHODS = [
+# gateway 块的自包含语义不变（spec §3.1：GATEWAY_STATIC_* 不动），仍是 F21 的 12 项。
+GATEWAY_STATIC_METHODS_FROZEN = [
     "ping",
     "runtime.info",
     "initialize",
@@ -56,6 +60,9 @@ METHODS = [
     "tokenization.precedence",
     "tokenization.revision",
 ]
+# F22 追加的 5 个方法（spec §3.1：追加在末尾）。
+MCP_METHODS = ["mcp.status", "mcp.connect", "mcp.disconnect", "mcp.tools.list", "mcp.tools.call"]
+METHODS = [*GATEWAY_STATIC_METHODS_FROZEN, *MCP_METHODS]
 RUNTIME_INFO_KEYS = {
     "name",
     "version",
@@ -357,7 +364,8 @@ class F21CapabilityTests(unittest.TestCase):
     def test_frozen_static_constants_match_contract(self) -> None:
         self.assertEqual(rpc_server.SUPPORTED_CAPABILITIES, CAPABILITIES)
         self.assertEqual(rpc_server.GATEWAY_STATIC_CAPABILITIES, CAPABILITIES)
-        self.assertEqual(rpc_server.GATEWAY_STATIC_METHODS, METHODS)
+        # F22：GATEWAY_STATIC_METHODS 保持 F21 的 12 项不动（spec §3.1）。
+        self.assertEqual(rpc_server.GATEWAY_STATIC_METHODS, GATEWAY_STATIC_METHODS_FROZEN)
         self.assertEqual(list(DEFAULT_METHODS), METHODS)
 
     def test_runtime_info_returns_new_capabilities_and_methods(self) -> None:
@@ -475,7 +483,8 @@ class F21GatewayStatusTests(unittest.TestCase):
         self.assertEqual(result["mode"], "unified")
         self.assertEqual(result["protocolVersion"], "1.0")
         self.assertEqual(result["capabilities"], CAPABILITIES)
-        self.assertEqual(result["methods"], METHODS)
+        # F22：gateway.status 的 methods 仍来自不动的 GATEWAY_STATIC_METHODS。
+        self.assertEqual(result["methods"], GATEWAY_STATIC_METHODS_FROZEN)
         self.assertIsNone(result["lastError"])
 
     def test_status_tokenization_block(self) -> None:
