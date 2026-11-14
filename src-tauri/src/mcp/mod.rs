@@ -9,6 +9,8 @@
 //! - 同步只覆盖 Hub 管理的键（command/args/url/type），条目内用户手写的
 //!   `env` / `headers` 等一律保留（绝不把 `<redacted>` 写进真配置）。
 
+pub mod client_bridge;
+pub mod policy;
 pub mod registry;
 pub mod sync;
 
