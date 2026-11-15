@@ -9,7 +9,7 @@
 
 **Tech Stack:** Rust std::process/std::thread、现有 thiserror、系统 Git、Cargo tests。
 
-**Spec:** `docs/specs/2026-10-23-git-snapshot-capture-design.md`（用户已确认第一阶段范围）。
+**Spec:** `docs/specs/2026-10-23-git-snapshot-capture-design.md`（第一阶段范围已确认）。
 
 ## Global Constraints
 

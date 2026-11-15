@@ -3,7 +3,7 @@
 - 日期：2026-11-04
 - 规格：[docs/specs/2026-11-04-f20-sidecar-lifecycle-design.md](../specs/2026-11-04-f20-sidecar-lifecycle-design.md)
 - 阶段：Track F / F20（目标 v0.5.0）
-- 加速模式：多子 agent 并行 + 小 commit + 多 PR 合并 + goal 驱动（用户 m00140 要求）
+- 加速模式：多子 agent 并行 + 小 commit + 多 PR 合并 + goal 驱动（已确认的工作方式，原会话 m00140）
 - 集成分支：`feat/f20-sidecar-lifecycle` @ `3ebcb2e`（真实远程 main）
 - goal：`goal-a37c0e13-7716-4b50-acca-acfcecd9fd84`（rev 2，maxGoalRounds=12）
 

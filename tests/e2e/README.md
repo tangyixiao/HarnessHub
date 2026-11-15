@@ -421,7 +421,7 @@ GUI: Schema 版本 7 / Managed Sessions 13 / Tokens 0 / Known Cost —
 
 ### 与基线不一致的一处，必须解释
 
-用户给的基线里 `managed_sessions = 0`，真实应用数据库是 **13**。原因：基线来自 Task 5/6 的
+原提供的基线里 `managed_sessions = 0`，真实应用数据库是 **13**。原因：基线来自 Task 5/6 的
 **临时库 E2E**（全新空库，Harness Hub 一个会话都没启动过）；应用数据库里有 Task 3/4 真实启动过的
 13 条会话。两个数字都正确，恰好说明 `usage_sessions`（222，来自外部历史）与
 `managed_sessions`（13，Harness Hub 自己管理的）确实是两个不同的事实。
