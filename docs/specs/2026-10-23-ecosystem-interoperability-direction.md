@@ -3,7 +3,7 @@
 - 日期：2026-10-23。
 - 状态：**历史提案（2026-10-23）；不作为当前路线图或实现状态。**
 - 2026-11-04 对照：Git Session Snapshot 已合并，配置平面已有实现；本文关于阶段先后和不自建配置平面的建议仅反映当时设想，与当前实现不一致。现状和优先级以 `docs/CONTEXT.md`、`docs/ROADMAP.md` 与现行 ADR 为准。未来采用本文任一建议前须重新评估，不改变既有实现或承诺。
-- 用户要求：打通包括但不限于 DeepSeek Harness Desktop、ZCode、WorkBuddy；“打通本身”也先找 GitHub 开源项目，如 CC Switch，避免反复造轮子。
+- 项目需求：打通包括但不限于 DeepSeek Harness Desktop、ZCode、WorkBuddy；“打通本身”也先找 GitHub 开源项目，如 CC Switch，避免反复造轮子。
 - 来源：根计划 §4.12–4.16、§20，`docs/research/2026-10-23-interop-reuse-review.md`。
 
 ## 目的
