@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "description": "Register a local Git project, launch a supported CLI in the built-in terminal and inspect Git changes and activity when the session ends."
+  },
+  "pages": {
+    "home": {
+      "title": "Run local coding sessions from one desktop window · {project}"
+    },
+    "features": {
+      "title": "Features · {project}",
+      "description": "Register a local Git project, launch a supported CLI in the built-in terminal and inspect Git changes and activity when the session ends."
+    },
+    "download": {
+      "title": "Get started · {project}",
+      "description": "Choose a Windows x64 or Linux x64 package from v0.1.0 and compare it with SHA256SUMS."
+    },
+    "community": {
+      "title": "Community · {project}",
+      "description": "Find usage guidance, follow discussions and review changes to this project."
+    }
+  },
+  "nav": {
+    "home": "Home",
+    "features": "Features",
+    "download": "Get started",
+    "community": "Community"
+  },
+  "ui": {
+    "skip_link": "Skip to main content",
+    "navigation": "Main navigation",
+    "open_navigation": "Open navigation",
+    "close_navigation": "Close navigation",
+    "language": "Choose language",
+    "theme": "Choose theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System",
+    "platforms": "Supported platforms",
+    "github": "GitHub",
+    "view_image": "View full illustration",
+    "feature_more": "Explore features",
+    "download": "Download Harness Hub",
+    "release_notes": "Source repository",
+    "documentation": "Documentation",
+    "source": "Source repository",
+    "illustration": "First steps",
+    "license": "Apache-2.0 (original code and docs)"
+  },
+  "hero": {
+    "title": [
+      "Run local coding sessions from one desktop window"
+    ],
+    "description": [
+      "Register a local Git project, launch a supported CLI in the built-in terminal and inspect Git changes and activity when the session ends."
+    ],
+    "primary_action": "Download Harness Hub",
+    "secondary_action": "Explore features"
+  },
+  "preview": {
+    "caption": "First steps",
+    "tabs": [
+      {
+        "label": "Get started",
+        "icon": "book"
+      }
+    ],
+    "items": [
+      {
+        "title": "Get the desktop app",
+        "description": "Choose a Windows x64 or Linux x64 package from v0.1.0 and compare it with SHA256SUMS.",
+        "icon": "book"
+      },
+      {
+        "title": "Start a session",
+        "description": "Install and sign in to a supported CLI, register a repository in Projects and launch the terminal.",
+        "icon": "link"
+      }
+    ]
+  },
+  "features": {
+    "title": "Project features",
+    "groups": [
+      {
+        "title": "Projects and terminals",
+        "description": "Register a repository root and check the Harnesses page for installed tools and their available capabilities.",
+        "detail": "",
+        "icon": "layers"
+      },
+      {
+        "title": "Session history",
+        "description": "Inspect start and end Git snapshots and import usage records to follow activity by tool.",
+        "detail": "",
+        "icon": "book"
+      }
+    ]
+  },
+  "getting_started": {
+    "title": "Get started · {project}",
+    "steps": [
+      {
+        "title": "Get the desktop app",
+        "description": "Choose a Windows x64 or Linux x64 package from v0.1.0 and compare it with SHA256SUMS.",
+        "icon": "book"
+      },
+      {
+        "title": "Start a session",
+        "description": "Install and sign in to a supported CLI, register a repository in Projects and launch the terminal.",
+        "icon": "link"
+      }
+    ]
+  },
+  "community": {
+    "title": "Community · {project}",
+    "description": "Find usage guidance, follow discussions and review changes to this project.",
+    "links": [
+      {
+        "label": "Help and feedback",
+        "description": "Browse existing reports or describe a reproducible problem.",
+        "icon": "book"
+      },
+      {
+        "label": "Join the discussion",
+        "description": "Read existing topics or share questions and ideas.",
+        "icon": "link"
+      },
+      {
+        "label": "Review changes",
+        "description": "Review open pull requests or prepare a contribution.",
+        "icon": "code"
+      }
+    ]
+  },
+  "footer": {
+    "copyright": "{copyright}"
+  }
+}

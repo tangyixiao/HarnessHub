@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "description": "为本地 Git 项目登记常用命令行工具，在内置终端启动会话，并在结束后查看 Git 变化和活动时间线。"
+  },
+  "pages": {
+    "home": {
+      "title": "在一个桌面窗口管理本机 AI 编程会话 · {project}"
+    },
+    "features": {
+      "title": "项目特点 · {project}",
+      "description": "为本地 Git 项目登记常用命令行工具，在内置终端启动会话，并在结束后查看 Git 变化和活动时间线。"
+    },
+    "download": {
+      "title": "开始使用 · {project}",
+      "description": "从 v0.1.0 发布页选择 Windows x64 或 Linux x64 安装包，对照 SHA256SUMS 校验。"
+    },
+    "community": {
+      "title": "参与项目 · {project}",
+      "description": "从这里找到使用说明、已有讨论和项目变更。"
+    }
+  },
+  "nav": {
+    "home": "首页",
+    "features": "项目特点",
+    "download": "开始使用",
+    "community": "参与项目"
+  },
+  "ui": {
+    "skip_link": "跳转到主要内容",
+    "navigation": "主导航",
+    "open_navigation": "打开导航",
+    "close_navigation": "关闭导航",
+    "language": "选择语言",
+    "theme": "选择主题",
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统",
+    "platforms": "支持的平台",
+    "github": "GitHub",
+    "view_image": "查看完整演示图",
+    "feature_more": "查看详情",
+    "download": "下载 Harness Hub",
+    "release_notes": "仓库源代码",
+    "documentation": "使用文档",
+    "source": "仓库源代码",
+    "illustration": "使用路径",
+    "license": "Apache-2.0（原创代码与文档）"
+  },
+  "hero": {
+    "title": [
+      "在一个桌面窗口管理本机 AI 编程会话"
+    ],
+    "description": [
+      "为本地 Git 项目登记常用命令行工具，在内置终端启动会话，并在结束后查看 Git 变化和活动时间线。"
+    ],
+    "primary_action": "下载 Harness Hub",
+    "secondary_action": "查看详情"
+  },
+  "preview": {
+    "caption": "使用路径",
+    "tabs": [
+      {
+        "label": "开始使用",
+        "icon": "book"
+      }
+    ],
+    "items": [
+      {
+        "title": "下载对应平台版本",
+        "description": "从 v0.1.0 发布页选择 Windows x64 或 Linux x64 安装包，对照 SHA256SUMS 校验。",
+        "icon": "book"
+      },
+      {
+        "title": "启动第一次会话",
+        "description": "先在本机安装并登录一个支持的 CLI，在 Projects 添加仓库，然后从终端启动。",
+        "icon": "link"
+      }
+    ]
+  },
+  "features": {
+    "title": "项目特点",
+    "groups": [
+      {
+        "title": "项目与终端",
+        "description": "按仓库根目录登记项目，在 Harnesses 页面检查已安装工具和各自支持的能力。",
+        "detail": "",
+        "icon": "layers"
+      },
+      {
+        "title": "会话回顾",
+        "description": "查看会话起止时的 Git 快照，导入已有用量数据，按工具回顾活动。",
+        "detail": "",
+        "icon": "book"
+      }
+    ]
+  },
+  "getting_started": {
+    "title": "开始使用 · {project}",
+    "steps": [
+      {
+        "title": "下载对应平台版本",
+        "description": "从 v0.1.0 发布页选择 Windows x64 或 Linux x64 安装包，对照 SHA256SUMS 校验。",
+        "icon": "book"
+      },
+      {
+        "title": "启动第一次会话",
+        "description": "先在本机安装并登录一个支持的 CLI，在 Projects 添加仓库，然后从终端启动。",
+        "icon": "link"
+      }
+    ]
+  },
+  "community": {
+    "title": "参与 · {project}",
+    "description": "从这里找到使用说明、已有讨论和项目变更。",
+    "links": [
+      {
+        "label": "帮助与反馈",
+        "description": "查看已报告的问题，或描述复现步骤。",
+        "icon": "book"
+      },
+      {
+        "label": "参与讨论",
+        "description": "查看已有话题，分享使用方法或改进建议。",
+        "icon": "link"
+      },
+      {
+        "label": "查看项目变更",
+        "description": "查看已有拉取请求或准备贡献。",
+        "icon": "code"
+      }
+    ]
+  },
+  "footer": {
+    "copyright": "{copyright}"
+  }
+}
