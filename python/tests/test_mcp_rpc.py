@@ -105,21 +105,35 @@ class FakeMcpRegistry:
 
 
 class MethodTableContractTest(unittest.TestCase):
-    """spec §3.1：追加不重排；GATEWAY_STATIC_* 不动。"""
+    """spec §3.1：追加不重排；GATEWAY_STATIC_* 保持 F22 冻结值不动。"""
+
+    # F23 末尾追加（docs/specs/2026-11-09-f23-model-assets-design.md §3.1）。
+    MODELS_METHODS = [
+        "models.status",
+        "models.info",
+        "models.cache.list",
+        "models.download.start",
+        "models.download.progress",
+        "models.download.cancel",
+    ]
 
     def test_capabilities_appended_in_order(self) -> None:
         self.assertEqual(
-            rpc_server.SUPPORTED_CAPABILITIES, CAPABILITIES_BEFORE_F22 + ["mcp.client"]
+            rpc_server.SUPPORTED_CAPABILITIES,
+            CAPABILITIES_BEFORE_F22 + ["mcp.client", "models.assets"],
         )
 
     def test_gateway_static_capabilities_untouched(self) -> None:
+        # F23 起与 SUPPORTED_CAPABILITIES 解耦（快照不再是别名），保持 11 项。
         self.assertEqual(GATEWAY_STATIC_CAPABILITIES, CAPABILITIES_BEFORE_F22 + ["mcp.client"])
 
     def test_gateway_static_methods_untouched(self) -> None:
         self.assertEqual(GATEWAY_STATIC_METHODS, GATEWAY_STATIC_METHODS_BEFORE_F22)
 
     def test_default_methods_appended_at_end(self) -> None:
-        self.assertEqual(list(DEFAULT_METHODS.keys()), METHODS_BEFORE_F22 + MCP_METHODS)
+        self.assertEqual(
+            list(DEFAULT_METHODS.keys()), METHODS_BEFORE_F22 + MCP_METHODS + self.MODELS_METHODS
+        )
 
     def test_mcp_protocol_versions_match_package_constant(self) -> None:
         self.assertEqual(list(mcp_pkg.PROTOCOL_VERSIONS), ["2025-06-18", "2025-03-26", "2024-11-05"])
