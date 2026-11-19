@@ -3445,3 +3445,309 @@ async function invokeGateway(command: string): Promise<IpcResult<GatewayStatus>>
 export function gatewayStatus(): Promise<IpcResult<GatewayStatus>> {
   return invokeGateway('gateway_status');
 }
+
+// --- F22 MCP Runtime：client 运行时状态与只读工具调用（spec §3.2-§3.6 / §3.8 / §5）---
+
+/** spec §3.2 冻结的四个 server 运行时状态；degraded = 连接后进程死亡 / 握手失败（保留 lastError）。 */
+export type McpServerRuntimeState = 'disconnected' | 'connecting' | 'ready' | 'degraded';
+
+/**
+ * 一台 MCP server 的运行时状态（与 Rust `McpServerState`，serde camelCase 同形）。
+ *
+ * - `serverName` / `serverVersion` 是 spec §3.2 `serverInfo { name, version }` 的扁平化
+ *   投影；归一化时同时接受嵌套 `serverInfo` 形状（契约两侧任何一侧先落地都能解析）。
+ * - `name` / `transport` 用原样字符串收敛 —— 未知值绝不猜成已知枚举（对齐
+ *   `normalizeMcpServer`「未知传输不能当 stdio 渲染」的红线）。
+ */
+export interface McpServerState {
+  /** Registry 键名（`^[A-Za-z0-9._-]+$`）；connect/disconnect 的行动定位最终靠 serverId。 */
+  name: string;
+  transport: string;
+  state: McpServerRuntimeState;
+  protocolVersion: string | null;
+  serverName: string;
+  serverVersion: string;
+  toolCount: number;
+  lastError: string | null;
+  /** 需要的环境变量**名**（值绝不进 Hub；子进程继承宿主环境）。 */
+  envKeys: string[];
+  /** 提示用户宿主环境需有这些变量（信息性，不阻塞 UI）。 */
+  envMissingKeys: string[];
+}
+
+/** `mcp_runtime_status` 的返回（与 Rust `McpRuntimeStatus`，serde camelCase 同形）。 */
+export interface McpRuntimeStatus {
+  /** Python sidecar 是否就绪；false 时前端禁用全部运行时操作。 */
+  available: boolean;
+  unavailableReason: string | null;
+  servers: McpServerState[];
+}
+
+/** 一个已发现的工具（与 Rust `McpToolDescriptor`，serde camelCase 同形；spec §3.5）。 */
+export interface McpToolDescriptor {
+  name: string;
+  description: string;
+  /** 只回顶层属性键名（≤32 个），不回显完整 schema（防超大 payload）。 */
+  inputSchemaKeys: string[];
+}
+
+/** 一次工具调用的结果（与 Rust `McpToolCallOutcome`，serde camelCase 同形；spec §3.6 / §3.8）。 */
+export interface McpToolCallOutcome {
+  /**
+   * Rust 策略（v1 只读规则）放行与否；false 时不执行、`reason` 说明原因。
+   * 这是 HTTP 200 语义的结构化返回，不是 IPC 错误。
+   */
+  allowed: boolean;
+  reason: string;
+  isError: boolean;
+  contentCount: number;
+  contentTypes: string[];
+  /** 只拼 `type == "text"` 的 blocks；无 text block 时为 null（spec §3.6）。 */
+  textPreview: string | null;
+  truncated: boolean;
+}
+
+function isMcpServerRuntimeState(value: unknown): value is McpServerRuntimeState {
+  return (
+    value === 'disconnected' || value === 'connecting' || value === 'ready' || value === 'degraded'
+  );
+}
+
+/**
+ * 认不出状态就整体 degraded：绝不能把说不清的 server 显示成 ready
+ * （对齐 normalizeSidecarStatus 的 fail-closed 纪律）。每次返回全新对象 / 数组。
+ */
+function degradedMcpServerState(): McpServerState {
+  return {
+    name: '',
+    transport: '',
+    state: 'degraded',
+    protocolVersion: null,
+    serverName: '',
+    serverVersion: '',
+    toolCount: 0,
+    lastError: null,
+    envKeys: [],
+    envMissingKeys: [],
+  };
+}
+
+/**
+ * serverInfo 字段收敛：优先扁平键（Rust DTO 投影），回退嵌套 `serverInfo`
+ * （spec §3.2 原始形状）；两处都拿不到合法字符串时空串。
+ */
+function asMcpServerInfoField(flat: unknown, info: unknown, key: 'name' | 'version'): string {
+  if (typeof flat === 'string' && flat.length > 0) {
+    return flat;
+  }
+  if (typeof info === 'object' && info !== null && !Array.isArray(info)) {
+    const value = (info as Record<string, unknown>)[key];
+    if (typeof value === 'string' && value.length > 0) {
+      return value;
+    }
+  }
+  return '';
+}
+
+/**
+ * 把 IPC 边界上的未知 JSON 收敛成安全的 `McpServerState`。
+ *
+ * `state` 认不出来收敛 `degraded`（绝不假装 ready）；其余字段逐项安全默认
+ * （null / [] / 0 / ''），绝不抛异常。
+ */
+export function normalizeMcpServerState(raw: unknown): McpServerState {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return degradedMcpServerState();
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    name: typeof source.name === 'string' ? source.name : '',
+    transport: typeof source.transport === 'string' ? source.transport : '',
+    state: isMcpServerRuntimeState(source.state) ? source.state : 'degraded',
+    protocolVersion: typeof source.protocolVersion === 'string' ? source.protocolVersion : null,
+    serverName: asMcpServerInfoField(source.serverName, source.serverInfo, 'name'),
+    serverVersion: asMcpServerInfoField(source.serverVersion, source.serverInfo, 'version'),
+    toolCount: asNumber(source.toolCount),
+    lastError: typeof source.lastError === 'string' ? source.lastError : null,
+    envKeys: asStringArray(source.envKeys),
+    envMissingKeys: asStringArray(source.envMissingKeys),
+  };
+}
+
+/**
+ * 把 `mcp_runtime_status` 的返回收敛成安全的 `McpRuntimeStatus`。
+ *
+ * `available` 只认 `true` —— 「不确定」绝不渲染成可用（运行时操作全部禁用）；
+ * servers 里非对象 / 拿不到 `name` 的条目丢弃（没有键名无法展示或定位）。
+ */
+export function normalizeMcpRuntimeStatus(raw: unknown): McpRuntimeStatus {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { available: false, unavailableReason: null, servers: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const servers: McpServerState[] = [];
+  if (Array.isArray(source.servers)) {
+    for (const item of source.servers) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+        continue;
+      }
+      const state = normalizeMcpServerState(item);
+      if (state.name.length === 0) {
+        continue;
+      }
+      servers.push(state);
+    }
+  }
+
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    servers,
+  };
+}
+
+/**
+ * 把 `mcp_runtime_tools_list` 的返回收敛成安全的 `McpToolDescriptor[]`。
+ *
+ * 拿不到 `name` 的条目丢弃 —— 工具名是调用的定位键；非数组整体收敛 []。
+ */
+export function normalizeMcpToolList(raw: unknown): McpToolDescriptor[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const tools: McpToolDescriptor[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      continue;
+    }
+    const source = item as Record<string, unknown>;
+    const name = typeof source.name === 'string' ? source.name.trim() : '';
+    if (name.length === 0) {
+      continue;
+    }
+    tools.push({
+      name,
+      description: typeof source.description === 'string' ? source.description : '',
+      inputSchemaKeys: asStringArray(source.inputSchemaKeys),
+    });
+  }
+  return tools;
+}
+
+/**
+ * 把 `mcp_runtime_tool_call` 的返回收敛成安全的 `McpToolCallOutcome`。
+ *
+ * `allowed` 只认 `true` —— 坏形状绝不假装放行；`isError` / `truncated` 同理只认
+ * `true`（不确定不是错误，也不虚报截断）。
+ */
+export function normalizeMcpToolCallOutcome(raw: unknown): McpToolCallOutcome {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {
+      allowed: false,
+      reason: '',
+      isError: false,
+      contentCount: 0,
+      contentTypes: [],
+      textPreview: null,
+      truncated: false,
+    };
+  }
+
+  const source = raw as Record<string, unknown>;
+  return {
+    allowed: source.allowed === true,
+    reason: typeof source.reason === 'string' ? source.reason : '',
+    isError: source.isError === true,
+    contentCount: asNumber(source.contentCount),
+    contentTypes: asStringArray(source.contentTypes),
+    textPreview: typeof source.textPreview === 'string' ? source.textPreview : null,
+    truncated: source.truncated === true,
+  };
+}
+
+/**
+ * 把 `mcp_runtime_connect` 的返回收敛成安全的 `McpServerState`。
+ *
+ * connect 成功返回该 server 的 mcp.status 单元素形状（toolCount=0，spec §3.3）；
+ * 任何失败收敛 `state: "degraded"` + `lastError`，**不抛 RPC 错**（F20 状态收敛
+ * 纪律），所以这里同样只做 fail-closed 归一化。
+ */
+export function normalizeMcpConnectOutcome(raw: unknown): McpServerState {
+  return normalizeMcpServerState(raw);
+}
+
+async function invokeMcpRuntimeStatus(command: string): Promise<IpcResult<McpRuntimeStatus>> {
+  const result = await invokeCommand<unknown>(command);
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalizeMcpRuntimeStatus(result.data) };
+}
+
+async function invokeMcpServerState(
+  command: string,
+  args: Record<string, unknown>,
+): Promise<IpcResult<McpServerState>> {
+  const result = await invokeCommand<unknown>(command, args);
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalizeMcpServerState(result.data) };
+}
+
+/**
+ * MCP Runtime 状态快照。**纯读**：含连接存活状况（state 由 Rust 侧收敛，不抛错）。
+ */
+export function mcpRuntimeStatus(): Promise<IpcResult<McpRuntimeStatus>> {
+  return invokeMcpRuntimeStatus('mcp_runtime_status');
+}
+
+/**
+ * 连接一台 server（Rust 从 Registry 读定义、拼 connect 参数、env 由子进程继承
+ * 宿主环境）。连接本身只读（不执行任何工具），但会**启动外部 MCP server 进程
+ * 或发起网络连接** —— UI 必须先明示这一行为，之后才可调用。
+ */
+export function mcpRuntimeConnect(serverId: string): Promise<IpcResult<McpServerState>> {
+  return invokeMcpServerState('mcp_runtime_connect', { serverId });
+}
+
+/** 断开一台 server。幂等：未连接的 server 也返回 disconnected（spec §3.4）。 */
+export function mcpRuntimeDisconnect(serverId: string): Promise<IpcResult<McpServerState>> {
+  return invokeMcpServerState('mcp_runtime_disconnect', { serverId });
+}
+
+/** 只读工具发现（tools/list 分页循尽后归一，上限 512 个）。**纯读**。 */
+export async function mcpRuntimeToolsList(
+  serverId: string,
+): Promise<IpcResult<McpToolDescriptor[]>> {
+  const result = await invokeCommand<unknown>('mcp_runtime_tools_list', { serverId });
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalizeMcpToolList(result.data) };
+}
+
+/**
+ * 只读工具调用。**显式动作，调用方必须 confirm**（文案含工具名，并明示将连接
+ * 外部 MCP server）；Rust 策略先审（v1 只允许 get/list/search/… 只读前缀），
+ * deny 时返回 `allowed: false` + `reason`，不转发 Python。
+ */
+export async function mcpRuntimeToolCall(
+  serverId: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<IpcResult<McpToolCallOutcome>> {
+  const result = await invokeCommand<unknown>('mcp_runtime_tool_call', {
+    serverId,
+    tool,
+    arguments: args,
+  });
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalizeMcpToolCallOutcome(result.data) };
+}

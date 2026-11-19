@@ -31,7 +31,7 @@
 - 同步 `CONTEXT.md`、`CONTEXT-MAP.md`、`lib.rs` 注释、`adapters/mod.rs`。
 - 全部完成门命令 + `git diff --check`；真实 GUI 验证 Harnesses 页四行 +
   Terminal 无 CodeBuddy 入口。
-- 一件事一提交（docs + feat）；不推送限制解除后按用户流程 PR + 合并。
+- 一件事一提交（docs + feat）；不推送限制解除后按约定流程 PR + 合并。
 
 ## 已知风险
 

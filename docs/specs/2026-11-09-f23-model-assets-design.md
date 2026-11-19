@@ -81,10 +81,11 @@ snapshots/ 子目录大小按文件求和（单仓上限 20000 文件，超出�
 参数 `{ "repoId", "revision", "files"?: [whitelist 文件名], "confirmedDiskBudget":
 bool }` → 立即返回 `{ "downloadId", "state": "preparing" }`，后台线程执行；预算门
 （§2.3）不满足时返回 `{ "needsConfirmation": true, "estimatedBytes": N }`。
+
 - 同一 `(repoId, revision)` 已有进行中下载 → `-32005`。
 - 进度查询 `models.download.progress` `{ "downloadId" }` →
   `{ "repoId", "revision", "state", "bytesDone", "bytesTotal" (int|null),
-  "fileDone", "fileCount", "currentFile", "lastError" (≤256) }`。
+"fileDone", "fileCount", "currentFile", "lastError" (≤256) }`。
 - `models.download.cancel` `{ "downloadId" }` → 幂等置 cancelled；进行中的文件
   写临时名 `.part`，取消/失败即删除，绝不留半截文件冒充完整资产。
 - SDK 在场时用 `huggingface_hub.snapshot_download`（`allow_patterns` =
@@ -133,12 +134,12 @@ confirm 文案含字节数与「下载走网络、目标为 HF 缓存」明示�
 
 ## 5. 切片 / PR / 合并顺序
 
-| 切片 | 分支 | 文件域 | 依赖 |
-| --- | --- | --- | --- |
+| 切片             | 分支                       | 文件域                                                                                   | 依赖                       |
+| ---------------- | -------------------------- | ---------------------------------------------------------------------------------------- | -------------------------- |
 | S1 Python models | `feat/f23/py-model-assets` | `python/harness_hub_runtime/models/**`、`rpc/server.py`、`python/tests/test_models_*.py` | F22 S1 已合入（server.py） |
-| S2 Rust DTO+命令 | `feat/f23/rust` | `src-tauri/src/sidecar/models.rs`、`commands.rs`、契约测试 | 契约按 §3 冻结 |
-| S3 前端 | `feat/f23/web` | `src/lib/ipc.ts`、`ModelAssetsCard.tsx`、fixture tests | S2 契约冻结 |
-| S4 打包定位 | 并入 S2 分支 | `sidecar/config.rs` + 单测 | 无 |
+| S2 Rust DTO+命令 | `feat/f23/rust`            | `src-tauri/src/sidecar/models.rs`、`commands.rs`、契约测试                               | 契约按 §3 冻结             |
+| S3 前端          | `feat/f23/web`             | `src/lib/ipc.ts`、`ModelAssetsCard.tsx`、fixture tests                                   | S2 契约冻结                |
+| S4 打包定位      | 并入 S2 分支               | `sidecar/config.rs` + 单测                                                               | 无                         |
 
 合并顺序：S1 → S2（含 S4）→ S3 → docs。
 

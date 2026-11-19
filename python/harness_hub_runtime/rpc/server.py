@@ -20,6 +20,8 @@ import sys
 from typing import Any, Callable, Iterable, TextIO
 
 from harness_hub_runtime import __version__
+from harness_hub_runtime.mcp.dto import PROTOCOL_VERSIONS as MCP_PROTOCOL_VERSIONS
+from harness_hub_runtime.mcp.registry import McpConnectionRegistry, McpNotReadyError
 
 Json = dict[str, Any]
 Handler = Callable[[Json], Any]
@@ -29,6 +31,8 @@ PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INTERNAL_ERROR = -32603
+# MCP 自定义码（spec §3.5 / §3.6）：server 非 ready 时 tools.* 用它，message 带 server 名。
+MCP_NOT_READY = -32002
 
 # F20 握手协议（docs/specs/2026-11-04-f20-sidecar-lifecycle-design.md §3.1）。
 # 协商只比较主版本（`.` 前第一段）；能力清单是 Rust 侧 requiredCapabilities 的超集校验依据。
@@ -36,6 +40,8 @@ PROTOCOL_VERSION = "1.0"
 
 # F21 冻结清单（docs/specs/2026-11-05-f21-provider-gateway-design.md §3.2），顺序有意义。
 # Rust 握手仍只要求 F20 三项；本清单是其超集，故 F20 握手天然继续通过。
+# F22 末尾追加 "mcp.client"（docs/specs/2026-11-09-f22-mcp-client-server-design.md §3.1，
+# 追加不重排既有项）。
 SUPPORTED_CAPABILITIES = [
     "ping",
     "runtime.info",
@@ -47,6 +53,7 @@ SUPPORTED_CAPABILITIES = [
     "tokenization.precedence",
     "tokenization.estimate",
     "tokenization.revision",
+    "mcp.client",
 ]
 
 # gateway.status/providers 直接读这两份静态常量，自包含、不依赖 S1/S2（spec §10）。
@@ -594,6 +601,92 @@ def tokenization_revision(params: Json) -> Json:
     }
 
 
+# ---- F22 MCP client（docs/specs/2026-11-09-f22-mcp-client-server-design.md §3.2–§3.6）----
+# 注册表懒初始化：测试可整体替换 rpc_server._MCP_REGISTRY 注入假实现。
+
+_MCP_REGISTRY: McpConnectionRegistry | None = None
+
+
+def _get_mcp_registry() -> McpConnectionRegistry:
+    global _MCP_REGISTRY
+    if _MCP_REGISTRY is None:
+        _MCP_REGISTRY = McpConnectionRegistry()
+    return _MCP_REGISTRY
+
+
+def _close_mcp_registry_best_effort() -> None:
+    """退出路径 best-effort 关闭全部连接，防孤儿外部 MCP server 子进程（spec §3.4）。"""
+    try:
+        _get_mcp_registry().close_all()
+    except BaseException:  # noqa: BLE001 - 收敛路径绝不抛
+        pass
+
+
+def mcp_status(params: Json) -> Json:
+    """§3.2 状态快照：servers 列表 + 冻结版本支持集（首选在前）。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "mcp.status 不接受原文内容")
+    return {
+        "servers": _get_mcp_registry().status(),
+        "protocolVersions": list(MCP_PROTOCOL_VERSIONS),
+    }
+
+
+def mcp_connect(params: Json) -> Json:
+    """§3.3 连接：参数非法 → -32602；其余失败收敛为 degraded 快照，不抛 RPC 错。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "mcp.connect 不接受原文内容")
+    try:
+        return _get_mcp_registry().connect(params)
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+
+
+def mcp_disconnect(params: Json) -> Json:
+    """§3.4 断开：未知名幂等返回 disconnected。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "mcp.disconnect 不接受原文内容")
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        raise RpcError(INVALID_REQUEST, "name 必须是非空字符串")
+    return _get_mcp_registry().disconnect(name)
+
+
+def mcp_tools_list(params: Json) -> list[Json]:
+    """§3.5 工具发现：分页游标循尽（上限 512），归一为 DTO 数组。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "mcp.tools.list 不接受原文内容")
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        raise RpcError(INVALID_REQUEST, "name 必须是非空字符串")
+    try:
+        return _get_mcp_registry().tools_list(name)
+    except McpNotReadyError as error:
+        raise RpcError(MCP_NOT_READY, str(error)) from error
+
+
+def mcp_tools_call(params: Json) -> Json:
+    """§3.6 工具调用：policyDecision 双保险（策略唯一判定点在 Rust，spec §2 红线 3）。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "mcp.tools.call 不接受原文内容")
+    if params.get("policyDecision") != "readonly":
+        raise RpcError(
+            INVALID_REQUEST, 'policyDecision 必须是 "readonly"（策略判定只在 Rust 侧）'
+        )
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        raise RpcError(INVALID_REQUEST, "name 必须是非空字符串")
+    tool = params.get("tool")
+    if not isinstance(tool, str) or not tool:
+        raise RpcError(INVALID_REQUEST, "tool 必须是非空字符串")
+    try:
+        return _get_mcp_registry().tools_call(name, tool, params.get("arguments"))
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+    except McpNotReadyError as error:
+        raise RpcError(MCP_NOT_READY, str(error)) from error
+
+
 DEFAULT_METHODS: MethodTable = {
     "ping": ping,
     "runtime.info": runtime_info,
@@ -607,6 +700,12 @@ DEFAULT_METHODS: MethodTable = {
     "tokenization.estimate": tokenization_estimate,
     "tokenization.precedence": tokenization_precedence,
     "tokenization.revision": tokenization_revision,
+    # F22 追加（spec §3.1：追加在末尾，不重排既有项）。
+    "mcp.status": mcp_status,
+    "mcp.connect": mcp_connect,
+    "mcp.disconnect": mcp_disconnect,
+    "mcp.tools.list": mcp_tools_list,
+    "mcp.tools.call": mcp_tools_call,
 }
 
 
@@ -618,27 +717,31 @@ def serve(
     """从 `stdin` 逐行读取请求，把响应写到 `stdout`。"""
     table = DEFAULT_METHODS if methods is None else methods
 
-    for line in stdin:
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        for line in stdin:
+            line = line.strip()
+            if not line:
+                continue
 
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as error:
-            response: Json | None = _error_response(None, PARSE_ERROR, f"JSON 解析失败：{error}")
-            stopping = False
-        else:
-            response = handle_request(request, table)
-            # shutdown（请求或通知）都当作停止信号：先回包（若有），再退出读取循环（§3.4）。
-            stopping = isinstance(request, dict) and request.get("method") == "shutdown"
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as error:
+                response: Json | None = _error_response(None, PARSE_ERROR, f"JSON 解析失败：{error}")
+                stopping = False
+            else:
+                response = handle_request(request, table)
+                # shutdown（请求或通知）都当作停止信号：先回包（若有），再退出读取循环（§3.4）。
+                stopping = isinstance(request, dict) and request.get("method") == "shutdown"
 
-        if response is not None:
-            stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            stdout.flush()
+            if response is not None:
+                stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+                stdout.flush()
 
-        if stopping:
-            break
+            if stopping:
+                break
+    finally:
+        # 退出路径（EOF/shutdown/异常）都 best-effort 关闭 MCP 连接，防孤儿子进程。
+        _close_mcp_registry_best_effort()
 
 
 def main() -> int:

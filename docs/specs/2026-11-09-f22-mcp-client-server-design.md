@@ -149,9 +149,7 @@ http 变体：`{ "name": "remote", "transport": "http", "url": "https://...",
 归一返回：
 
 ```json
-[
-  { "name": "get_forecast", "description": "...", "inputSchemaKeys": ["location"] }
-]
+[{ "name": "get_forecast", "description": "...", "inputSchemaKeys": ["location"] }]
 ```
 
 - `description` ≤ 200 chars；`inputSchemaKeys` 只取顶层属性键名（≤32 个），不回显
@@ -267,7 +265,7 @@ harness-hub.exe --mcp-serve
   `tools/call` / `shutdown`（进程退出）。未知方法 `-32601`。
 - `initialize` 协商：请求版本 ∈ 支持集原样回；否则回首选版本（客户端自行断）。
   返回 `capabilities: { "tools": {} }` + `serverInfo { name: "harness-hub",
-  version: CARGO_PKG_VERSION }`。
+version: CARGO_PKG_VERSION }`。
 - `tools/call` 返回 MCP 形状 `{ content: [{ type: "text", text: "<JSON 串>" }], isError }`；
   每个 text block 内是工具结果的 `JSON.stringify`。
 - 工具白名单（只读，全部复用现有领域查询，`&Connection`）：
@@ -303,12 +301,12 @@ migration 建表）下 initialize + tools/call 不炸。
 
 ## 6. 切片 / PR / 合并顺序
 
-| 切片 | 分支 | 文件域 | 依赖 |
-| --- | --- | --- | --- |
-| S1 Python client | `feat/f22/py-mcp-client` | `python/harness_hub_runtime/mcp/**`、`rpc/server.py`、`python/tests/test_mcp_*.py` | 无 |
-| S2 Rust bridge+policy | `feat/f22/rust-mcp-bridge` | `src-tauri/src/mcp/{policy,client_bridge}.rs`、`mod.rs`、`commands.rs`、`src-tauri/tests/mcp_bridge.rs` | 契约按 §3 冻结，代码不依赖 S1 合入 |
-| S3 Hub server | `feat/f22/hub-mcp-server` | `src-tauri/src/mcp/server/**`、`main.rs`、`lib.rs`（run_mcp_server 导出）、`src-tauri/tests/mcp_server_stdio.rs` | 无文件交集 |
-| S4 前端 | `feat/f22/web` | `src/lib/ipc.ts`、`src/features/settings/McpRuntimeCard.tsx`、`SettingsPage.tsx`、fixture tests | S2 契约冻结 |
+| 切片                  | 分支                       | 文件域                                                                                                           | 依赖                               |
+| --------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| S1 Python client      | `feat/f22/py-mcp-client`   | `python/harness_hub_runtime/mcp/**`、`rpc/server.py`、`python/tests/test_mcp_*.py`                               | 无                                 |
+| S2 Rust bridge+policy | `feat/f22/rust-mcp-bridge` | `src-tauri/src/mcp/{policy,client_bridge}.rs`、`mod.rs`、`commands.rs`、`src-tauri/tests/mcp_bridge.rs`          | 契约按 §3 冻结，代码不依赖 S1 合入 |
+| S3 Hub server         | `feat/f22/hub-mcp-server`  | `src-tauri/src/mcp/server/**`、`main.rs`、`lib.rs`（run_mcp_server 导出）、`src-tauri/tests/mcp_server_stdio.rs` | 无文件交集                         |
+| S4 前端               | `feat/f22/web`             | `src/lib/ipc.ts`、`src/features/settings/McpRuntimeCard.tsx`、`SettingsPage.tsx`、fixture tests                  | S2 契约冻结                        |
 
 合并顺序：S1 → S2 → S3 / S4（可并行）→ docs。S1/S2 都动「方法表」的两侧：
 S2 的 Rust 契约测试只锁**形状**，S1 合入后跑一次 `pnpm python:test` +

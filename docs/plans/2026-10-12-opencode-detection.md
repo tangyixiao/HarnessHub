@@ -33,7 +33,7 @@
   `fixtures/README.md`（顺带补齐 codebuddy/gemini 目录清单与过时末句）。
 - 全部完成门命令 + `git diff --check`；真实 GUI 验证 Harnesses 页五行 +
   Terminal 无 OpenCode 入口。
-- 一件事一提交（spec/plan + feat + docs）；不推送限制解除后按用户流程 PR。
+- 一件事一提交（spec/plan + feat + docs）；不推送限制解除后按约定流程 PR。
 
 ## 已知风险
 

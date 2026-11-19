@@ -1234,6 +1234,121 @@ pub fn gateway_status(
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// F22：MCP Client Runtime 命令（spec 2026-11-09-f22-mcp-client-server-design.md §3.8）
+//
+// 薄命令纪律（对齐 gateway_status）：策略判定与 sidecar 编排都在
+// `mcp::client_bridge`，任何失败（server 不存在 / sidecar 未就绪 / RPC 失败 /
+// 应答形状非法）都收敛成结构化 DTO，**永不返回 IPC Err**；env 值绝不进入 IPC
+// （§2.1）。连数据库状态锁中毒这类组合根级故障也收敛为 DTO 的
+// unavailable / error 形状——让设置页永远有东西可渲染。
+// ────────────────────────────────────────────────────────────────────────────
+
+/// MCP runtime 状态快照（registry ⊕ sidecar；spec §3.8）。失败降级，不返回 Err。
+#[tauri::command]
+pub fn mcp_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<crate::mcp::client_bridge::McpRuntimeStatus> {
+    let database = match state.db.lock() {
+        Ok(database) => database,
+        Err(_) => {
+            return Ok(crate::mcp::client_bridge::McpRuntimeStatus::unavailable(
+                "数据库状态锁已中毒，MCP runtime 状态不可用",
+            ))
+        }
+    };
+    Ok(crate::mcp::client_bridge::runtime_status(
+        &state.sidecar,
+        database.connection(),
+    ))
+}
+
+/// 连接一个已登记的 MCP server（§3.3）。env 值不经 IPC——sidecar 子进程继承宿主环境。
+#[tauri::command]
+pub fn mcp_runtime_connect(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<crate::mcp::client_bridge::McpConnectOutcome> {
+    let database = match state.db.lock() {
+        Ok(database) => database,
+        Err(_) => {
+            return Ok(crate::mcp::client_bridge::McpConnectOutcome::failure(
+                "数据库状态锁已中毒，MCP 连接不可用",
+            ))
+        }
+    };
+    Ok(crate::mcp::client_bridge::connect(
+        &state.sidecar,
+        database.connection(),
+        &server_id,
+    ))
+}
+
+/// 断开一个 MCP server（§3.4，幂等）。
+#[tauri::command]
+pub fn mcp_runtime_disconnect(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<crate::mcp::client_bridge::McpConnectOutcome> {
+    let database = match state.db.lock() {
+        Ok(database) => database,
+        Err(_) => {
+            return Ok(crate::mcp::client_bridge::McpConnectOutcome::failure(
+                "数据库状态锁已中毒，MCP 断开不可用",
+            ))
+        }
+    };
+    Ok(crate::mcp::client_bridge::disconnect(
+        &state.sidecar,
+        database.connection(),
+        &server_id,
+    ))
+}
+
+/// 已连接 server 的工具列表（§3.5）。失败收敛为空列表，不返回 Err。
+#[tauri::command]
+pub fn mcp_runtime_tools_list(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Vec<crate::mcp::client_bridge::McpToolDescriptorDto>> {
+    let database = match state.db.lock() {
+        Ok(database) => database,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(crate::mcp::client_bridge::tools_list(
+        &state.sidecar,
+        database.connection(),
+        &server_id,
+    ))
+}
+
+/// 调用工具（§3.6）。**策略唯一判定点在 Rust**（§2.3）：deny 直接返回结构化
+/// outcome，不转发 Python；放行才经 sidecar 执行。
+#[tauri::command]
+pub fn mcp_runtime_tool_call(
+    state: State<'_, AppState>,
+    server_id: String,
+    tool: String,
+    arguments: serde_json::Value,
+) -> Result<crate::mcp::client_bridge::McpToolCallOutcome> {
+    let database = match state.db.lock() {
+        Ok(database) => database,
+        Err(_) => {
+            return Ok(crate::mcp::client_bridge::McpToolCallOutcome::not_executed(
+                false,
+                "数据库状态锁已中毒，MCP tool call 不可用",
+            ))
+        }
+    };
+    Ok(crate::mcp::client_bridge::tool_call(
+        &state.sidecar,
+        database.connection(),
+        &server_id,
+        &tool,
+        &arguments,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1961,5 +2076,255 @@ mod tests {
             .as_object()
             .expect("tokenization 对象");
         assert!(!tokenization.contains_key("revision_binding"));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // F22：mcp_runtime_* 命令的 IPC 形状契约（spec §3.8 / §3.9，AGENTS.md 纪律）。
+    // `State<AppState>` 无法在纯单测里构造，因此与 gateway_status 同款：
+    // 锁定命令返回的 DTO 序列化形状 + 命令第一条分支走的那条真冷启动路径。
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn cold_sidecar_manager() -> std::sync::Arc<crate::sidecar::manager::SidecarManager> {
+        use crate::sidecar::config::SidecarConfig;
+        use std::path::PathBuf;
+
+        crate::sidecar::manager::SidecarManager::new(SidecarConfig {
+            python: PathBuf::from("no-such-python-interpreter-9f3b.exe"),
+            runtime_root: PathBuf::from("python"),
+            host_version: "0.5.0".to_string(),
+        })
+    }
+
+    /// `McpRuntimeStatus` + 嵌套 `McpServerRuntimeState`：available 形状逐键锁定
+    /// （顶层 3 键、server 运行态 10 键），且 unavailable / 冷启动降级形状完整。
+    #[test]
+    fn mcp_runtime_status_dtos_lock_camel_case_ipc_shape() {
+        use crate::mcp::client_bridge::{McpRuntimeStatus, McpServerRuntimeState};
+
+        let status = McpRuntimeStatus {
+            available: true,
+            unavailable_reason: None,
+            servers: vec![McpServerRuntimeState {
+                name: "weather".to_string(),
+                transport: "stdio".to_string(),
+                state: "ready".to_string(),
+                protocol_version: Some("2025-06-18".to_string()),
+                server_name: Some("weather-server".to_string()),
+                server_version: Some("1.2.0".to_string()),
+                tool_count: 3,
+                last_error: None,
+                env_keys: vec!["WEATHER_API_KEY".to_string()],
+                env_missing_keys: vec!["WEATHER_API_KEY".to_string()],
+            }],
+        };
+        let value = serde_json::to_value(&status).expect("序列化 McpRuntimeStatus");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "unavailableReason": null,
+                "servers": [{
+                    "name": "weather",
+                    "transport": "stdio",
+                    "state": "ready",
+                    "protocolVersion": "2025-06-18",
+                    "serverName": "weather-server",
+                    "serverVersion": "1.2.0",
+                    "toolCount": 3,
+                    "lastError": null,
+                    "envKeys": ["WEATHER_API_KEY"],
+                    "envMissingKeys": ["WEATHER_API_KEY"]
+                }]
+            })
+        );
+        let object = value.as_object().expect("McpRuntimeStatus 必须是对象");
+        assert_eq!(object.len(), 3, "顶层恰好 3 键");
+        for leaked in [
+            "unavailable_reason",
+            "env_keys",
+            "env_missing_keys",
+            "last_error",
+        ] {
+            assert!(
+                !object.contains_key(leaked),
+                "顶层泄漏 snake_case：{leaked}"
+            );
+        }
+        let server = value["servers"][0].as_object().expect("servers[0] 对象");
+        assert_eq!(server.len(), 10, "server 运行态恰好 10 键");
+
+        // 命令第一条分支的真路径：冷启动 manager（不 spawn）→ unavailable。
+        let manager = cold_sidecar_manager();
+        let sidecar = manager.status();
+        assert_eq!(
+            sidecar.state,
+            crate::sidecar::dto::SidecarState::Stopped,
+            "冷启动纪律：new() 不 spawn，状态必须是 Stopped"
+        );
+        let unavailable =
+            McpRuntimeStatus::unavailable("Python sidecar 未就绪，MCP runtime 不可用");
+        let value = serde_json::to_value(&unavailable).expect("序列化 unavailable");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": false,
+                "unavailableReason": "Python sidecar 未就绪，MCP runtime 不可用",
+                "servers": []
+            }),
+            "unavailable 形状必须完整可解析（前端有东西可渲染）"
+        );
+    }
+
+    /// `McpToolCallOutcome`：deny 形状（恰好 7 键、除 allowed/reason 全 null）与
+    /// 已执行形状逐键锁定——deny 结果不转发 Python（spec §2.3 / §3.8）。
+    #[test]
+    fn mcp_tool_call_outcome_locks_deny_and_executed_shapes() {
+        use crate::mcp::client_bridge::McpToolCallOutcome;
+
+        let denied = McpToolCallOutcome::not_executed(false, "not_readonly_by_default");
+        let value = serde_json::to_value(&denied).expect("序列化 deny");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "allowed": false,
+                "reason": "not_readonly_by_default",
+                "isError": null,
+                "contentCount": null,
+                "contentTypes": null,
+                "textPreview": null,
+                "truncated": null
+            })
+        );
+        let object = value.as_object().expect("McpToolCallOutcome 必须是对象");
+        assert_eq!(object.len(), 7, "恰好 7 键");
+        for leaked in ["is_error", "content_count", "content_types", "text_preview"] {
+            assert!(!object.contains_key(leaked), "泄漏 snake_case：{leaked}");
+        }
+
+        // 放行但未执行（sidecar 未就绪 / RPC 失败）：allowed=true + reason，结果全 None。
+        let blocked =
+            McpToolCallOutcome::not_executed(true, "Python sidecar 未就绪，MCP runtime 不可用");
+        assert_eq!(
+            serde_json::to_value(&blocked).expect("序列化 blocked"),
+            serde_json::json!({
+                "allowed": true,
+                "reason": "Python sidecar 未就绪，MCP runtime 不可用",
+                "isError": null,
+                "contentCount": null,
+                "contentTypes": null,
+                "textPreview": null,
+                "truncated": null
+            })
+        );
+
+        // 已执行：全部 Some（§3.6 归一形状）。
+        let executed = McpToolCallOutcome {
+            allowed: true,
+            reason: None,
+            is_error: Some(false),
+            content_count: Some(1),
+            content_types: Some(vec!["text".to_string()]),
+            text_preview: Some("上海晴".to_string()),
+            truncated: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_value(&executed).expect("序列化 executed"),
+            serde_json::json!({
+                "allowed": true,
+                "reason": null,
+                "isError": false,
+                "contentCount": 1,
+                "contentTypes": ["text"],
+                "textPreview": "上海晴",
+                "truncated": true
+            })
+        );
+    }
+
+    /// `McpConnectOutcome`：成功（嵌套 server 快照）/ 失败 / 断开幂等成功三形状。
+    #[test]
+    fn mcp_connect_outcome_locks_success_failure_and_idempotent_shapes() {
+        use crate::mcp::client_bridge::{McpConnectOutcome, McpServerRuntimeState};
+
+        let connected = McpConnectOutcome {
+            ok: true,
+            error: None,
+            server: Some(McpServerRuntimeState {
+                name: "weather".to_string(),
+                transport: "stdio".to_string(),
+                state: "ready".to_string(),
+                protocol_version: Some("2025-06-18".to_string()),
+                server_name: Some("weather-server".to_string()),
+                server_version: Some("1.2.0".to_string()),
+                tool_count: 0,
+                last_error: None,
+                env_keys: vec!["WEATHER_API_KEY".to_string()],
+                env_missing_keys: vec!["WEATHER_API_KEY".to_string()],
+            }),
+        };
+        let value = serde_json::to_value(&connected).expect("序列化 connect");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "ok": true,
+                "error": null,
+                "server": {
+                    "name": "weather",
+                    "transport": "stdio",
+                    "state": "ready",
+                    "protocolVersion": "2025-06-18",
+                    "serverName": "weather-server",
+                    "serverVersion": "1.2.0",
+                    "toolCount": 0,
+                    "lastError": null,
+                    "envKeys": ["WEATHER_API_KEY"],
+                    "envMissingKeys": ["WEATHER_API_KEY"]
+                }
+            })
+        );
+        let object = value.as_object().expect("McpConnectOutcome 必须是对象");
+        assert_eq!(object.len(), 3, "恰好 3 键");
+
+        assert_eq!(
+            serde_json::to_value(McpConnectOutcome::failure("MCP server 不存在：x"))
+                .expect("序列化 failure"),
+            serde_json::json!({
+                "ok": false,
+                "error": "MCP server 不存在：x",
+                "server": null
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(McpConnectOutcome::disconnected()).expect("序列化 disconnected"),
+            serde_json::json!({ "ok": true, "error": null, "server": null }),
+            "disconnect 幂等成功形状（spec §3.4）"
+        );
+    }
+
+    /// `McpToolDescriptorDto`：恰好 3 键；`inputSchemaKeys` 是 camelCase 键名本身。
+    #[test]
+    fn mcp_tool_descriptor_dto_locks_shape() {
+        use crate::mcp::client_bridge::McpToolDescriptorDto;
+
+        let descriptor = McpToolDescriptorDto {
+            name: "get_forecast".to_string(),
+            description: "查询天气预报".to_string(),
+            input_schema_keys: vec!["location".to_string()],
+        };
+        let value = serde_json::to_value(&descriptor).expect("序列化");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "get_forecast",
+                "description": "查询天气预报",
+                "inputSchemaKeys": ["location"]
+            })
+        );
+        let object = value.as_object().expect("McpToolDescriptorDto 必须是对象");
+        assert_eq!(object.len(), 3, "恰好 3 键");
+        assert!(
+            !object.contains_key("input_schema_keys"),
+            "泄漏 snake_case：input_schema_keys"
+        );
     }
 }

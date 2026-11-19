@@ -3734,3 +3734,457 @@ describe('gatewayStatus IPC wrapper（F21 §7.1）', () => {
     await expect(gatewayStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });
+
+// --- F22 MCP Runtime：跨 IPC decoder 的 fixture 契约测试（spec §3.2-§3.6 / §3.8 / §5）---
+import {
+  mcpRuntimeConnect,
+  mcpRuntimeDisconnect,
+  mcpRuntimeStatus,
+  mcpRuntimeToolCall,
+  mcpRuntimeToolsList,
+  normalizeMcpConnectOutcome,
+  normalizeMcpRuntimeStatus,
+  normalizeMcpServerState,
+  normalizeMcpToolCallOutcome,
+  normalizeMcpToolList,
+  type McpRuntimeStatus,
+  type McpServerState,
+  type McpToolCallOutcome,
+  type McpToolDescriptor,
+} from '@/lib/ipc';
+
+/**
+ * `mcp_runtime_status` 的单 server 条目：与 Rust `McpServerState`
+ * （serde camelCase）同形。`serverName` / `serverVersion` 是 Rust 侧对
+ * spec §3.2 `serverInfo { name, version }` 的扁平化投影；这里同时接受
+ * 嵌套 `serverInfo` 形状（两侧契约都收敛成同一 TS 形状，见 fallback 测试）。
+ */
+const MCP_SERVER_STATE_PAYLOAD = {
+  name: 'weather',
+  transport: 'stdio',
+  state: 'ready',
+  protocolVersion: '2025-06-18',
+  serverName: 'weather-server',
+  serverVersion: '1.2.0',
+  toolCount: 3,
+  lastError: null,
+  envKeys: ['WEATHER_API_KEY'],
+  envMissingKeys: ['WEATHER_API_KEY'],
+};
+
+const MCP_SERVER_STATE_EXPECTED: McpServerState = {
+  name: 'weather',
+  transport: 'stdio',
+  state: 'ready',
+  protocolVersion: '2025-06-18',
+  serverName: 'weather-server',
+  serverVersion: '1.2.0',
+  toolCount: 3,
+  lastError: null,
+  envKeys: ['WEATHER_API_KEY'],
+  envMissingKeys: ['WEATHER_API_KEY'],
+};
+
+const MCP_RUNTIME_STATUS_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  servers: [
+    MCP_SERVER_STATE_PAYLOAD,
+    {
+      name: 'remote-fetch',
+      transport: 'http',
+      state: 'degraded',
+      protocolVersion: null,
+      serverName: 'fetch-server',
+      serverVersion: '0.9.0',
+      toolCount: 0,
+      lastError: '握手失败：版本不在支持集',
+      envKeys: [],
+      envMissingKeys: [],
+    },
+  ],
+};
+
+const MCP_RUNTIME_STATUS_EXPECTED: McpRuntimeStatus = {
+  available: true,
+  unavailableReason: null,
+  servers: [
+    MCP_SERVER_STATE_EXPECTED,
+    {
+      name: 'remote-fetch',
+      transport: 'http',
+      state: 'degraded',
+      protocolVersion: null,
+      serverName: 'fetch-server',
+      serverVersion: '0.9.0',
+      toolCount: 0,
+      lastError: '握手失败：版本不在支持集',
+      envKeys: [],
+      envMissingKeys: [],
+    },
+  ],
+};
+
+/** sidecar 未就绪时 `mcp_runtime_status` 的形状：available=false + 原因。 */
+const MCP_RUNTIME_UNAVAILABLE_PAYLOAD = {
+  available: false,
+  unavailableReason: 'Python sidecar 未就绪',
+  servers: [],
+};
+
+const MCP_TOOLS_LIST_PAYLOAD = [
+  { name: 'get_forecast', description: '获取天气预报', inputSchemaKeys: ['location', 'days'] },
+  { name: 'list_cities', description: '', inputSchemaKeys: [] },
+];
+
+const MCP_TOOLS_LIST_EXPECTED: McpToolDescriptor[] = [
+  { name: 'get_forecast', description: '获取天气预报', inputSchemaKeys: ['location', 'days'] },
+  { name: 'list_cities', description: '', inputSchemaKeys: [] },
+];
+
+const MCP_TOOL_CALL_OUTCOME_PAYLOAD = {
+  allowed: true,
+  reason: 'readonly_by_default',
+  isError: false,
+  contentCount: 1,
+  contentTypes: ['text'],
+  textPreview: '上海晴，26°C',
+  truncated: true,
+};
+
+const MCP_TOOL_CALL_OUTCOME_EXPECTED: McpToolCallOutcome = {
+  allowed: true,
+  reason: 'readonly_by_default',
+  isError: false,
+  contentCount: 1,
+  contentTypes: ['text'],
+  textPreview: '上海晴，26°C',
+  truncated: true,
+};
+
+describe('normalizeMcpServerState（F22 §3.2 DTO fixture）', () => {
+  it('把 Rust server 状态 DTO 逐字段归一化成 McpServerState', () => {
+    expect(normalizeMcpServerState(MCP_SERVER_STATE_PAYLOAD)).toEqual(MCP_SERVER_STATE_EXPECTED);
+  });
+
+  it('接受 spec §3.2 原始形状：serverInfo 嵌套时收敛为 serverName / serverVersion', () => {
+    const raw = {
+      name: 'weather',
+      transport: 'stdio',
+      state: 'ready',
+      protocolVersion: '2025-06-18',
+      serverInfo: { name: 'weather-server', version: '1.2.0' },
+      toolCount: 3,
+      lastError: null,
+      envKeys: ['WEATHER_API_KEY'],
+      envMissingKeys: ['WEATHER_API_KEY'],
+    };
+    expect(normalizeMcpServerState(raw)).toEqual(MCP_SERVER_STATE_EXPECTED);
+  });
+
+  it('坏形状（缺键 / 错类型 / null / 数组）fail-closed：state 收敛 degraded、字符串空、数组空', () => {
+    for (const raw of [null, [], 'str', 42, true, undefined, {}, { name: 42 }]) {
+      const result = normalizeMcpServerState(raw);
+      expect(result.state).toBe('degraded');
+      expect(result.name).toBe('');
+      expect(result.transport).toBe('');
+      expect(result.protocolVersion).toBeNull();
+      expect(result.serverName).toBe('');
+      expect(result.serverVersion).toBe('');
+      expect(result.toolCount).toBe(0);
+      expect(result.lastError).toBeNull();
+      expect(result.envKeys).toEqual([]);
+      expect(result.envMissingKeys).toEqual([]);
+    }
+  });
+
+  it('未知 state / transport 逐字段收敛：state → degraded，transport 原样保字符串不猜枚举', () => {
+    const result = normalizeMcpServerState({
+      ...MCP_SERVER_STATE_PAYLOAD,
+      state: 'weird',
+      transport: 'websocket',
+      protocolVersion: 7,
+      lastError: 9,
+      toolCount: 'many',
+      envKeys: [1, 'A', {}, null],
+      envMissingKeys: ['B', 2],
+    });
+    expect(result.state).toBe('degraded');
+    expect(result.transport).toBe('websocket');
+    expect(result.protocolVersion).toBeNull();
+    expect(result.lastError).toBeNull();
+    expect(result.toolCount).toBe(0);
+    expect(result.envKeys).toEqual(['A']);
+    expect(result.envMissingKeys).toEqual(['B']);
+  });
+});
+
+describe('normalizeMcpRuntimeStatus（F22 §3.8 DTO fixture）', () => {
+  it('把 Rust mcp_runtime_status DTO 逐字段归一化成 McpRuntimeStatus', () => {
+    expect(normalizeMcpRuntimeStatus(MCP_RUNTIME_STATUS_PAYLOAD)).toEqual(
+      MCP_RUNTIME_STATUS_EXPECTED,
+    );
+  });
+
+  it('sidecar 未就绪（available=false）时保留 unavailableReason 与空列表', () => {
+    expect(normalizeMcpRuntimeStatus(MCP_RUNTIME_UNAVAILABLE_PAYLOAD)).toEqual({
+      available: false,
+      unavailableReason: 'Python sidecar 未就绪',
+      servers: [],
+    });
+  });
+
+  it('坏形状 fail-closed：available=false、servers=[]，绝不假装可用', () => {
+    for (const raw of [null, [], 'str', 42, undefined, {}]) {
+      expect(normalizeMcpRuntimeStatus(raw)).toEqual({
+        available: false,
+        unavailableReason: null,
+        servers: [],
+      });
+    }
+  });
+
+  it('servers 只保留有 name 的对象条目；非对象 / 缺名条目丢弃', () => {
+    const result = normalizeMcpRuntimeStatus({
+      available: true,
+      unavailableReason: null,
+      servers: [null, 'bad', 42, { transport: 'stdio', state: 'ready' }, MCP_SERVER_STATE_PAYLOAD],
+    });
+    expect(result.servers).toEqual([MCP_SERVER_STATE_EXPECTED]);
+  });
+});
+
+describe('normalizeMcpToolList（F22 §3.5 DTO fixture）', () => {
+  it('把 Rust tools list DTO 逐字段归一化成 McpToolDescriptor[]', () => {
+    expect(normalizeMcpToolList(MCP_TOOLS_LIST_PAYLOAD)).toEqual(MCP_TOOLS_LIST_EXPECTED);
+  });
+
+  it('坏形状（非数组 / 条目缺名）fail-closed：空列表、无名条目丢弃', () => {
+    expect(normalizeMcpToolList(null)).toEqual([]);
+    expect(normalizeMcpToolList('str')).toEqual([]);
+    expect(normalizeMcpToolList(42)).toEqual([]);
+    expect(normalizeMcpToolList([null, 'bad', 42, { description: 'no name' }])).toEqual([]);
+    expect(
+      normalizeMcpToolList([
+        { name: 'get_forecast', description: 42, inputSchemaKeys: ['a', 1, null, 'b'] },
+      ]),
+    ).toEqual([{ name: 'get_forecast', description: '', inputSchemaKeys: ['a', 'b'] }]);
+  });
+});
+
+describe('normalizeMcpToolCallOutcome（F22 §3.6 DTO fixture）', () => {
+  it('把 Rust tool call 结果 DTO 逐字段归一化成 McpToolCallOutcome', () => {
+    expect(normalizeMcpToolCallOutcome(MCP_TOOL_CALL_OUTCOME_PAYLOAD)).toEqual(
+      MCP_TOOL_CALL_OUTCOME_EXPECTED,
+    );
+  });
+
+  it('deny 形状（allowed=false + reason）原样保留执行字段的安全默认', () => {
+    const deny = normalizeMcpToolCallOutcome({
+      allowed: false,
+      reason: 'not_readonly_by_default',
+    });
+    expect(deny).toEqual({
+      allowed: false,
+      reason: 'not_readonly_by_default',
+      isError: false,
+      contentCount: 0,
+      contentTypes: [],
+      textPreview: null,
+      truncated: false,
+    });
+  });
+
+  it('坏形状 fail-closed：allowed=false 绝不假装放行，其余逐字段安全默认', () => {
+    for (const raw of [null, [], 'str', 42, undefined, {}]) {
+      expect(normalizeMcpToolCallOutcome(raw)).toEqual({
+        allowed: false,
+        reason: '',
+        isError: false,
+        contentCount: 0,
+        contentTypes: [],
+        textPreview: null,
+        truncated: false,
+      });
+    }
+  });
+
+  it('isError 只认 true；textPreview 空字符串按原样保留', () => {
+    const result = normalizeMcpToolCallOutcome({
+      ...MCP_TOOL_CALL_OUTCOME_PAYLOAD,
+      isError: 'yes',
+      contentCount: 'two',
+      contentTypes: ['text', 1, null],
+      textPreview: '',
+      truncated: 'yes',
+    });
+    expect(result.isError).toBe(false);
+    expect(result.contentCount).toBe(0);
+    expect(result.contentTypes).toEqual(['text']);
+    expect(result.textPreview).toBe('');
+    expect(result.truncated).toBe(false);
+  });
+});
+
+describe('normalizeMcpConnectOutcome（F22 §3.3 DTO fixture）', () => {
+  it('connect 返回单 server 状态形状，归一化成 McpServerState', () => {
+    expect(normalizeMcpConnectOutcome(MCP_SERVER_STATE_PAYLOAD)).toEqual(MCP_SERVER_STATE_EXPECTED);
+  });
+
+  it('连接失败（state=degraded + lastError）收敛为 degraded 状态而非抛错', () => {
+    expect(
+      normalizeMcpConnectOutcome({ name: 'weather', state: 'degraded', lastError: '握手失败' }),
+    ).toEqual({
+      name: 'weather',
+      transport: '',
+      state: 'degraded',
+      protocolVersion: null,
+      serverName: '',
+      serverVersion: '',
+      toolCount: 0,
+      lastError: '握手失败',
+      envKeys: [],
+      envMissingKeys: [],
+    });
+  });
+
+  it('坏形状 fail-closed：degraded 安全默认，绝不抛异常', () => {
+    for (const raw of [null, [], 'str', 42, undefined]) {
+      const result = normalizeMcpConnectOutcome(raw);
+      expect(result.state).toBe('degraded');
+      expect(result.name).toBe('');
+    }
+  });
+});
+
+describe('MCP runtime IPC wrappers（F22 §3.8）', () => {
+  it('mcpRuntimeStatus 使用 mcp_runtime_status 命令名，返回归一化后的 IpcResult<McpRuntimeStatus>', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_RUNTIME_STATUS_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await mcpRuntimeStatus();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_runtime_status');
+    expect(result).toEqual({ ok: true, data: MCP_RUNTIME_STATUS_EXPECTED });
+  });
+
+  it('mcpRuntimeConnect 使用 mcp_runtime_connect 命令名并带 serverId', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_SERVER_STATE_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await mcpRuntimeConnect('srv-1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_runtime_connect');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ serverId: 'srv-1' });
+    expect(result).toEqual({ ok: true, data: MCP_SERVER_STATE_EXPECTED });
+  });
+
+  it('mcpRuntimeDisconnect 使用 mcp_runtime_disconnect 命令名并带 serverId，幂等返回收敛为状态', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => ({
+      state: 'disconnected',
+      name: 'weather',
+    }));
+    stubTauri(invokeSpy);
+
+    const result = await mcpRuntimeDisconnect('srv-1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_runtime_disconnect');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ serverId: 'srv-1' });
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        name: 'weather',
+        transport: '',
+        state: 'disconnected',
+        protocolVersion: null,
+        serverName: '',
+        serverVersion: '',
+        toolCount: 0,
+        lastError: null,
+        envKeys: [],
+        envMissingKeys: [],
+      },
+    });
+  });
+
+  it('mcpRuntimeToolsList 使用 mcp_runtime_tools_list 命令名并带 serverId', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_TOOLS_LIST_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await mcpRuntimeToolsList('srv-1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_runtime_tools_list');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ serverId: 'srv-1' });
+    expect(result).toEqual({ ok: true, data: MCP_TOOLS_LIST_EXPECTED });
+  });
+
+  it('mcpRuntimeToolCall 使用 mcp_runtime_tool_call 命令名并带 serverId / tool / arguments', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MCP_TOOL_CALL_OUTCOME_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await mcpRuntimeToolCall('srv-1', 'get_forecast', { location: 'Shanghai' });
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('mcp_runtime_tool_call');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      serverId: 'srv-1',
+      tool: 'get_forecast',
+      arguments: { location: 'Shanghai' },
+    });
+    expect(result).toEqual({ ok: true, data: MCP_TOOL_CALL_OUTCOME_EXPECTED });
+  });
+
+  it('命令返回坏形状时 fail-closed 成安全默认，不假装可用 / 放行', async () => {
+    stubTauri(async (command: string) => {
+      if (command === 'mcp_runtime_status') return {};
+      if (command === 'mcp_runtime_tools_list') return 'bad';
+      return {};
+    });
+
+    await expect(mcpRuntimeStatus()).resolves.toEqual({
+      ok: true,
+      data: { available: false, unavailableReason: null, servers: [] },
+    });
+    await expect(mcpRuntimeToolsList('srv-1')).resolves.toEqual({ ok: true, data: [] });
+    await expect(mcpRuntimeConnect('srv-1')).resolves.toEqual({
+      ok: true,
+      data: {
+        name: '',
+        transport: '',
+        state: 'degraded',
+        protocolVersion: null,
+        serverName: '',
+        serverVersion: '',
+        toolCount: 0,
+        lastError: null,
+        envKeys: [],
+        envMissingKeys: [],
+      },
+    });
+  });
+
+  it('后端错误原样传出为 ok:false，不透传坏数据', async () => {
+    stubTauri(async () => {
+      throw new Error('MCP IPC 炸了');
+    });
+    await expect(mcpRuntimeStatus()).resolves.toEqual({ ok: false, error: 'MCP IPC 炸了' });
+    await expect(mcpRuntimeToolCall('srv-1', 'get_forecast', {})).resolves.toEqual({
+      ok: false,
+      error: 'MCP IPC 炸了',
+    });
+  });
+
+  it('浏览器模式（无 Tauri runtime）返回 ok:false 且不发调用', async () => {
+    await expect(mcpRuntimeStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(mcpRuntimeConnect('srv-1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(mcpRuntimeDisconnect('srv-1')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(mcpRuntimeToolsList('srv-1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(mcpRuntimeToolCall('srv-1', 'get_forecast', {})).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+  });
+});

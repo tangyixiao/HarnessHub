@@ -9,6 +9,8 @@
 //! - 同步只覆盖 Hub 管理的键（command/args/url/type），条目内用户手写的
 //!   `env` / `headers` 等一律保留（绝不把 `<redacted>` 写进真配置）。
 
+pub mod client_bridge;
+pub mod policy;
 pub mod registry;
 /// F22 S3：Hub 自身作为 MCP Server（headless stdio，只读工具白名单）。
 pub mod server;
