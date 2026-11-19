@@ -115,7 +115,8 @@ class StartOutcomeTest(ManagerTestCase):
         )
         self.assertEqual(outcome["state"], "preparing")
         self.assertIsInstance(outcome["downloadId"], str)
-        self.wait_for(self.manager, outcome["downloadId"], "downloading")
+        # fake executor 可能快过轮询：终态 completed 即证明线程跑完。
+        self.wait_for(self.manager, outcome["downloadId"], "completed")
 
     def test_progress_shape_matches_contract(self) -> None:
         self.executor.script = []

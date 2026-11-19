@@ -62,7 +62,19 @@ GATEWAY_STATIC_METHODS_FROZEN = [
 ]
 # F22 追加的 5 个方法（spec §3.1：追加在末尾）。
 MCP_METHODS = ["mcp.status", "mcp.connect", "mcp.disconnect", "mcp.tools.list", "mcp.tools.call"]
-METHODS = [*GATEWAY_STATIC_METHODS_FROZEN, *MCP_METHODS]
+# F23 追加的 6 个方法（docs/specs/2026-11-09-f23-model-assets-design.md §3.1：追加在末尾）。
+MODELS_METHODS = [
+    "models.status",
+    "models.info",
+    "models.cache.list",
+    "models.download.start",
+    "models.download.progress",
+    "models.download.cancel",
+]
+METHODS = [*GATEWAY_STATIC_METHODS_FROZEN, *MCP_METHODS, *MODELS_METHODS]
+# F23：SUPPORTED_CAPABILITIES 末尾追加 "models.assets"；GATEWAY_STATIC_CAPABILITIES
+# 保持 F22 冻结值（gateway 块自包含，spec §3.1「GATEWAY_STATIC_* 不动」）。
+SUPPORTED_CAPABILITIES_F23 = [*CAPABILITIES, "models.assets"]
 RUNTIME_INFO_KEYS = {
     "name",
     "version",
@@ -218,7 +230,7 @@ class F20HandshakeTests(unittest.TestCase):
 
     def test_protocol_constants_are_locked(self) -> None:
         self.assertEqual(rpc_server.PROTOCOL_VERSION, "1.0")
-        self.assertEqual(rpc_server.SUPPORTED_CAPABILITIES, CAPABILITIES)
+        self.assertEqual(rpc_server.SUPPORTED_CAPABILITIES, SUPPORTED_CAPABILITIES_F23)
 
     def test_initialize_and_shutdown_are_registered_methods(self) -> None:
         self.assertIn("initialize", DEFAULT_METHODS)
@@ -233,7 +245,7 @@ class F20HandshakeTests(unittest.TestCase):
         self.assertEqual(result["transport"], "stdio-jsonrpc")
         self.assertEqual(result["protocolVersion"], "1.0")
         self.assertEqual(result["providers"], [])
-        self.assertEqual(result["capabilities"], CAPABILITIES)
+        self.assertEqual(result["capabilities"], SUPPORTED_CAPABILITIES_F23)
         self.assertEqual(result["methods"], METHODS)
 
     def test_initialize_returns_four_contract_keys(self) -> None:
@@ -245,7 +257,7 @@ class F20HandshakeTests(unittest.TestCase):
         )
 
         self.assertEqual(response["result"]["protocolVersion"], "1.0")
-        self.assertEqual(response["result"]["capabilities"], CAPABILITIES)
+        self.assertEqual(response["result"]["capabilities"], SUPPORTED_CAPABILITIES_F23)
         self.assertEqual(response["result"]["methods"], METHODS)
 
     def test_initialize_runtime_identical_to_runtime_info(self) -> None:
@@ -362,7 +374,7 @@ class F21CapabilityTests(unittest.TestCase):
         self.assertEqual(rpc_server.PROTOCOL_VERSION, "1.0")
 
     def test_frozen_static_constants_match_contract(self) -> None:
-        self.assertEqual(rpc_server.SUPPORTED_CAPABILITIES, CAPABILITIES)
+        self.assertEqual(rpc_server.SUPPORTED_CAPABILITIES, SUPPORTED_CAPABILITIES_F23)
         self.assertEqual(rpc_server.GATEWAY_STATIC_CAPABILITIES, CAPABILITIES)
         # F22：GATEWAY_STATIC_METHODS 保持 F21 的 12 项不动（spec §3.1）。
         self.assertEqual(rpc_server.GATEWAY_STATIC_METHODS, GATEWAY_STATIC_METHODS_FROZEN)
@@ -373,7 +385,7 @@ class F21CapabilityTests(unittest.TestCase):
 
         self.assertEqual(set(result), RUNTIME_INFO_KEYS)
         self.assertEqual(result["providers"], [])
-        self.assertEqual(result["capabilities"], CAPABILITIES)
+        self.assertEqual(result["capabilities"], SUPPORTED_CAPABILITIES_F23)
         self.assertEqual(result["methods"], METHODS)
 
     def test_initialize_returns_four_keys_with_new_lists(self) -> None:
@@ -384,7 +396,7 @@ class F21CapabilityTests(unittest.TestCase):
             set(response["result"]), {"protocolVersion", "runtime", "capabilities", "methods"}
         )
         self.assertEqual(response["result"]["protocolVersion"], "1.0")
-        self.assertEqual(response["result"]["capabilities"], CAPABILITIES)
+        self.assertEqual(response["result"]["capabilities"], SUPPORTED_CAPABILITIES_F23)
         self.assertEqual(response["result"]["methods"], METHODS)
 
     def test_initialize_runtime_identical_to_runtime_info(self) -> None:
@@ -398,7 +410,7 @@ class F21CapabilityTests(unittest.TestCase):
         response = self.initialize(requiredCapabilities=["ping", "runtime.info", "shutdown"])
 
         self.assertNotIn("error", response)
-        self.assertEqual(response["result"]["capabilities"], CAPABILITIES)
+        self.assertEqual(response["result"]["capabilities"], SUPPORTED_CAPABILITIES_F23)
 
     def test_f20_handshake_via_handle_request_directly(self) -> None:
         request = {
@@ -415,7 +427,7 @@ class F21CapabilityTests(unittest.TestCase):
 
         assert response is not None
         self.assertNotIn("error", response)
-        self.assertEqual(response["result"]["runtime"]["capabilities"], CAPABILITIES)
+        self.assertEqual(response["result"]["runtime"]["capabilities"], SUPPORTED_CAPABILITIES_F23)
 
     def test_f20_handshake_via_serve_succeeds(self) -> None:
         init_params = {
@@ -433,7 +445,7 @@ class F21CapabilityTests(unittest.TestCase):
 
         self.assertEqual(len(responses), 1)
         self.assertNotIn("error", responses[0])
-        self.assertEqual(responses[0]["result"]["capabilities"], CAPABILITIES)
+        self.assertEqual(responses[0]["result"]["capabilities"], SUPPORTED_CAPABILITIES_F23)
 
     def test_unknown_required_capability_is_invalid_request(self) -> None:
         response = self.initialize(requiredCapabilities=["ping", "gateway.does.not.exist"])

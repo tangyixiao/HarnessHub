@@ -22,6 +22,9 @@ from typing import Any, Callable, Iterable, TextIO
 from harness_hub_runtime import __version__
 from harness_hub_runtime.mcp.dto import PROTOCOL_VERSIONS as MCP_PROTOCOL_VERSIONS
 from harness_hub_runtime.mcp.registry import McpConnectionRegistry, McpNotReadyError
+from harness_hub_runtime.models.dto import validate_file_list, validate_repo_id, validate_revision
+from harness_hub_runtime.models.downloads import DuplicateDownloadError
+from harness_hub_runtime.models.info import ModelInfoError
 
 Json = dict[str, Any]
 Handler = Callable[[Json], Any]
@@ -33,6 +36,9 @@ METHOD_NOT_FOUND = -32601
 INTERNAL_ERROR = -32603
 # MCP 自定义码（spec §3.5 / §3.6）：server 非 ready 时 tools.* 用它，message 带 server 名。
 MCP_NOT_READY = -32002
+# F23 models 自定义码（docs/specs/2026-11-09-f23-model-assets-design.md §3.3 / §3.5）。
+MODELS_INFO_FAILED = -32004
+MODELS_DUPLICATE_DOWNLOAD = -32005
 
 # F20 握手协议（docs/specs/2026-11-04-f20-sidecar-lifecycle-design.md §3.1）。
 # 协商只比较主版本（`.` 前第一段）；能力清单是 Rust 侧 requiredCapabilities 的超集校验依据。
@@ -42,7 +48,11 @@ PROTOCOL_VERSION = "1.0"
 # Rust 握手仍只要求 F20 三项；本清单是其超集，故 F20 握手天然继续通过。
 # F22 末尾追加 "mcp.client"（docs/specs/2026-11-09-f22-mcp-client-server-design.md §3.1，
 # 追加不重排既有项）。
-SUPPORTED_CAPABILITIES = [
+# F23 末尾追加 "models.assets"（docs/specs/2026-11-09-f23-model-assets-design.md §3.1，
+# 追加不重排既有项）。
+GATEWAY_STATIC_CAPABILITIES = [
+    # F22 末尾的冻结快照：gateway 块自包含语义（F21/F22 spec §3.1「GATEWAY_STATIC_*
+    # 不动」），F23 起它与 SUPPORTED_CAPABILITIES 解耦（不再是别名）。
     "ping",
     "runtime.info",
     "shutdown",
@@ -55,9 +65,9 @@ SUPPORTED_CAPABILITIES = [
     "tokenization.revision",
     "mcp.client",
 ]
+SUPPORTED_CAPABILITIES = [*GATEWAY_STATIC_CAPABILITIES, "models.assets"]
 
-# gateway.status/providers 直接读这两份静态常量，自包含、不依赖 S1/S2（spec §10）。
-GATEWAY_STATIC_CAPABILITIES = SUPPORTED_CAPABILITIES
+# gateway.status/providers 直接读这两份静态常量，自包含、不依赖各切片（spec §10）。
 GATEWAY_STATIC_METHODS = [
     "ping",
     "runtime.info",
@@ -687,6 +697,127 @@ def mcp_tools_call(params: Json) -> Json:
         raise RpcError(MCP_NOT_READY, str(error)) from error
 
 
+# ---- F23 models 资产平面（docs/specs/2026-11-09-f23-model-assets-design.md §3.2–§3.5）----
+# 注入面（对齐 _MCP_REGISTRY 模式）：测试可整体替换这三个入口，绝不发真实网络。
+
+_MODEL_MANAGER: Any | None = None
+_MODEL_INFO_FETCHER: Any | None = None
+
+
+def _get_model_manager() -> Any:
+    global _MODEL_MANAGER
+    if _MODEL_MANAGER is None:
+        from harness_hub_runtime.models.cache import resolve_download_root
+        from harness_hub_runtime.models.downloads import DownloadManager
+
+        _MODEL_MANAGER = DownloadManager(cache_root=resolve_download_root())
+    return _MODEL_MANAGER
+
+
+def _get_model_info_fetcher() -> Any:
+    """info 抓取器：缺省 `models.info.fetch_repo_info`（stdlib urllib + 10s 超时）。"""
+    global _MODEL_INFO_FETCHER
+    if _MODEL_INFO_FETCHER is None:
+        from harness_hub_runtime.models.info import fetch_repo_info
+
+        _MODEL_INFO_FETCHER = fetch_repo_info
+    return _MODEL_INFO_FETCHER
+
+
+def _cache_root() -> Any:
+    """缓存扫描根（可注入：测试换临时目录）。"""
+    from harness_hub_runtime.models.cache import resolve_cache_root
+
+    return resolve_cache_root()
+
+
+def models_status(params: Json) -> Json:
+    """§3.2 状态快照：SDK 探测（不 import）+ 缓存根 + 进程内下载状态。零网络。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.status 不接受原文内容")
+    manager = _get_model_manager()
+    return {
+        "sdk": {"huggingfaceHub": _sdk_importable("huggingface_hub")},
+        "cacheRoot": str(manager.cache_root),
+        "downloads": manager.states(),
+        "protocolVersion": PROTOCOL_VERSION,
+    }
+
+
+def models_info(params: Json) -> Json:
+    """§3.3 元数据查询（网络，显式）：失败 → -32004 短摘要，不回显响应体。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.info 不接受原文内容")
+    repo_id = params.get("repoId")
+    revision = params.get("revision")
+    try:
+        info = _get_model_info_fetcher()(repo_id, revision)
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+    except ModelInfoError as error:
+        raise RpcError(MODELS_INFO_FAILED, str(error)) from error
+    return info.to_json()
+
+
+def models_cache_list(params: Json) -> Json:
+    """§3.4 缓存只读扫描（零网络）。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.cache.list 不接受原文内容")
+    from harness_hub_runtime.models.cache import scan_cache
+
+    return scan_cache(_cache_root()).to_json()
+
+
+def models_download_start(params: Json) -> Json:
+    """§3.5 显式下载：入口先 fail-closed 校验标识与白名单；预算门 needsConfirmation
+    原样透传；重复 → -32005；元数据失败 → -32004。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.download.start 不接受原文内容")
+    try:
+        repo_id = validate_repo_id(params.get("repoId"))
+        revision = validate_revision(params.get("revision"))
+        files = validate_file_list(params.get("files"))
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+    confirmed = params.get("confirmedDiskBudget") is True
+    try:
+        return _get_model_manager().start(
+            repo_id, revision, files=files, confirmed_disk_budget=confirmed
+        )
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+    except DuplicateDownloadError as error:
+        raise RpcError(MODELS_DUPLICATE_DOWNLOAD, str(error)) from error
+    except ModelInfoError as error:
+        raise RpcError(MODELS_INFO_FAILED, str(error)) from error
+
+
+def models_download_progress(params: Json) -> Json:
+    """§3.5 进度查询：未知 downloadId → -32602（fail-closed）。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.download.progress 不接受原文内容")
+    download_id = params.get("downloadId")
+    if not isinstance(download_id, str) or not download_id:
+        raise RpcError(INVALID_REQUEST, "downloadId 必须是非空字符串")
+    try:
+        return _get_model_manager().progress(download_id)
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+
+
+def models_download_cancel(params: Json) -> Json:
+    """§3.5 取消：幂等置 cancelled；未知 downloadId → -32602。"""
+    params = _require_params(params)
+    _reject_raw_content(params, "models.download.cancel 不接受原文内容")
+    download_id = params.get("downloadId")
+    if not isinstance(download_id, str) or not download_id:
+        raise RpcError(INVALID_REQUEST, "downloadId 必须是非空字符串")
+    try:
+        return _get_model_manager().cancel(download_id)
+    except ValueError as error:
+        raise RpcError(INVALID_REQUEST, str(error)) from error
+
+
 DEFAULT_METHODS: MethodTable = {
     "ping": ping,
     "runtime.info": runtime_info,
@@ -706,6 +837,13 @@ DEFAULT_METHODS: MethodTable = {
     "mcp.disconnect": mcp_disconnect,
     "mcp.tools.list": mcp_tools_list,
     "mcp.tools.call": mcp_tools_call,
+    # F23 追加（docs/specs/2026-11-09-f23-model-assets-design.md §3.1：追加在末尾）。
+    "models.status": models_status,
+    "models.info": models_info,
+    "models.cache.list": models_cache_list,
+    "models.download.start": models_download_start,
+    "models.download.progress": models_download_progress,
+    "models.download.cancel": models_download_cancel,
 }
 
 
