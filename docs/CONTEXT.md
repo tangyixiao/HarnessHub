@@ -249,8 +249,28 @@ Rust 与 Python 之间默认使用 **stdio JSON-RPC**，不为桌面端常驻开
 render_preview/render_apply`、`skills_list`。
       尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
       capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）；
-      配置投影的 codex/gemini 目标；MCP project scope 绑定与 Runtime 连接（F22）；
+      配置投影的 codex/gemini 目标；MCP project scope 绑定（E18 遗留）；
       打包态 Python 运行时资源定位与 PYTHONPATH 注入（F20 仅保证 dev +
       `HARNESS_HUB_PYTHON` / `HARNESS_HUB_RUNTIME_ROOT` 覆盖，留待 F23）；
       ProfileAdapter.activate（切换与托盘 Profile 切换的前置）。
+      MCP Client / Server（F22，v0.5.0）已完成：Python 侧
+      `python/harness_hub_runtime/mcp/` 五模块（dto / protocol / transports /
+      registry）纯 stdlib —— stdio 行分隔 JSON-RPC + Streamable HTTP（urllib POST
+      - SSE 最小解析、`Mcp-Session-Id` 回传与无 session 头一次性重试）+ 连接注册表
+        状态机（connecting/ready/degraded）；Rust 侧 `mcp/policy.rs`（v1 冻结只读策略：
+        tool 名 trim+lowercase 后首段 ∈ 12 个只读动词 → allow，否则 deny；转发恒带
+        `policyDecision: "readonly"` 双保险）、`mcp/client_bridge.rs`（fail-closed
+        decoder + registry ⊕ sidecar 状态合并 + connect/disconnect/tools 编排，
+        manager.call 失败全部收敛为结构化 DTO）、5 个薄命令 `mcp_runtime_*`
+        （永不 IPC Err）；Hub 作为 MCP Server：`mcp/server/` headless stdio
+        （`harness-hub --mcp-serve` argv 分流，绝不初始化 Tauri Builder / webview /
+        托盘，主循环只持 `&Connection`）只读五工具白名单
+        （harness_list / project_list / session_list / usage_summary /
+        activity_timeline，`TOOL_DEFS` 集中注册表防 list/call 漂移），
+        EOF / shutdown 优雅退出、未知工具 isError 信封不崩进程，真机 stdio 证据
+        `src-tauri/tests/mcp_server_stdio.rs`；前端 `McpRuntimeCard` +
+        `normalizeMcp*` fixture tests。红线：env/headers 值单次传递不过 IPC、
+        不落 SQLite、不进日志（spec §2）。
+        规格 `docs/specs/2026-11-09-f22-mcp-client-server-design.md`、
+        计划 `docs/plans/2026-11-09-f22-mcp-client-server.md`。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
