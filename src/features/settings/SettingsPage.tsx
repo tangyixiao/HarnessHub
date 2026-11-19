@@ -47,6 +47,7 @@ import {
   type SkillsReport,
 } from '@/lib/ipc';
 import { McpRuntimeCard } from '@/features/settings/McpRuntimeCard';
+import { ModelAssetsCard } from '@/features/settings/ModelAssetsCard';
 import { ProviderGatewayCard } from '@/features/settings/ProviderGatewayCard';
 
 /**
@@ -86,6 +87,7 @@ export function SettingsPage() {
       <SkillsCard />
       <SidecarCard />
       <ProviderGatewayCard />
+      <ModelAssetsCard />
       <PlaceholderCard
         title="尚未接入"
         icon={Settings}

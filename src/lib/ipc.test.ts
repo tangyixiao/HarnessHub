@@ -37,6 +37,12 @@ import {
   listWorktrees,
   getWorktreeStatus,
   mergeWorktree,
+  modelsCacheList,
+  modelsDownloadCancel,
+  modelsDownloadProgress,
+  modelsDownloadStart,
+  modelsInfo,
+  modelsStatus,
   normalizeActivityTimeline,
   normalizeBackupInfo,
   normalizeCheckItem,
@@ -48,6 +54,13 @@ import {
   normalizeMcpSyncPreview,
   normalizeMcpSyncReport,
   normalizeMergeOutcome,
+  normalizeModelCacheEntries,
+  normalizeModelDownloadCancelOutcome,
+  normalizeModelDownloadProgress,
+  normalizeModelDownloadStart,
+  normalizeModelInfoOutcome,
+  normalizeModelRepoInfo,
+  normalizeModelsStatus,
   normalizePlugin,
   normalizePluginRefreshReport,
   normalizeProfileSummary,
@@ -4186,5 +4199,428 @@ describe('MCP runtime IPC wrappers（F22 §3.8）', () => {
       ok: false,
       error: NOT_IN_TAURI,
     });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * F23 模型资产（docs/specs/2026-11-09-f23-model-assets-design.md §3.2–§3.7）
+ * fixture 与 Rust serde camelCase 契约同形（PR #76 逐键锁定）。
+ * ------------------------------------------------------------------ */
+
+/** `models_status`：sidecar 就绪、SDK 未安装、有一条已完成的 stdlib 下载。 */
+const MODELS_STATUS_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  sdk: { huggingfaceHub: false },
+  cacheRoot: 'C:/Users/t/.cache/huggingface/hub',
+  downloads: [
+    { repoId: 'org/small', revision: 'main', state: 'completed', via: 'stdlib' },
+    { repoId: 'org/lost', state: 'failed' }, // 缺 revision → 丢弃
+    'garbage', // 非对象 → 丢弃
+  ],
+  protocolVersion: '1.0',
+};
+
+const MODELS_STATUS_EXPECTED = {
+  available: true,
+  unavailableReason: null,
+  sdk: { huggingfaceHub: false },
+  cacheRoot: 'C:/Users/t/.cache/huggingface/hub',
+  downloads: [{ repoId: 'org/small', revision: 'main', state: 'completed', via: 'stdlib' }],
+  protocolVersion: '1.0',
+};
+
+/** `models_cache_list`：两个条目（含坏类型字段的安全默认）。 */
+const MODELS_CACHE_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  cacheRoot: 'C:/Users/t/.cache/huggingface/hub',
+  entries: [
+    {
+      repoId: 'org/small',
+      revisions: ['main', 'v1'],
+      sizeBytes: 2150,
+      lastUsedAt: '2026-11-19T00:00:00Z',
+    },
+    { repoId: 'org/bad', revisions: 7, sizeBytes: 'x', lastUsedAt: 9 },
+    null,
+  ],
+};
+
+const MODELS_CACHE_EXPECTED = {
+  available: true,
+  unavailableReason: null,
+  cacheRoot: 'C:/Users/t/.cache/huggingface/hub',
+  entries: [
+    {
+      repoId: 'org/small',
+      revisions: ['main', 'v1'],
+      sizeBytes: 2150,
+      lastUsedAt: '2026-11-19T00:00:00Z',
+    },
+    // 坏类型逐项安全默认：revisions [] / sizeBytes 0 / lastUsedAt null。
+    { repoId: 'org/bad', revisions: [], sizeBytes: 0, lastUsedAt: null },
+  ],
+};
+
+/** `models_info`：完整合法 payload（与 Python to_json 8 键同形）。 */
+const MODELS_INFO_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  info: {
+    repoId: 'org/small',
+    revision: 'v1',
+    sizeBytes: 300,
+    fileCount: 2,
+    files: [
+      { path: 'a.bin', sizeBytes: 100 },
+      { path: 'b.bin', sizeBytes: null },
+    ],
+    filesTruncated: false,
+    gated: false,
+    via: 'api',
+  },
+};
+
+const MODELS_INFO_EXPECTED = MODELS_INFO_PAYLOAD;
+
+/** `models_download_start`：两分支 + unavailable（spec §3.5 / §3.6）。 */
+const MODELS_START_STARTED_PAYLOAD = {
+  state: 'preparing',
+  downloadId: 'dl-1',
+  estimatedBytes: null,
+  reason: null,
+};
+
+const MODELS_START_GATED_PAYLOAD = {
+  state: 'needsConfirmation',
+  downloadId: null,
+  estimatedBytes: 2147483649,
+  reason: null,
+};
+
+const MODELS_START_UNAVAILABLE_PAYLOAD = {
+  state: 'unavailable',
+  downloadId: null,
+  estimatedBytes: null,
+  reason: 'Python sidecar 未就绪，模型下载不可用',
+};
+
+const MODELS_PROGRESS_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  progress: {
+    repoId: 'org/small',
+    revision: 'main',
+    state: 'downloading',
+    bytesDone: 10,
+    bytesTotal: 20,
+    fileDone: 0,
+    fileCount: 1,
+    currentFile: 'a.bin',
+    lastError: null,
+  },
+};
+
+const MODELS_PROGRESS_EXPECTED = MODELS_PROGRESS_PAYLOAD;
+
+const MODELS_CANCEL_PAYLOAD = {
+  available: true,
+  unavailableReason: null,
+  downloadId: 'dl-1',
+  state: 'cancelled',
+};
+
+const MODELS_CANCEL_EXPECTED = MODELS_CANCEL_PAYLOAD;
+
+describe('normalizeModelsStatus（F23 §3.2 DTO fixture）', () => {
+  it('完整 payload round-trip：坏 downloads 条目丢弃，其余逐键保留', () => {
+    expect(normalizeModelsStatus(MODELS_STATUS_PAYLOAD)).toEqual(MODELS_STATUS_EXPECTED);
+  });
+
+  it('坏形状 fail-closed：available 只认 true，SDK/根/列表取安全默认', () => {
+    for (const bad of [null, undefined, 'nope', 42, [], {}]) {
+      expect(normalizeModelsStatus(bad)).toEqual({
+        available: false,
+        unavailableReason: null,
+        sdk: { huggingfaceHub: false },
+        cacheRoot: null,
+        downloads: [],
+        protocolVersion: null,
+      });
+    }
+    // 内层坏类型：sdk 非对象 → false；downloads 非数组 → []。
+    expect(
+      normalizeModelsStatus({ available: true, sdk: 7, downloads: 'nope', cacheRoot: 42 }),
+    ).toEqual({
+      available: true,
+      unavailableReason: null,
+      sdk: { huggingfaceHub: false },
+      cacheRoot: null,
+      downloads: [],
+      protocolVersion: null,
+    });
+  });
+});
+
+describe('normalizeModelCacheEntries（F23 §3.4 DTO fixture）', () => {
+  it('完整 payload round-trip：坏条目丢弃、坏字段安全默认', () => {
+    expect(normalizeModelCacheEntries(MODELS_CACHE_PAYLOAD)).toEqual(MODELS_CACHE_EXPECTED);
+  });
+
+  it('非对象 / 缺 cacheRoot：fail-closed 空清单', () => {
+    expect(normalizeModelCacheEntries('bad')).toEqual({
+      available: false,
+      unavailableReason: null,
+      cacheRoot: null,
+      entries: [],
+    });
+    expect(normalizeModelCacheEntries({ available: true })).toEqual({
+      available: true,
+      unavailableReason: null,
+      cacheRoot: null,
+      entries: [],
+    });
+  });
+});
+
+describe('normalizeModelRepoInfo / normalizeModelInfoOutcome（F23 §3.3 DTO fixture）', () => {
+  it('完整 payload round-trip；未知大小如实 null', () => {
+    expect(normalizeModelRepoInfo(MODELS_INFO_PAYLOAD.info)).toEqual(MODELS_INFO_PAYLOAD.info);
+    expect(normalizeModelInfoOutcome(MODELS_INFO_PAYLOAD)).toEqual(MODELS_INFO_EXPECTED);
+  });
+
+  it('坏形状：info 收敛 null，gated/truncated 只认 true', () => {
+    expect(normalizeModelRepoInfo('bad')).toEqual(null);
+    expect(normalizeModelInfoOutcome({ available: true, info: 'bad' })).toEqual({
+      available: true,
+      unavailableReason: null,
+      info: null,
+    });
+    expect(
+      normalizeModelRepoInfo({ repoId: 'o/r', gated: 'auto', filesTruncated: 1 }),
+    ).toMatchObject({ gated: false, filesTruncated: false, via: '' });
+  });
+});
+
+describe('normalizeModelDownloadStart（F23 §3.5 outcome fixture）', () => {
+  it('preparing / needsConfirmation / unavailable 三分支逐键保留', () => {
+    expect(normalizeModelDownloadStart(MODELS_START_STARTED_PAYLOAD)).toEqual(
+      MODELS_START_STARTED_PAYLOAD,
+    );
+    expect(normalizeModelDownloadStart(MODELS_START_GATED_PAYLOAD)).toEqual(
+      MODELS_START_GATED_PAYLOAD,
+    );
+    expect(normalizeModelDownloadStart(MODELS_START_UNAVAILABLE_PAYLOAD)).toEqual(
+      MODELS_START_UNAVAILABLE_PAYLOAD,
+    );
+  });
+
+  it('未知 state / 非对象：收敛 error，绝不假装已开始', () => {
+    expect(normalizeModelDownloadStart({ state: 'weird' })).toEqual({
+      state: 'error',
+      downloadId: null,
+      estimatedBytes: null,
+      reason: null,
+    });
+    expect(normalizeModelDownloadStart(null)).toMatchObject({ state: 'error' });
+    // estimatedBytes 坏类型 → null（不虚报字节数）。
+    expect(
+      normalizeModelDownloadStart({ state: 'needsConfirmation', estimatedBytes: 'big' }),
+    ).toMatchObject({ state: 'needsConfirmation', estimatedBytes: null });
+  });
+});
+
+describe('normalizeModelDownloadProgress（F23 §3.5 DTO fixture）', () => {
+  it('完整 payload round-trip：9 键逐键锁定', () => {
+    expect(normalizeModelDownloadProgress(MODELS_PROGRESS_PAYLOAD)).toEqual(
+      MODELS_PROGRESS_EXPECTED,
+    );
+  });
+
+  it('坏形状 / 坏字段：progress 收敛 null 或安全默认，bytesTotal 非有限数 → null', () => {
+    expect(normalizeModelDownloadProgress('bad')).toEqual({
+      available: false,
+      unavailableReason: null,
+      progress: null,
+    });
+    expect(
+      normalizeModelDownloadProgress({
+        available: true,
+        progress: { repoId: 'o/r', state: 'downloading', bytesTotal: 'x', lastError: 9 },
+      }),
+    ).toEqual({
+      available: true,
+      unavailableReason: null,
+      progress: {
+        repoId: 'o/r',
+        revision: '',
+        state: 'downloading',
+        bytesDone: 0,
+        bytesTotal: null,
+        fileDone: 0,
+        fileCount: 0,
+        currentFile: null,
+        lastError: null,
+      },
+    });
+  });
+});
+
+describe('normalizeModelDownloadCancelOutcome（F23 §3.5 outcome fixture）', () => {
+  it('完整 payload round-trip；非对象收敛 unavailable 默认', () => {
+    expect(normalizeModelDownloadCancelOutcome(MODELS_CANCEL_PAYLOAD)).toEqual(
+      MODELS_CANCEL_EXPECTED,
+    );
+    expect(normalizeModelDownloadCancelOutcome(7)).toEqual({
+      available: false,
+      unavailableReason: null,
+      downloadId: null,
+      state: null,
+    });
+  });
+});
+
+describe('models IPC wrappers（F23 §3.7）', () => {
+  it('modelsStatus / modelsCacheList 使用零网络的 models_status / models_cache_list 命令名', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MODELS_STATUS_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await modelsStatus();
+
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('models_status');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({});
+    expect(result).toEqual({ ok: true, data: MODELS_STATUS_EXPECTED });
+
+    const cacheSpy = vi.fn(async (..._args: unknown[]) => MODELS_CACHE_PAYLOAD);
+    stubTauri(cacheSpy);
+    const cacheResult = await modelsCacheList();
+    expect(cacheSpy.mock.calls[0]?.[0]).toBe('models_cache_list');
+    expect(cacheResult).toEqual({ ok: true, data: MODELS_CACHE_EXPECTED });
+  });
+
+  it('modelsInfo 使用 models_info 命令名并带 repoId / revision', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MODELS_INFO_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await modelsInfo('org/small', 'v1');
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('models_info');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({ repoId: 'org/small', revision: 'v1' });
+    expect(result).toEqual({ ok: true, data: MODELS_INFO_EXPECTED });
+  });
+
+  it('modelsDownloadStart 使用 models_download_start 命令名并带四参数', async () => {
+    const invokeSpy = vi.fn(async (..._args: unknown[]) => MODELS_START_STARTED_PAYLOAD);
+    stubTauri(invokeSpy);
+
+    const result = await modelsDownloadStart('org/small', 'main', ['a.bin'], false);
+
+    expect(invokeSpy.mock.calls[0]?.[0]).toBe('models_download_start');
+    expect(invokeSpy.mock.calls[0]?.[1]).toEqual({
+      repoId: 'org/small',
+      revision: 'main',
+      files: ['a.bin'],
+      confirmedDiskBudget: false,
+    });
+    expect(result).toEqual({ ok: true, data: MODELS_START_STARTED_PAYLOAD });
+  });
+
+  it('modelsDownloadProgress / modelsDownloadCancel 使用 downloadId 定位', async () => {
+    const progressSpy = vi.fn(async (..._args: unknown[]) => MODELS_PROGRESS_PAYLOAD);
+    stubTauri(progressSpy);
+    const progressResult = await modelsDownloadProgress('dl-1');
+    expect(progressSpy.mock.calls[0]?.[0]).toBe('models_download_progress');
+    expect(progressSpy.mock.calls[0]?.[1]).toEqual({ downloadId: 'dl-1' });
+    expect(progressResult).toEqual({ ok: true, data: MODELS_PROGRESS_EXPECTED });
+
+    const cancelSpy = vi.fn(async (..._args: unknown[]) => MODELS_CANCEL_PAYLOAD);
+    stubTauri(cancelSpy);
+    const cancelResult = await modelsDownloadCancel('dl-1');
+    expect(cancelSpy.mock.calls[0]?.[0]).toBe('models_download_cancel');
+    expect(cancelSpy.mock.calls[0]?.[1]).toEqual({ downloadId: 'dl-1' });
+    expect(cancelResult).toEqual({ ok: true, data: MODELS_CANCEL_EXPECTED });
+  });
+
+  it('命令返回坏形状时 fail-closed 成安全默认，不假装可用 / 已开始', async () => {
+    stubTauri(async (command: string) => {
+      if (command === 'models_status') return {};
+      if (command === 'models_cache_list') return 'bad';
+      if (command === 'models_info') return {};
+      if (command === 'models_download_start') return { state: 'weird' };
+      return 'nope';
+    });
+
+    await expect(modelsStatus()).resolves.toEqual({
+      ok: true,
+      data: {
+        available: false,
+        unavailableReason: null,
+        sdk: { huggingfaceHub: false },
+        cacheRoot: null,
+        downloads: [],
+        protocolVersion: null,
+      },
+    });
+    await expect(modelsCacheList()).resolves.toEqual({
+      ok: true,
+      data: { available: false, unavailableReason: null, cacheRoot: null, entries: [] },
+    });
+    await expect(modelsInfo('o/r', 'main')).resolves.toEqual({
+      ok: true,
+      data: { available: false, unavailableReason: null, info: null },
+    });
+    await expect(modelsDownloadStart('o/r', 'main', null, false)).resolves.toEqual({
+      ok: true,
+      data: { state: 'error', downloadId: null, estimatedBytes: null, reason: null },
+    });
+    await expect(modelsDownloadProgress('dl-1')).resolves.toEqual({
+      ok: true,
+      data: { available: false, unavailableReason: null, progress: null },
+    });
+    await expect(modelsDownloadCancel('dl-1')).resolves.toEqual({
+      ok: true,
+      data: { available: false, unavailableReason: null, downloadId: null, state: null },
+    });
+  });
+
+  it('后端错误原样传出为 ok:false，不透传坏数据', async () => {
+    stubTauri(async () => {
+      throw new Error('models IPC 炸了');
+    });
+    await expect(modelsStatus()).resolves.toEqual({ ok: false, error: 'models IPC 炸了' });
+    await expect(modelsCacheList()).resolves.toEqual({ ok: false, error: 'models IPC 炸了' });
+    await expect(modelsInfo('o/r', 'main')).resolves.toEqual({
+      ok: false,
+      error: 'models IPC 炸了',
+    });
+    await expect(modelsDownloadStart('o/r', 'main', null, false)).resolves.toEqual({
+      ok: false,
+      error: 'models IPC 炸了',
+    });
+    await expect(modelsDownloadProgress('dl-1')).resolves.toEqual({
+      ok: false,
+      error: 'models IPC 炸了',
+    });
+    await expect(modelsDownloadCancel('dl-1')).resolves.toEqual({
+      ok: false,
+      error: 'models IPC 炸了',
+    });
+  });
+
+  it('浏览器模式（无 Tauri runtime）返回 ok:false 且不发调用', async () => {
+    await expect(modelsStatus()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(modelsCacheList()).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(modelsInfo('o/r', 'main')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
+    await expect(modelsDownloadStart('o/r', 'main', null, false)).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(modelsDownloadProgress('dl-1')).resolves.toEqual({
+      ok: false,
+      error: NOT_IN_TAURI,
+    });
+    await expect(modelsDownloadCancel('dl-1')).resolves.toEqual({ ok: false, error: NOT_IN_TAURI });
   });
 });

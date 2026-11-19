@@ -3751,3 +3751,446 @@ export async function mcpRuntimeToolCall(
   }
   return { ok: true, data: normalizeMcpToolCallOutcome(result.data) };
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// F23：模型资产（HF repo metadata / cache discovery / explicit download；
+// spec 2026-11-09-f23-model-assets-design.md §3.2–§3.7）
+//
+// 归一化纪律与 F21/F22 相同：`available` 只认 `true`（「不确定」绝不渲染成可用）；
+// 坏形状 fail-closed 成安全默认，绝不抛异常；`state` 认不出来如实回落。
+// env/token 值绝不经过这一层（spec §2 红线 5）。
+// ────────────────────────────────────────────────────────────────────────────
+
+export type ModelDownloadLifecycleState =
+  'idle' | 'preparing' | 'downloading' | 'completed' | 'failed' | 'cancelled';
+
+export interface ModelsSdkStatus {
+  huggingfaceHub: boolean;
+}
+
+export interface ModelDownloadState {
+  repoId: string;
+  revision: string;
+  state: string;
+  via: string | null;
+}
+
+export interface ModelsStatus {
+  available: boolean;
+  unavailableReason: string | null;
+  sdk: ModelsSdkStatus;
+  cacheRoot: string | null;
+  downloads: ModelDownloadState[];
+  protocolVersion: string | null;
+}
+
+export interface ModelAssetEntry {
+  repoId: string;
+  revisions: string[];
+  sizeBytes: number;
+  lastUsedAt: string | null;
+}
+
+export interface ModelsCacheListing {
+  available: boolean;
+  unavailableReason: string | null;
+  cacheRoot: string | null;
+  entries: ModelAssetEntry[];
+}
+
+export interface ModelFileInfo {
+  path: string;
+  sizeBytes: number | null;
+}
+
+export interface ModelRepoInfo {
+  repoId: string;
+  revision: string;
+  sizeBytes: number | null;
+  fileCount: number;
+  files: ModelFileInfo[];
+  filesTruncated: boolean;
+  gated: boolean;
+  via: string;
+}
+
+export interface ModelInfoOutcome {
+  available: boolean;
+  unavailableReason: string | null;
+  info: ModelRepoInfo | null;
+}
+
+export type ModelDownloadStartState = 'preparing' | 'needsConfirmation' | 'unavailable' | 'error';
+
+export interface ModelDownloadStartOutcome {
+  state: ModelDownloadStartState;
+  downloadId: string | null;
+  estimatedBytes: number | null;
+  reason: string | null;
+}
+
+export interface ModelDownloadProgress {
+  repoId: string;
+  revision: string;
+  state: string;
+  bytesDone: number;
+  bytesTotal: number | null;
+  fileDone: number;
+  fileCount: number;
+  currentFile: string | null;
+  lastError: string | null;
+}
+
+export interface ModelDownloadProgressOutcome {
+  available: boolean;
+  unavailableReason: string | null;
+  progress: ModelDownloadProgress | null;
+}
+
+export interface ModelDownloadCancelOutcome {
+  available: boolean;
+  unavailableReason: string | null;
+  downloadId: string | null;
+  state: string | null;
+}
+
+/** SDK 可用性只认 bool（不确定 = 不可用，不假装可用）。 */
+function normalizeModelsSdkStatus(raw: unknown): ModelsSdkStatus {
+  const huggingfaceHub =
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>).huggingfaceHub === true
+      : false;
+  return { huggingfaceHub };
+}
+
+/** downloads 单项：拿不到 repoId / revision 的条目丢弃（无法定位资产）。 */
+function normalizeModelDownloadState(raw: unknown): ModelDownloadState | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const repoId = typeof source.repoId === 'string' ? source.repoId : '';
+  const revision = typeof source.revision === 'string' ? source.revision : '';
+  if (repoId.length === 0 || revision.length === 0) {
+    return null;
+  }
+  return {
+    repoId,
+    revision,
+    state: typeof source.state === 'string' ? source.state : 'idle',
+    via: typeof source.via === 'string' ? source.via : null,
+  };
+}
+
+/**
+ * 把 `models_status` 的返回收敛成安全的 `ModelsStatus`（spec §3.2）。
+ * `available` 只认 `true`；downloads 坏条目丢弃。
+ */
+export function normalizeModelsStatus(raw: unknown): ModelsStatus {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {
+      available: false,
+      unavailableReason: null,
+      sdk: { huggingfaceHub: false },
+      cacheRoot: null,
+      downloads: [],
+      protocolVersion: null,
+    };
+  }
+  const source = raw as Record<string, unknown>;
+  const downloads: ModelDownloadState[] = [];
+  if (Array.isArray(source.downloads)) {
+    for (const item of source.downloads) {
+      const state = normalizeModelDownloadState(item);
+      if (state !== null) {
+        downloads.push(state);
+      }
+    }
+  }
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    sdk: normalizeModelsSdkStatus(source.sdk),
+    cacheRoot: typeof source.cacheRoot === 'string' ? source.cacheRoot : null,
+    downloads,
+    protocolVersion: typeof source.protocolVersion === 'string' ? source.protocolVersion : null,
+  };
+}
+
+/** cache 单项：拿不到 repoId 的条目丢弃（无法定位资产）。 */
+function normalizeModelAssetEntry(raw: unknown): ModelAssetEntry | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const repoId = typeof source.repoId === 'string' ? source.repoId : '';
+  if (repoId.length === 0) {
+    return null;
+  }
+  return {
+    repoId,
+    revisions: asStringArray(source.revisions),
+    sizeBytes: asNumber(source.sizeBytes),
+    lastUsedAt: typeof source.lastUsedAt === 'string' ? source.lastUsedAt : null,
+  };
+}
+
+/**
+ * 把 `models_cache_list` 的返回收敛成安全的 `ModelsCacheListing`（spec §3.4）。
+ * 非数组整体收敛 []；坏条目丢弃。
+ */
+export function normalizeModelCacheEntries(raw: unknown): ModelsCacheListing {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {
+      available: false,
+      unavailableReason: null,
+      cacheRoot: null,
+      entries: [],
+    };
+  }
+  const source = raw as Record<string, unknown>;
+  const entries: ModelAssetEntry[] = [];
+  if (Array.isArray(source.entries)) {
+    for (const item of source.entries) {
+      const entry = normalizeModelAssetEntry(item);
+      if (entry !== null) {
+        entries.push(entry);
+      }
+    }
+  }
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    cacheRoot: typeof source.cacheRoot === 'string' ? source.cacheRoot : null,
+    entries,
+  };
+}
+
+/** models.info 单文件：路径拿不到的条目丢弃。 */
+function normalizeModelFileInfo(raw: unknown): ModelFileInfo | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const path = typeof source.path === 'string' ? source.path : '';
+  if (path.length === 0) {
+    return null;
+  }
+  return {
+    path,
+    sizeBytes:
+      typeof source.sizeBytes === 'number' && Number.isFinite(source.sizeBytes)
+        ? source.sizeBytes
+        : null,
+  };
+}
+
+/** `models.info` 归一：`via` 认不出来空串（不假装 api）；gated / truncated 只认 true。 */
+export function normalizeModelRepoInfo(raw: unknown): ModelRepoInfo | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const files: ModelFileInfo[] = [];
+  if (Array.isArray(source.files)) {
+    for (const item of source.files) {
+      const file = normalizeModelFileInfo(item);
+      if (file !== null) {
+        files.push(file);
+      }
+    }
+  }
+  return {
+    repoId: typeof source.repoId === 'string' ? source.repoId : '',
+    revision: typeof source.revision === 'string' ? source.revision : '',
+    sizeBytes:
+      typeof source.sizeBytes === 'number' && Number.isFinite(source.sizeBytes)
+        ? source.sizeBytes
+        : null,
+    fileCount: asNumber(source.fileCount),
+    files,
+    filesTruncated: source.filesTruncated === true,
+    gated: source.gated === true,
+    via: typeof source.via === 'string' ? source.via : '',
+  };
+}
+
+/**
+ * 把 `models_info` 的返回收敛成安全的 `ModelInfoOutcome`。
+ * info 形状非法时收敛 `info: null`（UI 显示不可用原因）。
+ */
+export function normalizeModelInfoOutcome(raw: unknown): ModelInfoOutcome {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { available: false, unavailableReason: null, info: null };
+  }
+  const source = raw as Record<string, unknown>;
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    info: normalizeModelRepoInfo(source.info),
+  };
+}
+
+/**
+ * 把 `models_download_start` 的返回收敛成安全的 `ModelDownloadStartOutcome`（spec §3.5）。
+ * `state` 认不出来收敛 `error`（绝不假装已开始）；`downloadId` 只在 preparing 有意义。
+ */
+export function normalizeModelDownloadStart(raw: unknown): ModelDownloadStartOutcome {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { state: 'error', downloadId: null, estimatedBytes: null, reason: null };
+  }
+  const source = raw as Record<string, unknown>;
+  const state =
+    source.state === 'preparing' ||
+    source.state === 'needsConfirmation' ||
+    source.state === 'unavailable' ||
+    source.state === 'error'
+      ? source.state
+      : 'error';
+  return {
+    state,
+    downloadId: typeof source.downloadId === 'string' ? source.downloadId : null,
+    estimatedBytes:
+      typeof source.estimatedBytes === 'number' && Number.isFinite(source.estimatedBytes)
+        ? source.estimatedBytes
+        : null,
+    reason: typeof source.reason === 'string' ? source.reason : null,
+  };
+}
+
+/**
+ * 把 `models_download_progress` 的返回收敛成安全的 `ModelDownloadProgressOutcome`
+ * （spec §3.5：9 键形状；state 认不出来如实回落 'idle'，lastError 如实透传）。
+ */
+export function normalizeModelDownloadProgress(raw: unknown): ModelDownloadProgressOutcome {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { available: false, unavailableReason: null, progress: null };
+  }
+  const source = raw as Record<string, unknown>;
+  let progress: ModelDownloadProgress | null = null;
+  const inner = source.progress;
+  if (typeof inner === 'object' && inner !== null && !Array.isArray(inner)) {
+    const data = inner as Record<string, unknown>;
+    progress = {
+      repoId: typeof data.repoId === 'string' ? data.repoId : '',
+      revision: typeof data.revision === 'string' ? data.revision : '',
+      state: typeof data.state === 'string' ? data.state : 'idle',
+      bytesDone: asNumber(data.bytesDone),
+      bytesTotal:
+        typeof data.bytesTotal === 'number' && Number.isFinite(data.bytesTotal)
+          ? data.bytesTotal
+          : null,
+      fileDone: asNumber(data.fileDone),
+      fileCount: asNumber(data.fileCount),
+      currentFile: typeof data.currentFile === 'string' ? data.currentFile : null,
+      lastError: typeof data.lastError === 'string' ? data.lastError : null,
+    };
+  }
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    progress,
+  };
+}
+
+/** 把 `models_download_cancel` 的返回收敛成安全的 `ModelDownloadCancelOutcome`。 */
+export function normalizeModelDownloadCancelOutcome(raw: unknown): ModelDownloadCancelOutcome {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { available: false, unavailableReason: null, downloadId: null, state: null };
+  }
+  const source = raw as Record<string, unknown>;
+  return {
+    available: source.available === true,
+    unavailableReason:
+      typeof source.unavailableReason === 'string' ? source.unavailableReason : null,
+    downloadId: typeof source.downloadId === 'string' ? source.downloadId : null,
+    state: typeof source.state === 'string' ? source.state : null,
+  };
+}
+
+/** 模型资产状态快照。**纯读**：SDK 探测 + 缓存根 + 进程内下载状态，零网络。 */
+export function modelsStatus(): Promise<IpcResult<ModelsStatus>> {
+  return invokeModelsCommand<ModelsStatus>('models_status', {}, normalizeModelsStatus);
+}
+
+/** 本地 HF 缓存只读清单。**纯读**：零网络。 */
+export function modelsCacheList(): Promise<IpcResult<ModelsCacheListing>> {
+  return invokeModelsCommand<ModelsCacheListing>(
+    'models_cache_list',
+    {},
+    normalizeModelCacheEntries,
+  );
+}
+
+/**
+ * HF repo 元数据查询。**显式网络动作**：调用方必须 confirm（文案明示将访问
+ * huggingface.co）；repoId / revision 的白名单校验在 Rust 与 Python 双保险。
+ */
+export function modelsInfo(repoId: string, revision: string): Promise<IpcResult<ModelInfoOutcome>> {
+  return invokeModelsCommand<ModelInfoOutcome>(
+    'models_info',
+    { repoId, revision },
+    normalizeModelInfoOutcome,
+  );
+}
+
+/**
+ * 显式下载。**显式网络动作，调用方必须 confirm**（> 2 GiB 时 Rust/Python 预算门
+ * 会先返回 `needsConfirmation`，UI 必须带字节数再次确认并以 `confirmedDiskBudget:
+ * true` 重发）。下载目标只允许 HF 缓存根或 `HARNESS_HUB_MODELS_ROOT`（spec §2.2）。
+ */
+export function modelsDownloadStart(
+  repoId: string,
+  revision: string,
+  files: string[] | null,
+  confirmedDiskBudget: boolean,
+): Promise<IpcResult<ModelDownloadStartOutcome>> {
+  return invokeModelsCommand<ModelDownloadStartOutcome>(
+    'models_download_start',
+    {
+      repoId,
+      revision,
+      files,
+      confirmedDiskBudget,
+    },
+    normalizeModelDownloadStart,
+  );
+}
+
+/** 下载进度查询。**纯读**：UI 1s 轮询（仅在卡片展开且有进行中下载时）。 */
+export function modelsDownloadProgress(
+  downloadId: string,
+): Promise<IpcResult<ModelDownloadProgressOutcome>> {
+  return invokeModelsCommand<ModelDownloadProgressOutcome>(
+    'models_download_progress',
+    { downloadId },
+    normalizeModelDownloadProgress,
+  );
+}
+
+/** 取消下载（幂等）。进行中的文件写 `.part`，取消即删除，绝不留半截资产。 */
+export function modelsDownloadCancel(
+  downloadId: string,
+): Promise<IpcResult<ModelDownloadCancelOutcome>> {
+  return invokeModelsCommand<ModelDownloadCancelOutcome>(
+    'models_download_cancel',
+    { downloadId },
+    normalizeModelDownloadCancelOutcome,
+  );
+}
+
+async function invokeModelsCommand<T>(
+  command: string,
+  args: Record<string, unknown>,
+  normalize: (raw: unknown) => T,
+): Promise<IpcResult<T>> {
+  const result = await invokeCommand<unknown>(command, args);
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: normalize(result.data) };
+}
