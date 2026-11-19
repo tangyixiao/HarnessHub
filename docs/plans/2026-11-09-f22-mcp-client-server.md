@@ -18,11 +18,20 @@
 
 合并顺序 S1 → S2 → (S3 ∥ S4)。每切片 PR 附证据表（本地门真实输出 + CI run 链接）。
 
-## 验收对照（§8.3）
+## 验收对照（§8.3）—— 已完成（2026-11-19）
 
-- [ ] MCP Client registry（S1 registry 状态机 + S2 状态快照）
-- [ ] stdio（S1 StdioTransport + S2 connect 接线）
-- [ ] Streamable HTTP（S1 HttpTransport + SSE + session 头）
-- [ ] Tool discovery（S1 tools.list 归一 + S2 IPC + S4 UI）
-- [ ] MCP permission policy（S2 policy.rs 默认只读规则 + deny 结构化返回）
-- [ ] Hub MCP Server 只读工具（S3 五工具 + 真机 stdio 测试）
+- [x] MCP Client registry（S1 registry 状态机 + S2 状态快照；PR #69 / #70）
+- [x] stdio（S1 StdioTransport + S2 connect 接线；PR #69 / #70）
+- [x] Streamable HTTP（S1 HttpTransport + SSE + session 头；PR #69）
+- [x] Tool discovery（S1 tools.list 归一 + S2 IPC + S4 UI；PR #69 / #70 / #68）
+- [x] MCP permission policy（S2 policy.rs 默认只读规则 + deny 结构化返回；PR #70）
+- [x] Hub MCP Server 只读工具（S3 五工具 + 真机 stdio 测试；PR #73）
+
+## 完成记录（2026-11-19）
+
+- 切片 PR：#69（S1 py-mcp-client）→ #70（S2 rust-mcp-bridge）→ #68（S4 web）
+  → #73（S3 hub-mcp-server），全部 CI 绿合并。
+- 合并后真机回归：`cargo test --test sidecar_lifecycle`（6 passed，证明两侧
+  方法表对上）、`pnpm python:test`（290 OK）、`cargo test --test mcp_bridge`
+  （23 passed）、`cargo test --test mcp_server_stdio`（2 passed，含 EOF /
+  shutdown 优雅退出）。
