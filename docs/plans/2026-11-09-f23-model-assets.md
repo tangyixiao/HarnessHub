@@ -13,12 +13,24 @@
 
 合并顺序 S1 → S2 → S3。PR 附证据表。
 
-## 验收对照（§8.5 + CONTEXT 遗留）
+## 验收对照（§8.5 + CONTEXT 遗留）—— 已完成（2026-11-20）
 
-- [ ] HF repo metadata（S1 models.info REST + S2 命令 + S3 UI）
-- [ ] Cache discovery（S1 cache.list 扫描 + S3 只读清单）
-- [ ] Explicit download（S1 download 状态机 + S3 confirm + 磁盘警示）
-- [ ] Revision pinning（revision 必填参数贯穿 info/download/cache）
-- [ ] Transformers experimental runtime（如实降级：永不 import，status 探测如实 false）
-- [ ] Local runtime capability API（models.status SDK 探测）
-- [ ] 打包态 Python 资源定位与 PYTHONPATH 注入（S2 config.rs 探测链 + 单测）
+- [x] HF repo metadata（S1 models.info REST + S2 命令 + S3 UI；PR #75 / #76 / #77）
+- [x] Cache discovery（S1 cache.list 扫描 + S3 只读清单；PR #75 / #77）
+- [x] Explicit download（S1 download 状态机 + S3 confirm + 磁盘警示；PR #75 / #77）
+- [x] Revision pinning（revision 必填参数贯穿 info/download/cache；PR #75 / #76）
+- [x] Transformers experimental runtime（如实降级：永不 import，status 探测如实 false；PR #75 / #77）
+- [x] Local runtime capability API（models.status SDK 探测；PR #75 / #76）
+- [x] 打包态 Python 资源定位与 PYTHONPATH 注入（S2 config.rs 探测链 + 单测；PR #76；
+      PYTHONPATH 注入 F20 已有 `process.rs`，F23 补齐的是打包态探测链）
+
+## 完成记录（2026-11-20）
+
+- 切片 PR：#75（S1 py-model-assets）→ #76（S2 rust + S4 打包定位）→ #77（S3 web），
+  全部 CI 绿合并。
+- 合并后证据：`pnpm python:test`（386 OK，含缓存扫描临时目录 / 预算门 / SDK 缺失
+  降级用例）、`cargo test --lib`（663 passed）、前端 14 文件全过（含 normalize
+  fixture 与预算门二次 confirm 用例）。
+- 已知 flake：CI 两次偶发（`pty::input_tests::worker_failure_*` 竞态、前端轮询
+  计时抖动）——前端抖动已修（等待窗口 3s > 轮询周期 1s），PTY 竞态重跑即绿，
+  属 lifecycle-test-races 计划覆盖范围，与本阶段改动无关。

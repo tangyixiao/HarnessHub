@@ -250,8 +250,6 @@ render_preview/render_apply`、`skills_list`。
       尚未实现：CodeBuddy 与 Copilot 的生命周期；Gemini CLI 本机 usage 数据积累（readiness 而非
       capability）；codex/gemini/opencode 的 replay/resume（参数语义未取证）；
       配置投影的 codex/gemini 目标；MCP project scope 绑定（E18 遗留）；
-      打包态 Python 运行时资源定位与 PYTHONPATH 注入（F20 仅保证 dev +
-      `HARNESS_HUB_PYTHON` / `HARNESS_HUB_RUNTIME_ROOT` 覆盖，留待 F23）；
       ProfileAdapter.activate（切换与托盘 Profile 切换的前置）。
       MCP Client / Server（F22，v0.5.0）已完成：Python 侧
       `python/harness_hub_runtime/mcp/` 五模块（dto / protocol / transports /
@@ -273,4 +271,28 @@ render_preview/render_apply`、`skills_list`。
         不落 SQLite、不进日志（spec §2）。
         规格 `docs/specs/2026-11-09-f22-mcp-client-server-design.md`、
         计划 `docs/plans/2026-11-09-f22-mcp-client-server.md`。
+        HF 模型资产 + 打包态 Python 资源定位（F23，v0.5.0）已完成：
+        Python 侧 `python/harness_hub_runtime/models/` 四模块（dto / info / cache /
+        downloads）零新增依赖 —— REST 元数据（`/api/models/<id>/revision/<rev>`，
+        10s 超时，opener 可注入，失败 `-32004` 短摘要不回显响应体）、缓存只读扫描
+        （`models--<org>--<name>` 布局、单仓 20000 文件上限、entries ≤128）、显式下载
+        状态机（`preparing→downloading→completed/failed/cancelled`；预算门：预估
+      > 2GiB 未确认 → `needsConfirmation`；重复 (repoId,revision) → `-32005`；
+      > `.part` 临时文件取消/失败即删；SDK 缺失退化 stdlib 直下并如实标 `via`）；
+      > 标识校验 `^[A-Za-z0-9._/-]+$` + 拒绝空段/`.`/`..`（Rust 与 Python 双保险）；
+      > RPC 方法表追加 `"models.assets"` + 六方法（`models.status/info/cache.list/
+download.start/progress/cancel`），`GATEWAY_STATIC_*` 改为显式 F22 冻结快照
+      > （追加不再污染 gateway 块）；Rust 侧 `sidecar/models.rs`：9 个 camelCase
+      > Serialize-only DTO + 5 个 fail-closed decoder + 6 个薄命令 `models_*`
+      > （永不 IPC Err，未就绪收敛 unavailable）；`sidecar/config.rs` 打包态探测链
+      > （dev 行为不变：env 覆盖 → dev 根命中 → exe 同级/上级
+      > `resources/python/`（命中 = 其下有 `harness_hub_runtime/__init__.py`）→
+      > 不中如实回落；bundled `python.exe`/`bin/python3` 优先于裸 python）；
+      > 前端 `ModelAssetsCard`（confirm 两道：明示走网络 + HF 缓存目标、预算门二次
+      > confirm 含字节数；进度 1s 轮询仅在卡片展开且有进行中下载时）+
+      > `normalizeModels*` fixture tests。红线：网络只在 info/download 两个显式动作；
+      > 写路径锁死 HF 缓存根或 `HARNESS_HUB_MODELS_ROOT`；HF token 只经环境继承；
+      > transformers/torch 永不进依赖、永不 import。
+      > 规格 `docs/specs/2026-11-09-f23-model-assets-design.md`、
+      > 计划 `docs/plans/2026-11-09-f23-model-assets.md`。
 - 实施计划见 `docs/plans/`；阶段执行顺序见 `docs/ROADMAP.md`（31 阶段）。
