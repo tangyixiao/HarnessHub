@@ -387,10 +387,13 @@ describe('ModelAssetsCard（F23 §3.7）', () => {
     await user.type(screen.getByTestId('model-assets-repo-input'), 'org/small');
     await user.click(screen.getByTestId('model-assets-download'));
 
-    // 进度行渲染：字节、文件、当前文件。
-    await waitFor(() => {
-      expect(screen.getByTestId('model-assets-progress')).toBeInTheDocument();
-    });
+    // 进度行渲染：字节、文件、当前文件。轮询间隔 1s，等待窗口必须宽于一个周期。
+    await waitFor(
+      () => {
+        expect(screen.getByTestId('model-assets-progress')).toBeInTheDocument();
+      },
+      { timeout: 3000 },
+    );
     expect(screen.getByTestId('model-assets-progress')).toHaveTextContent('downloading');
     expect(screen.getByTestId('model-assets-progress')).toHaveTextContent('512 B / 1024 B');
     expect(screen.getByTestId('model-assets-progress')).toHaveTextContent('model.safetensors');
