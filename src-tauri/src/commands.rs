@@ -1349,6 +1349,128 @@ pub fn mcp_runtime_tool_call(
     ))
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// F23：模型资产命令（spec 2026-11-09-f23-model-assets-design.md §3.6）
+//
+// 薄命令纪律（对齐 gateway_status / mcp_runtime_*）：参数白名单校验在 Rust
+// （§2 红线 4），网络与缓存扫描都在 Python；任何失败（sidecar 未就绪 / RPC
+// 失败 / 应答形状非法）都收敛成 `available: false` 的完整降级对象，**永不返回
+// IPC Err**。HF token 只经环境继承进 sidecar 进程，Rust 不读取、不存储、不回显。
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 模型资产状态快照（SDK 探测 + 缓存根 + 进程内下载状态；spec §3.2）。零网络。
+#[tauri::command]
+pub fn models_status(state: State<'_, AppState>) -> Result<crate::sidecar::models::ModelsStatus> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(crate::sidecar::models::ModelsStatus::unavailable(
+            "Python sidecar 未就绪，模型资产状态不可用",
+        ));
+    }
+    Ok(crate::sidecar::models::status(&state.sidecar))
+}
+
+/// 本地 HF 缓存只读清单（spec §3.4）。零网络；失败降级，不返回 Err。
+#[tauri::command]
+pub fn models_cache_list(
+    state: State<'_, AppState>,
+) -> Result<crate::sidecar::models::ModelsCacheListing> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(crate::sidecar::models::ModelsCacheListing::unavailable(
+            "Python sidecar 未就绪，模型缓存清单不可用",
+        ));
+    }
+    Ok(crate::sidecar::models::cache_list(&state.sidecar))
+}
+
+/// HF repo 元数据查询（spec §3.3，**网络、显式**）。参数白名单在 Rust 先校验。
+#[tauri::command]
+pub fn models_info(
+    state: State<'_, AppState>,
+    repo_id: String,
+    revision: String,
+) -> Result<crate::sidecar::models::ModelInfoOutcome> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(crate::sidecar::models::ModelInfoOutcome::unavailable(
+            "Python sidecar 未就绪，模型元数据查询不可用",
+        ));
+    }
+    Ok(crate::sidecar::models::info(
+        &state.sidecar,
+        &repo_id,
+        &revision,
+    ))
+}
+
+/// 显式下载（spec §3.5）。预算确认门在 Python（预估来自 models.info）；
+/// sidecar 未就绪收敛为 `{state: "unavailable"}`（spec §3.6 原文）。
+#[tauri::command]
+pub fn models_download_start(
+    state: State<'_, AppState>,
+    repo_id: String,
+    revision: String,
+    files: Option<Vec<String>>,
+    confirmed_disk_budget: bool,
+) -> Result<crate::sidecar::models::ModelDownloadStartOutcome> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(
+            crate::sidecar::models::ModelDownloadStartOutcome::unavailable(
+                "Python sidecar 未就绪，模型下载不可用",
+            ),
+        );
+    }
+    Ok(crate::sidecar::models::download_start(
+        &state.sidecar,
+        &repo_id,
+        &revision,
+        files.as_ref(),
+        confirmed_disk_budget,
+    ))
+}
+
+/// 下载进度查询（spec §3.5）。失败降级，不返回 Err。
+#[tauri::command]
+pub fn models_download_progress(
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<crate::sidecar::models::ModelDownloadProgressOutcome> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(
+            crate::sidecar::models::ModelDownloadProgressOutcome::unavailable(
+                "Python sidecar 未就绪，下载进度不可用",
+            ),
+        );
+    }
+    Ok(crate::sidecar::models::download_progress(
+        &state.sidecar,
+        &download_id,
+    ))
+}
+
+/// 取消下载（spec §3.5，幂等）。失败降级，不返回 Err。
+#[tauri::command]
+pub fn models_download_cancel(
+    state: State<'_, AppState>,
+    download_id: String,
+) -> Result<crate::sidecar::models::ModelDownloadCancelOutcome> {
+    let sidecar = state.sidecar.status();
+    if sidecar.state != crate::sidecar::dto::SidecarState::Ready {
+        return Ok(
+            crate::sidecar::models::ModelDownloadCancelOutcome::unavailable(
+                "Python sidecar 未就绪，下载取消不可用",
+            ),
+        );
+    }
+    Ok(crate::sidecar::models::download_cancel(
+        &state.sidecar,
+        &download_id,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2325,6 +2447,305 @@ mod tests {
         assert!(
             !object.contains_key("input_schema_keys"),
             "泄漏 snake_case：input_schema_keys"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // F23：models_* 命令的 IPC 形状契约（spec §3.6，AGENTS.md 纪律）。
+    // 与 F22 同款：锁定 DTO 序列化形状 + 命令第一条分支的真冷启动降级路径。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// `ModelsStatus`：available 形状逐键锁定（顶层 6 键 + downloads 4 键），
+    /// unavailable / 冷启动降级形状完整可解析（前端有东西可渲染）。
+    #[test]
+    fn models_status_dto_locks_camel_case_ipc_shape() {
+        use crate::sidecar::models::{ModelDownloadStateDto, ModelsStatus};
+
+        let status = ModelsStatus {
+            available: true,
+            unavailable_reason: None,
+            sdk: crate::sidecar::models::ModelsSdkStatus {
+                huggingface_hub: true,
+            },
+            cache_root: Some("C:/cache/hub".to_string()),
+            downloads: vec![ModelDownloadStateDto {
+                repo_id: "org/name".to_string(),
+                revision: "main".to_string(),
+                state: "completed".to_string(),
+                via: Some("stdlib".to_string()),
+            }],
+            protocol_version: Some("1.0".to_string()),
+        };
+        let value = serde_json::to_value(&status).expect("序列化 ModelsStatus");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "unavailableReason": null,
+                "sdk": {"huggingfaceHub": true},
+                "cacheRoot": "C:/cache/hub",
+                "downloads": [{
+                    "repoId": "org/name", "revision": "main",
+                    "state": "completed", "via": "stdlib"
+                }],
+                "protocolVersion": "1.0"
+            })
+        );
+        let object = value.as_object().expect("ModelsStatus 必须是对象");
+        assert_eq!(object.len(), 6, "顶层恰好 6 键");
+        for leaked in ["unavailable_reason", "cache_root", "protocol_version"] {
+            assert!(
+                !object.contains_key(leaked),
+                "顶层泄漏 snake_case：{leaked}"
+            );
+        }
+
+        // 命令第一条分支的真路径：冷启动 manager（不 spawn）→ unavailable。
+        let manager = cold_sidecar_manager();
+        assert_eq!(
+            manager.status().state,
+            crate::sidecar::dto::SidecarState::Stopped,
+            "冷启动纪律：new() 不 spawn，状态必须是 Stopped"
+        );
+        let unavailable = ModelsStatus::unavailable("Python sidecar 未就绪，模型资产状态不可用");
+        let value = serde_json::to_value(&unavailable).expect("序列化 unavailable");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": false,
+                "unavailableReason": "Python sidecar 未就绪，模型资产状态不可用",
+                "sdk": {"huggingfaceHub": false},
+                "cacheRoot": null,
+                "downloads": [],
+                "protocolVersion": null
+            }),
+            "unavailable 形状必须完整可解析"
+        );
+    }
+
+    /// `ModelsCacheListing` + `ModelAssetEntry`：逐键锁定（顶层 4 键 + entry 4 键）。
+    #[test]
+    fn models_cache_listing_dto_locks_camel_case_ipc_shape() {
+        use crate::sidecar::models::{ModelAssetEntry, ModelsCacheListing};
+
+        let listing = ModelsCacheListing {
+            available: true,
+            unavailable_reason: None,
+            cache_root: Some("/cache/hub".to_string()),
+            entries: vec![ModelAssetEntry {
+                repo_id: "org/name".to_string(),
+                revisions: vec!["main".to_string(), "v1".to_string()],
+                size_bytes: 2150,
+                last_used_at: Some("2026-11-19T00:00:00Z".to_string()),
+            }],
+        };
+        let value = serde_json::to_value(&listing).expect("序列化");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "unavailableReason": null,
+                "cacheRoot": "/cache/hub",
+                "entries": [{
+                    "repoId": "org/name",
+                    "revisions": ["main", "v1"],
+                    "sizeBytes": 2150,
+                    "lastUsedAt": "2026-11-19T00:00:00Z"
+                }]
+            })
+        );
+        let entry = value["entries"][0].as_object().expect("entry 对象");
+        assert_eq!(entry.len(), 4, "entry 恰好 4 键");
+        assert!(
+            !entry.contains_key("repo_id"),
+            "entry 泄漏 snake_case：repo_id"
+        );
+    }
+
+    /// `ModelInfoOutcome`（含嵌套 `ModelRepoInfo` / `ModelFileInfoDto`）：逐键锁定。
+    #[test]
+    fn models_info_outcome_dto_locks_camel_case_ipc_shape() {
+        use crate::sidecar::models::{ModelFileInfoDto, ModelInfoOutcome, ModelRepoInfo};
+
+        let outcome = ModelInfoOutcome {
+            available: true,
+            unavailable_reason: None,
+            info: Some(ModelRepoInfo {
+                repo_id: "org/name".to_string(),
+                revision: "v1".to_string(),
+                size_bytes: Some(300),
+                file_count: 2,
+                files: vec![
+                    ModelFileInfoDto {
+                        path: "a.bin".to_string(),
+                        size_bytes: Some(100),
+                    },
+                    ModelFileInfoDto {
+                        path: "b.bin".to_string(),
+                        size_bytes: None,
+                    },
+                ],
+                files_truncated: false,
+                gated: false,
+                via: "api".to_string(),
+            }),
+        };
+        let value = serde_json::to_value(&outcome).expect("序列化");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "unavailableReason": null,
+                "info": {
+                    "repoId": "org/name", "revision": "v1",
+                    "sizeBytes": 300, "fileCount": 2,
+                    "files": [{"path": "a.bin", "sizeBytes": 100}, {"path": "b.bin", "sizeBytes": null}],
+                    "filesTruncated": false, "gated": false, "via": "api"
+                }
+            })
+        );
+        let info = value["info"].as_object().expect("info 对象");
+        assert_eq!(
+            info.len(),
+            8,
+            "info 恰好 8 键（与 Python to_json 键序一致）"
+        );
+    }
+
+    /// `ModelDownloadStartOutcome`：preparing / needsConfirmation / unavailable 三形状。
+    #[test]
+    fn models_download_start_outcome_locks_three_shapes() {
+        use crate::sidecar::models::ModelDownloadStartOutcome;
+
+        let started = ModelDownloadStartOutcome {
+            state: "preparing".to_string(),
+            download_id: Some("dl-1".to_string()),
+            estimated_bytes: None,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&started).expect("序列化"),
+            serde_json::json!({
+                "state": "preparing", "downloadId": "dl-1",
+                "estimatedBytes": null, "reason": null
+            })
+        );
+
+        let gated = ModelDownloadStartOutcome {
+            state: "needsConfirmation".to_string(),
+            download_id: None,
+            estimated_bytes: Some(2147483649i64),
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&gated).expect("序列化"),
+            serde_json::json!({
+                "state": "needsConfirmation", "downloadId": null,
+                "estimatedBytes": 2147483649i64, "reason": null
+            })
+        );
+
+        let unavailable =
+            ModelDownloadStartOutcome::unavailable("Python sidecar 未就绪，模型下载不可用");
+        let value = serde_json::to_value(&unavailable).expect("序列化");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "state": "unavailable", "downloadId": null,
+                "estimatedBytes": null,
+                "reason": "Python sidecar 未就绪，模型下载不可用"
+            }),
+            "spec §3.6：download 未就绪 → state=unavailable"
+        );
+        let object = value.as_object().expect("outcome 对象");
+        assert_eq!(object.len(), 4, "恰好 4 键");
+        assert!(
+            !object.contains_key("download_id"),
+            "泄漏 snake_case：download_id"
+        );
+    }
+
+    /// `ModelDownloadProgressOutcome`（含嵌套 progress 9 键）与 cancel outcome。
+    #[test]
+    fn models_download_progress_and_cancel_outcomes_lock_shapes() {
+        use crate::sidecar::models::{ModelDownloadProgress, ModelDownloadProgressOutcome};
+
+        let outcome = ModelDownloadProgressOutcome {
+            available: true,
+            unavailable_reason: None,
+            progress: Some(ModelDownloadProgress {
+                repo_id: "org/name".to_string(),
+                revision: "main".to_string(),
+                state: "downloading".to_string(),
+                bytes_done: 10,
+                bytes_total: Some(20),
+                file_done: 0,
+                file_count: 1,
+                current_file: Some("a.bin".to_string()),
+                last_error: None,
+            }),
+        };
+        let value = serde_json::to_value(&outcome).expect("序列化");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "unavailableReason": null,
+                "progress": {
+                    "repoId": "org/name", "revision": "main", "state": "downloading",
+                    "bytesDone": 10, "bytesTotal": 20, "fileDone": 0, "fileCount": 1,
+                    "currentFile": "a.bin", "lastError": null
+                }
+            })
+        );
+        let progress = value["progress"].as_object().expect("progress 对象");
+        assert_eq!(
+            progress.len(),
+            9,
+            "progress 恰好 9 键（与 Python to_json 一致）"
+        );
+        assert!(
+            !progress.contains_key("bytes_done"),
+            "泄漏 snake_case：bytes_done"
+        );
+
+        let cancel = crate::sidecar::models::ModelDownloadCancelOutcome {
+            available: true,
+            unavailable_reason: None,
+            download_id: Some("dl-1".to_string()),
+            state: Some("cancelled".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&cancel).expect("序列化"),
+            serde_json::json!({
+                "available": true, "unavailableReason": null,
+                "downloadId": "dl-1", "state": "cancelled"
+            })
+        );
+    }
+
+    /// decoder 对坏 payload fail-closed：外层非对象 → Err → 编排收敛 unavailable。
+    #[test]
+    fn models_decoders_are_fail_closed_and_orchestration_converges() {
+        use crate::sidecar::models::{
+            cache_list, decode_models_status, download_start, info, status,
+        };
+
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!("x"),
+        ] {
+            assert!(decode_models_status(&bad).is_err(), "外层非对象必须 Err");
+        }
+
+        let manager = cold_sidecar_manager();
+        assert!(!status(&manager).available);
+        assert!(!cache_list(&manager).available);
+        assert!(!info(&manager, "org/name", "main").available);
+        assert_eq!(
+            download_start(&manager, "org/name", "main", None, false).state,
+            "unavailable"
         );
     }
 }
