@@ -12,6 +12,8 @@
 pub mod client_bridge;
 pub mod policy;
 pub mod registry;
+/// F22 S3：Hub 自身作为 MCP Server（headless stdio，只读工具白名单）。
+pub mod server;
 pub mod sync;
 
 use serde::{Deserialize, Serialize};
