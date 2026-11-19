@@ -200,6 +200,98 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 应用标识（F22 S3：headless MCP server 模式的数据目录归属）。
+///
+/// 必须与 `tauri.conf.json` 的 `identifier` 一致 —— 由下方的契约测试锁死，
+/// 防止两处各自漂移（spec §4.1）。
+pub const APP_IDENTIFIER: &str = "dev.harnesshub.desktop";
+
+/// `HARNESS_HUB_DB_PATH` 环境变量：显式覆盖主库路径（集成测试 / 嵌入式调用用）。
+const DB_PATH_ENV: &str = "HARNESS_HUB_DB_PATH";
+
+/// 解析 headless 模式的主库路径（spec §4.1）：
+/// `HARNESS_HUB_DB_PATH` 显式覆盖；否则按平台取应用数据目录
+/// （Windows `%APPDATA%` / Linux `$XDG_DATA_HOME` 或 `~/.local/share` /
+/// macOS `~/Library/Application Support`）。
+fn mcp_db_path() -> Result<std::path::PathBuf, String> {
+    if let Some(override_path) = std::env::var_os(DB_PATH_ENV).filter(|value| !value.is_empty()) {
+        return Ok(std::path::PathBuf::from(override_path));
+    }
+
+    let base = match std::env::consts::OS {
+        "windows" => {
+            let appdata = std::env::var_os("APPDATA")
+                .ok_or_else(|| "APPDATA 未设置，无法定位数据库目录".to_string())?;
+            std::path::PathBuf::from(appdata).join(APP_IDENTIFIER)
+        }
+        "macos" => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| "HOME 未设置，无法定位数据库目录".to_string())?;
+            std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_IDENTIFIER)
+        }
+        _ => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| "HOME 未设置，无法定位数据库目录".to_string())?;
+            let data_home = std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(home).join(".local").join("share"));
+            data_home.join(APP_IDENTIFIER)
+        }
+    };
+
+    Ok(base.join(DATABASE_FILE_NAME))
+}
+
+/// F22 S3：`harness-hub --mcp-serve` 的进程入口（spec §4.1）。
+///
+/// 同步 stdio 循环（不需要 tokio）：DB 打不开 → eprintln + 非 0 退出，
+/// **绝不假装可用**；成功 → [`crate::mcp::server::run_stdio`] 循环 → 0。
+/// 本函数绝不初始化 Tauri Builder / webview / 托盘。
+pub fn run_mcp_server() -> i32 {
+    let db_path = match mcp_db_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("harness-hub --mcp-serve：数据库路径解析失败：{error}");
+            return 2;
+        }
+    };
+
+    // 与桌面端 run() 同纪律：目录不存在就创建（SQLite 不会自动建目录）。
+    if let Some(parent) = db_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "harness-hub --mcp-serve：数据目录创建失败（{}）：{error}",
+                parent.display()
+            );
+            return 2;
+        }
+    }
+
+    let database = match Database::open(&db_path) {
+        Ok(database) => database,
+        Err(error) => {
+            eprintln!(
+                "harness-hub --mcp-serve：数据库打开失败（{}）：{error}；拒绝以不可用状态继续",
+                db_path.display()
+            );
+            return 1;
+        }
+    };
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match crate::mcp::server::run_stdio(database.connection(), stdin.lock(), stdout.lock()) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("harness-hub --mcp-serve：stdio 读写失败，退出：{error}");
+            1
+        }
+    }
+}
+
 /// 启动桌面应用。
 pub fn run() {
     tauri::Builder::default()
@@ -367,4 +459,16 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod mcp_server_contract_tests {
+    /// 防漂移契约（spec §4.1）：headless 模式按 `APP_IDENTIFIER` 定位数据库目录，
+    /// 它必须与 Tauri 的应用标识一致，否则 GUI 与 `--mcp-serve` 会各看一个库。
+    #[test]
+    fn app_identifier_matches_tauri_conf() {
+        let conf = include_str!("../tauri.conf.json");
+        let value: serde_json::Value = serde_json::from_str(conf).expect("tauri.conf.json 可解析");
+        assert_eq!(value["identifier"], super::APP_IDENTIFIER);
+    }
 }

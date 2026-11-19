@@ -10,6 +10,8 @@
 //!   `env` / `headers` 等一律保留（绝不把 `<redacted>` 写进真配置）。
 
 pub mod registry;
+/// F22 S3：Hub 自身作为 MCP Server（headless stdio，只读工具白名单）。
+pub mod server;
 pub mod sync;
 
 use serde::{Deserialize, Serialize};
