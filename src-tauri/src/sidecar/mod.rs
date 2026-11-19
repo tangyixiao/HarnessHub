@@ -7,6 +7,8 @@
 //!
 //! - [`dto`]：跨 Tauri IPC 的 DTO，**所有键名由 serialization contract test 锁定**。
 //! - [`config`]：`SidecarConfig` 与协议常量。
+//! - [`gateway`]：F21 Provider Gateway 的 DTO + fail-closed decoder。
+//! - [`models`]：F23 模型资产的 DTO + fail-closed decoder + sidecar 编排。
 //! - [`process`]：子进程 spawn / 握手 / 调用 / 关闭（复用 `crate::plugins::rpc`）。
 //! - [`manager`]：状态机、降级与崩溃恢复，**四个状态方法绝不返回 Err**。
 //!
@@ -17,4 +19,5 @@ pub mod config;
 pub mod dto;
 pub mod gateway;
 pub mod manager;
+pub mod models;
 pub mod process;
